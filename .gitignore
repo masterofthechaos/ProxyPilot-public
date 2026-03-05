@@ -1,0 +1,23 @@
+# Xcode
+/ProxyPilot.xcodeproj/project.xcworkspace/xcuserdata
+/ProxyPilot.xcodeproj/xcuserdata
+*.xcuserstate
+/build
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+
+# Build artifacts
+DMGs/
+*.dmg
+
+# Worktrees
+.worktrees/
+
+# Claude Code
+.claude/

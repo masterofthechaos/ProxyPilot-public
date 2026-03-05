@@ -1,0 +1,62 @@
+name: ProxyPilot
+# ── CHANGE bundleIdPrefix to your own reverse-domain identifier ──────
+# See BUILDING.md for instructions.
+options:
+  bundleIdPrefix: com.yourname
+  deploymentTarget:
+    macOS: "15.0"
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.8.0"
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    MARKETING_VERSION: "1.4.7"
+    CURRENT_PROJECT_VERSION: "40"
+targets:
+  ProxyPilot-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: ProxyPilot
+    resources:
+      - path: ProxyPilot/Assets.xcassets
+      - path: ProxyPilot/Localizable.xcstrings
+      - path: ProxyPilot/Resources/verified-models.json
+    dependencies:
+      - package: Sparkle
+    info:
+      path: ProxyPilot/Info.plist
+      properties:
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSHumanReadableCopyright: ""
+        NSHumanReadableDescription: "Local OpenAI-compatible proxy for Xcode Intelligence and Agent Mode. Supports z.ai, OpenRouter, OpenAI, Google, xAI, Chutes, Groq with per-provider API keys."
+        NSSupportsAutomaticTermination: true
+        NSSupportsSuddenTermination: true
+        # ── CHANGE these to your own Sparkle + analytics keys ────────
+        # See BUILDING.md for instructions. Remove lines you don't use.
+        SUFeedURL: "https://yoursite.com/appcast.xml"
+        SUPublicEDKey: "YOUR_SPARKLE_EDDSA_PUBLIC_KEY"
+        POSTHOG_API_KEY: "YOUR_POSTHOG_API_KEY_OR_REMOVE"
+    settings:
+      base:
+        PRODUCT_NAME: ProxyPilot
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourname.ProxyPilot
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  ProxyPilotTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: ProxyPilotTests
+    dependencies:
+      - target: ProxyPilot-macOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourname.ProxyPilotTests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ProxyPilot.app/Contents/MacOS/ProxyPilot"
+        BUNDLE_LOADER: "$(TEST_HOST)"

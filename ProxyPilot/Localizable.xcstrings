@@ -1,0 +1,1539 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "(no log lines yet)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "（暂无日志）" }
+        }
+      }
+    },
+    "Advanced" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "高级" }
+        }
+      }
+    },
+    "Another process is using this port. Switch to 4001 or free the current port." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "其他进程正在使用此端口。请切换到 4001 或释放当前端口。" }
+        }
+      }
+    },
+    "Anthropic translator mode:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "Anthropic 翻译器模式：" }
+        }
+      }
+    },
+    "Archive:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "归档：" }
+        }
+      }
+    },
+    "Auto-Recovery Failed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "自动恢复失败" }
+        }
+      }
+    },
+    "Auto-recovery attempt" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "自动恢复尝试" }
+        }
+      }
+    },
+    "Auto-restart is disabled. Start the proxy manually or enable auto-restart." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "自动重启已禁用。请手动启动代理或启用自动重启。" }
+        }
+      }
+    },
+    "Auto-restart proxy on unexpected stop" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理意外停止时自动重启" }
+        }
+      }
+    },
+    "Automatically start ProxyPilot when you log in." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "登录时自动启动 ProxyPilot。" }
+        }
+      }
+    },
+    "Authorization failed. Verify credentials and provider settings." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "授权失败。请验证凭据和供应商设置。" }
+        }
+      }
+    },
+    "Built-In Proxy Did Not Start" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "内置代理未启动" }
+        }
+      }
+    },
+    "Built-In Proxy Requires Localhost" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "内置代理需要 Localhost" }
+        }
+      }
+    },
+    "Built-in Host Restriction" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "内置代理主机限制" }
+        }
+      }
+    },
+    "Built-in mode is safely scoped to localhost." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "内置模式安全限定于 localhost。" }
+        }
+      }
+    },
+    "Built-in proxy did not start (no listener on" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "内置代理未启动（无法监听" }
+        }
+      }
+    },
+    "Built-in proxy did not start. Status:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "内置代理未启动。状态：" }
+        }
+      }
+    },
+    "Built-in proxy only supports 127.0.0.1 or localhost." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "内置代理仅支持 127.0.0.1 或 localhost。" }
+        }
+      }
+    },
+    "Built-in proxy only supports http://127.0.0.1:<port> or http://localhost:<port>." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "内置代理仅支持 http://127.0.0.1:<port> 或 http://localhost:<port>。" }
+        }
+      }
+    },
+    "Built-in proxy serves `GET /v1/models`, forwards `POST /v1/chat/completions`, and translates `POST /v1/messages`." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "内置代理提供 `GET /v1/models`，转发 `POST /v1/chat/completions`，并翻译 `POST /v1/messages`。" }
+        }
+      }
+    },
+    "Built-in proxy started, but upstream requests will fail until you set Upstream API Key." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "内置代理已启动，但上游请求将失败，直到您设置上游 API 密钥。" }
+        }
+      }
+    },
+    "Cancel" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "取消" }
+        }
+      }
+    },
+    "Change" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "更改" }
+        }
+      }
+    },
+    "Check for Updates" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "检查更新" }
+        }
+      }
+    },
+    "Check for Updates..." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "检查更新…" }
+        }
+      }
+    },
+    "Checklist" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "检查清单" }
+        }
+      }
+    },
+    "Clear" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "清除" }
+        }
+      }
+    },
+    "Complete Setup" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "完成设置" }
+        }
+      }
+    },
+    "Continue Anyway" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "仍然继续" }
+        }
+      }
+    },
+    "Copied verification commands." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "已复制验证命令。" }
+        }
+      }
+    },
+    "Copied!" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "已复制！" }
+        }
+      }
+    },
+    "Copy Commands" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "复制命令" }
+        }
+      }
+    },
+    "Copy Recovery Commands" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "复制恢复命令" }
+        }
+      }
+    },
+    "Copy Support Summary" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "复制支持摘要" }
+        }
+      }
+    },
+    "Could not delete Local Proxy Password:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无法删除本地代理密码：" }
+        }
+      }
+    },
+    "Could not delete upstream API key:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无法删除上游 API 密钥：" }
+        }
+      }
+    },
+    "Could not export diagnostics:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无法导出诊断：" }
+        }
+      }
+    },
+    "Could not save Local Proxy Password to Keychain:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无法保存本地代理密码到钥匙串：" }
+        }
+      }
+    },
+    "Could not save your upstream API key to Keychain:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无法保存上游 API 密钥到钥匙串：" }
+        }
+      }
+    },
+    "Default is Hardened mode. Enable only for A/B debugging." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "默认为强化模式。仅在 A/B 调试时启用。" }
+        }
+      }
+    },
+    "Default off. Local event logs are always recorded for support diagnostics." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "默认关闭。本地事件日志始终记录用于支持诊断。" }
+        }
+      }
+    },
+    "Degraded" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "降级" }
+        }
+      }
+    },
+    "Delete" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "删除" }
+        }
+      }
+    },
+    "Diagnostics Export Failed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "诊断导出失败" }
+        }
+      }
+    },
+    "DIY Setup" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "手动配置" }
+        }
+      }
+    },
+    "Effective routed model:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "实际路由模型：" }
+        }
+      }
+    },
+    "Endpoint-style URLs are normalized automatically." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "端点格式 URL 会自动规范化。" }
+        }
+      }
+    },
+    "Enter value" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "输入值" }
+        }
+      }
+    },
+    "Export Diagnostics" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "导出诊断" }
+        }
+      }
+    },
+    "Failed to Install Xcode Agent Config" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "安装 Xcode Agent 配置失败" }
+        }
+      }
+    },
+    "Failed to Remove Xcode Agent Config" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "移除 Xcode Agent 配置失败" }
+        }
+      }
+    },
+    "Failed to Restart Proxy" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理重启失败" }
+        }
+      }
+    },
+    "Failed to Start Proxy" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理启动失败" }
+        }
+      }
+    },
+    "Failed to Stop Proxy" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理停止失败" }
+        }
+      }
+    },
+    "Fetch Live Models" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "获取实时模型" }
+        }
+      }
+    },
+    "Fetch models from the upstream provider to keep model selection in sync." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "从上游供应商获取模型以保持模型选择同步。" }
+        }
+      }
+    },
+    "Fetch Proxy Models" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "获取代理模型" }
+        }
+      }
+    },
+    "Fix" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "修复" }
+        }
+      }
+    },
+    "Hardened" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "强化" }
+        }
+      }
+    },
+    "I added the provider in Xcode" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "我已在 Xcode 中添加供应商" }
+        }
+      }
+    },
+    "Install" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "安装" }
+        }
+      }
+    },
+    "Invalid Port" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无效端口" }
+        }
+      }
+    },
+    "Invalid Proxy Port" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无效的代理端口" }
+        }
+      }
+    },
+    "Invalid Proxy URL" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无效的代理 URL" }
+        }
+      }
+    },
+    "Invalid Upstream Base URL" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无效的上游基础 URL" }
+        }
+      }
+    },
+    "Invalid Upstream Provider Default" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无效的上游供应商默认值" }
+        }
+      }
+    },
+    "Invalid upstream base URL." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无效的上游基础 URL。" }
+        }
+      }
+    },
+    "is already in use. Choose another port (for example 4001)." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "已被占用。请选择其他端口（例如 4001）。" }
+        }
+      }
+    },
+    "is already in use." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "已被占用。" }
+        }
+      }
+    },
+    "is available." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "可用。" }
+        }
+      }
+    },
+    "Issue" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "问题" }
+        }
+      }
+    },
+    "Keys (Keychain)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "密钥（钥匙串）" }
+        }
+      }
+    },
+    "Keep & Quit" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "保留并退出" }
+        }
+      }
+    },
+    "Last run:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上次运行：" }
+        }
+      }
+    },
+    "Launch at Login" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "登录时启动" }
+        }
+      }
+    },
+    "Launch at Login Failed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "登录时启动失败" }
+        }
+      }
+    },
+    "Launch at Login could not be updated:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "登录时启动无法更新：" }
+        }
+      }
+    },
+    "Legacy Fallback" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "旧版回退" }
+        }
+      }
+    },
+    "LiteLLM Mode (Advanced)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "LiteLLM 模式（高级）" }
+        }
+      }
+    },
+    "LiteLLM mode requires scripts in `~/tools/litellm/`." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "LiteLLM 模式需要 `~/tools/litellm/` 中的脚本。" }
+        }
+      }
+    },
+    "LiteLLM Scripts" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "LiteLLM 脚本" }
+        }
+      }
+    },
+    "LiteLLM scripts are missing. Switch to built-in mode or install scripts." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "缺少 LiteLLM 脚本。请切换到内置模式或安装脚本。" }
+        }
+      }
+    },
+    "Local OpenAI-compatible proxy for Xcode Intelligence. Supports streaming and Anthropic API translation." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "Xcode Intelligence 本地 OpenAI 兼容代理。支持流式传输和 Anthropic API 翻译。" }
+        }
+      }
+    },
+    "Local Proxy Password" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "本地代理密码" }
+        }
+      }
+    },
+    "Local Proxy Password (Master Key)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "本地代理密码（主密钥）" }
+        }
+      }
+    },
+    "Local Proxy Password is set in Keychain." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "本地代理密码已保存到钥匙串。" }
+        }
+      }
+    },
+    "Local Proxy Password Missing" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "缺少本地代理密码" }
+        }
+      }
+    },
+    "Local proxy password saved in Keychain" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "本地代理密码已保存到钥匙串" }
+        }
+      }
+    },
+    "Log" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "日志" }
+        }
+      }
+    },
+    "Missing" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "缺失" }
+        }
+      }
+    },
+    "Missing Local Proxy Password in Keychain." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "钥匙串中缺少本地代理密码。" }
+        }
+      }
+    },
+    "Missing upstream API key in Keychain." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "钥匙串中缺少上游 API 密钥。" }
+        }
+      }
+    },
+    "Model" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "模型" }
+        }
+      }
+    },
+    "Model Fetch Failed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "模型获取失败" }
+        }
+      }
+    },
+    "model:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "模型：" }
+        }
+      }
+    },
+    "Models (Upstream Provider)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "模型（上游供应商）" }
+        }
+      }
+    },
+    "No Models Selected" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "未选择模型" }
+        }
+      }
+    },
+    "Open micah.chat" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "打开 micah.chat" }
+        }
+      }
+    },
+    "Open README" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "打开 README" }
+        }
+      }
+    },
+    "Open Settings..." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "打开设置…" }
+        }
+      }
+    },
+    "Port" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "端口" }
+        }
+      }
+    },
+    "Port appears to be in use. Switch to 4001 or stop the process using the current port." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "端口似乎已被占用。请切换到 4001 或停止占用当前端口的进程。" }
+        }
+      }
+    },
+    "Preflight" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "预检" }
+        }
+      }
+    },
+    "Proceed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "继续" }
+        }
+      }
+    },
+    "Provider default upstream URL is invalid. Reset to a valid preset and retry." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "供应商默认上游 URL 无效。请重置为有效预设后重试。" }
+        }
+      }
+    },
+    "Proxy" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理" }
+        }
+      }
+    },
+    "Proxy Did Not Start" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理未启动" }
+        }
+      }
+    },
+    "Proxy did not respond on" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理在以下地址无响应：" }
+        }
+      }
+    },
+    "Proxy did not start. Check logs in the Log section for details." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理未启动。请在日志部分查看详情。" }
+        }
+      }
+    },
+    "Proxy is running" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理正在运行" }
+        }
+      }
+    },
+    "Proxy Port Already In Use" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理端口已被占用" }
+        }
+      }
+    },
+    "Proxy Port Availability" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理端口可用性" }
+        }
+      }
+    },
+    "Proxy port must be between 1 and 65535." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理端口必须在 1 到 65535 之间。" }
+        }
+      }
+    },
+    "Proxy Running" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理运行中" }
+        }
+      }
+    },
+    "Proxy Started Without Upstream Key" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理已启动但缺少上游密钥" }
+        }
+      }
+    },
+    "Proxy Stopped" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理已停止" }
+        }
+      }
+    },
+    "Proxy Stopped Unexpectedly" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理意外停止" }
+        }
+      }
+    },
+    "Proxy stopped unexpectedly and auto-restart is disabled." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理意外停止，且自动重启已禁用。" }
+        }
+      }
+    },
+    "Proxy stopped unexpectedly and automatic recovery exhausted all retries." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理意外停止，自动恢复已用尽所有重试次数。" }
+        }
+      }
+    },
+    "Proxy URL" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理 URL" }
+        }
+      }
+    },
+    "Proxy URL could not be parsed." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无法解析代理 URL。" }
+        }
+      }
+    },
+    "Proxy URL looks valid" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理 URL 格式正确" }
+        }
+      }
+    },
+    "Proxy URL must use http format, for example http://127.0.0.1:4000." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "代理 URL 必须使用 http 格式，例如 http://127.0.0.1:4000。" }
+        }
+      }
+    },
+    "ProxyPilot" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "ProxyPilot" }
+        }
+      }
+    },
+    "ProxyPilot Needs to Make a Reversible System Change" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "ProxyPilot 需要进行一项可逆的系统更改" }
+        }
+      }
+    },
+    "ProxyPilot is about to modify system files on your behalf. Please note that while these changes are reversible, quitting or uninstalling ProxyPilot will not revert them automatically." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "ProxyPilot 即将代您修改系统文件。请注意，这些更改虽然可逆，但退出或卸载 ProxyPilot 不会自动还原。" }
+        }
+      }
+    },
+    "ProxyPilot runs a local proxy at `127.0.0.1` so Xcode can use upstream models. Complete this setup once before first use." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "ProxyPilot 在 `127.0.0.1` 运行本地代理，使 Xcode 可以使用上游模型。首次使用前请完成此设置。" }
+        }
+      }
+    },
+    "queued in" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "排队中" }
+        }
+      }
+    },
+    "Quit ProxyPilot" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "退出 ProxyPilot" }
+        }
+      }
+    },
+    "Recovering" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "恢复中" }
+        }
+      }
+    },
+    "Refresh" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "刷新" }
+        }
+      }
+    },
+    "Remove" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "移除" }
+        }
+      }
+    },
+    "Remove & Quit" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "移除并退出" }
+        }
+      }
+    },
+    "Removed. Restart Xcode to revert." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "已移除。请重启 Xcode 以恢复。" }
+        }
+      }
+    },
+    "Request exceeded the configured size limits." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "请求超出了配置的大小限制。" }
+        }
+      }
+    },
+    "Request Timed Out" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "请求超时" }
+        }
+      }
+    },
+    "Request Too Large" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "请求过大" }
+        }
+      }
+    },
+    "Required LiteLLM scripts were found." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "已找到必需的 LiteLLM 脚本。" }
+        }
+      }
+    },
+    "Require auth for local proxy (advanced)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "要求本地代理认证（高级）" }
+        }
+      }
+    },
+    "Reset Proxy URL" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "重置代理 URL" }
+        }
+      }
+    },
+    "Reset to" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "重置为" }
+        }
+      }
+    },
+    "Reset Upstream URL" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "重置上游 URL" }
+        }
+      }
+    },
+    "Resolve the failing preflight checks or continue anyway." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "请解决失败的预检项目，或选择仍然继续。" }
+        }
+      }
+    },
+    "Restart" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "重启" }
+        }
+      }
+    },
+    "Restart Proxy" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "重启代理" }
+        }
+      }
+    },
+    "Retry Start" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "重试启动" }
+        }
+      }
+    },
+    "Route Claude Agent in Xcode through ProxyPilot. Translates Anthropic /v1/messages to OpenAI format for upstream providers." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "通过 ProxyPilot 路由 Xcode 中的 Claude Agent。将 Anthropic /v1/messages 翻译为上游供应商的 OpenAI 格式。" }
+        }
+      }
+    },
+    "Run Preflight" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "运行预检" }
+        }
+      }
+    },
+    "Run preflight checks to validate setup before starting." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "启动前运行预检以验证设置。" }
+        }
+      }
+    },
+    "Running" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "运行中" }
+        }
+      }
+    },
+    "Running (Recovered)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "运行中（已恢复）" }
+        }
+      }
+    },
+    "Save" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "保存" }
+        }
+      }
+    },
+    "Saved" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "已保存" }
+        }
+      }
+    },
+    "Select at least one model before syncing." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "同步前请至少选择一个模型。" }
+        }
+      }
+    },
+    "selected" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "已选择" }
+        }
+      }
+    },
+    "Set" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "设置" }
+        }
+      }
+    },
+    "Set Local Proxy Password" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "设置本地代理密码" }
+        }
+      }
+    },
+    "Set Local Proxy Password in Keys (Keychain), then start the proxy again." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "请在密钥（钥匙串）中设置本地代理密码，然后重新启动代理。" }
+        }
+      }
+    },
+    "Set Local Proxy Password in Keys (Keychain), then try again." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "请在密钥（钥匙串）中设置本地代理密码，然后重试。" }
+        }
+      }
+    },
+    "Set Upstream API Key" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "设置上游 API 密钥" }
+        }
+      }
+    },
+    "Set your upstream API key in Keys (Keychain)." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "请在密钥（钥匙串）中设置上游 API 密钥。" }
+        }
+      }
+    },
+    "Setup Incomplete" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "设置未完成" }
+        }
+      }
+    },
+    "Share anonymous diagnostics telemetry" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "分享匿名诊断遥测" }
+        }
+      }
+    },
+    "Share anonymous diagnostics telemetry (optional)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "分享匿名诊断遥测（可选）" }
+        }
+      }
+    },
+    "Show model metadata" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "显示模型元数据" }
+        }
+      }
+    },
+    "Skipped (built-in mode enabled)." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "已跳过（内置模式已启用）。" }
+        }
+      }
+    },
+    "Source:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "来源：" }
+        }
+      }
+    },
+    "Start" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "启动" }
+        }
+      }
+    },
+    "Start Proxy" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "启动代理" }
+        }
+      }
+    },
+    "Startup" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "启动设置" }
+        }
+      }
+    },
+    "Status" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "状态" }
+        }
+      }
+    },
+    "Stop" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "停止" }
+        }
+      }
+    },
+    "Stop Proxy" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "停止代理" }
+        }
+      }
+    },
+    "Stopped" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "已停止" }
+        }
+      }
+    },
+    "Support" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "支持" }
+        }
+      }
+    },
+    "Sync Failed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "同步失败" }
+        }
+      }
+    },
+    "Sync To Proxy + Restart" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "同步到代理 + 重启" }
+        }
+      }
+    },
+    "Test Upstream Response" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "测试上游响应" }
+        }
+      }
+    },
+    "The request timed out. Check network connectivity and upstream provider availability." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "请求超时。请检查网络连接和上游供应商可用性。" }
+        }
+      }
+    },
+    "The request timed out. Retry after checking your network and provider status." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "请求超时。请检查网络和供应商状态后重试。" }
+        }
+      }
+    },
+    "These are the exact commands ProxyPilot runs on your behalf." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "以下是 ProxyPilot 代您执行的确切命令。" }
+        }
+      }
+    },
+    "Unable to Delete Local Proxy Password" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无法删除本地代理密码" }
+        }
+      }
+    },
+    "Unable to Delete Upstream API Key" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无法删除上游 API 密钥" }
+        }
+      }
+    },
+    "Unable to Save Local Proxy Password" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无法保存本地代理密码" }
+        }
+      }
+    },
+    "Unable to Save Upstream API Key" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "无法保存上游 API 密钥" }
+        }
+      }
+    },
+    "Unauthorized" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "未授权" }
+        }
+      }
+    },
+    "Upstream API Base URL" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游 API 基础 URL" }
+        }
+      }
+    },
+    "Upstream API base URL" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游 API 基础 URL" }
+        }
+      }
+    },
+    "Upstream API base URL is invalid." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游 API 基础 URL 无效。" }
+        }
+      }
+    },
+    "Upstream API base URL is valid." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游 API 基础 URL 有效。" }
+        }
+      }
+    },
+    "Upstream API Key" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游 API 密钥" }
+        }
+      }
+    },
+    "Upstream API key is set in Keychain." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游 API 密钥已保存到钥匙串。" }
+        }
+      }
+    },
+    "Upstream API key saved" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游 API 密钥已保存" }
+        }
+      }
+    },
+    "Upstream API Key Missing" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "缺少上游 API 密钥" }
+        }
+      }
+    },
+    "Upstream Authorization Failed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游授权失败" }
+        }
+      }
+    },
+    "Upstream Model Fetch Failed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游模型获取失败" }
+        }
+      }
+    },
+    "Upstream Preset" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游预设" }
+        }
+      }
+    },
+    "Upstream provider rejected request size (HTTP 413)." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游供应商拒绝了请求大小（HTTP 413）。" }
+        }
+      }
+    },
+    "Upstream provider returned HTTP" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游供应商返回 HTTP" }
+        }
+      }
+    },
+    "Upstream Test Failed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游测试失败" }
+        }
+      }
+    },
+    "Upstream test output" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游测试输出" }
+        }
+      }
+    },
+    "Upstream URL must be a full http(s) base URL, for example https://api.z.ai/api/coding/paas/v4." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "上游 URL 必须是完整的 http(s) 基础 URL，例如 https://api.z.ai/api/coding/paas/v4。" }
+        }
+      }
+    },
+    "Use Built-In Proxy" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "使用内置代理" }
+        }
+      }
+    },
+    "Use http://127.0.0.1:4000 for built-in mode." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "内置模式请使用 http://127.0.0.1:4000。" }
+        }
+      }
+    },
+    "Use legacy Anthropic translator fallback" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "使用旧版 Anthropic 翻译器回退" }
+        }
+      }
+    },
+    "Use LiteLLM scripts instead of built-in proxy" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "使用 LiteLLM 脚本替代内置代理" }
+        }
+      }
+    },
+    "Use Port 4001" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "使用端口 4001" }
+        }
+      }
+    },
+    "Using" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "正在使用" }
+        }
+      }
+    },
+    "Verify GLM Routing (Terminal)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "验证路由（终端）" }
+        }
+      }
+    },
+    "Verify your API key and provider URL." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "请验证您的 API 密钥和供应商 URL。" }
+        }
+      }
+    },
+    "Welcome to ProxyPilot" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "欢迎使用 ProxyPilot" }
+        }
+      }
+    },
+    "Wrote settings.json + set defaults. Restart Xcode to activate." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "已写入 settings.json 并设置默认值。请重启 Xcode 以激活。" }
+        }
+      }
+    },
+    "Xcode" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "Xcode" }
+        }
+      }
+    },
+    "Xcode Agent Config Is Still Installed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "Xcode Agent 配置仍已安装" }
+        }
+      }
+    },
+    "Xcode Agent Mode (Xcode 26.3+)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "Xcode Agent 模式（Xcode 26.3+）" }
+        }
+      }
+    },
+    "Xcode Agent Upstream Model" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "Xcode Agent 上游模型" }
+        }
+      }
+    },
+    "Xcode Agent is routed through ProxyPilot. Remember to click Remove or run the reversion script before uninstalling." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "Xcode Agent 正通过 ProxyPilot 路由。请记得在卸载前点击\u201c移除\u201d或运行还原脚本。" }
+        }
+      }
+    },
+    "Xcode Locally Hosted mode may fail when auth is required." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "要求认证时 Xcode 本地托管模式可能会失败。" }
+        }
+      }
+    },
+    "Xcode's Claude Agent is routed through ProxyPilot. If you quit without removing, Xcode Agent won't work until you revert manually or reopen ProxyPilot." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "Xcode 的 Claude Agent 正通过 ProxyPilot 路由。如果退出前未移除配置，Xcode Agent 将无法正常工作，直到您手动还原或重新打开 ProxyPilot。" }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}
