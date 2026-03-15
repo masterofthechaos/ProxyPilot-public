@@ -24,6 +24,7 @@ public enum SecretKey {
     public static let chutesAPIKey     = "CHUTES_API_KEY"
     public static let groqAPIKey       = "GROQ_API_KEY"
     public static let googleAPIKey     = "GOOGLE_API_KEY"
+    public static let miniMaxAPIKey    = "MINIMAX_API_KEY"
     public static let masterKey        = "LITELLM_MASTER_KEY"
 }
 

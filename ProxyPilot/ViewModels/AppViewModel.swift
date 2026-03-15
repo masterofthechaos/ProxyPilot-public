@@ -13,6 +13,7 @@ final class AppViewModel: ObservableObject {
         case chutes = "chutes"
         case groq = "groq"
         case google = "google"
+        case miniMax = "minimax"
         case ollama = "ollama"
         case lmStudio = "lmstudio"
 
@@ -27,6 +28,7 @@ final class AppViewModel: ObservableObject {
             case .chutes: return "Chutes"
             case .groq: return "Groq"
             case .google: return "Google (Gemini)"
+            case .miniMax: return "MiniMax"
             case .ollama: return "Ollama"
             case .lmStudio: return "LM Studio"
             }
@@ -41,6 +43,7 @@ final class AppViewModel: ObservableObject {
             case .chutes: return "https://llm.chutes.ai/v1"
             case .groq: return "https://api.groq.com/openai/v1"
             case .google: return "https://generativelanguage.googleapis.com/v1beta/openai"
+            case .miniMax: return "https://api.minimaxi.com/v1"
             case .ollama: return "http://localhost:11434/v1"
             case .lmStudio: return "http://localhost:1234/v1"
             }
@@ -87,6 +90,7 @@ final class AppViewModel: ObservableObject {
             case .chutes: return URL(string: "https://chutes.ai/app/api-keys")
             case .groq: return URL(string: "https://console.groq.com/keys")
             case .google: return URL(string: "https://aistudio.google.com/apikey")
+            case .miniMax: return URL(string: "https://platform.minimaxi.com")
             case .ollama, .lmStudio: return nil
             }
         }
@@ -100,6 +104,7 @@ final class AppViewModel: ObservableObject {
             case .chutes: return .chutesAPIKey
             case .groq: return .groqAPIKey
             case .google: return .googleAPIKey
+            case .miniMax: return .miniMaxAPIKey
             case .ollama, .lmStudio: return nil
             }
         }
