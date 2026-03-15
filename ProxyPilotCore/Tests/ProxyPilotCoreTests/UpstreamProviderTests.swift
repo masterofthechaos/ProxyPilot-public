@@ -7,7 +7,7 @@ struct UpstreamProviderTests {
     @Test func ollamaIsLocal() { #expect(UpstreamProvider.ollama.isLocal == true) }
     @Test func lmStudioIsLocal() { #expect(UpstreamProvider.lmStudio.isLocal == true) }
     @Test func cloudProvidersAreNotLocal() {
-        for provider in [UpstreamProvider.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google] {
+        for provider in [UpstreamProvider.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .miniMax] {
             #expect(provider.isLocal == false)
         }
     }
@@ -26,6 +26,7 @@ struct UpstreamProviderTests {
         #expect(UpstreamProvider.xAI.secretKey == SecretKey.xAIAPIKey)
         #expect(UpstreamProvider.chutes.secretKey == SecretKey.chutesAPIKey)
         #expect(UpstreamProvider.google.secretKey == SecretKey.googleAPIKey)
+        #expect(UpstreamProvider.miniMax.secretKey == SecretKey.miniMaxAPIKey)
     }
     @Test func secretKeyMappingForLocalProvidersIsNil() {
         #expect(UpstreamProvider.ollama.secretKey == nil)
@@ -34,6 +35,8 @@ struct UpstreamProviderTests {
     @Test func ollamaDefaultURL() { #expect(UpstreamProvider.ollama.defaultAPIBaseURL == "http://localhost:11434/v1") }
     @Test func lmStudioDefaultURL() { #expect(UpstreamProvider.lmStudio.defaultAPIBaseURL == "http://localhost:1234/v1") }
     @Test func googleDefaultURL() { #expect(UpstreamProvider.google.defaultAPIBaseURL == "https://generativelanguage.googleapis.com/v1beta/openai") }
+    @Test func miniMaxDefaultURL() { #expect(UpstreamProvider.miniMax.defaultAPIBaseURL == "https://api.minimax.io/v1") }
+    @Test func miniMaxTitle() { #expect(UpstreamProvider.miniMax.title == "MiniMax") }
     @Test func ollamaTitle() { #expect(UpstreamProvider.ollama.title == "Ollama") }
     @Test func lmStudioTitle() { #expect(UpstreamProvider.lmStudio.title == "LM Studio") }
     @Test func googleUsesProviderSpecificChatPath() {

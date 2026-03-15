@@ -9,6 +9,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     case chutes     = "chutes"
     case groq       = "groq"
     case google     = "google"
+    case miniMax    = "minimax"
     case ollama     = "ollama"
     case lmStudio   = "lmstudio"
 
@@ -23,6 +24,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .chutes:     return "Chutes"
         case .groq:       return "Groq"
         case .google:     return "Google (Gemini)"
+        case .miniMax:    return "MiniMax"
         case .ollama:     return "Ollama"
         case .lmStudio:   return "LM Studio"
         }
@@ -37,6 +39,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .chutes:     return "https://llm.chutes.ai/v1"
         case .groq:       return "https://api.groq.com/openai/v1"
         case .google:     return "https://generativelanguage.googleapis.com/v1beta/openai"
+        case .miniMax:    return "https://api.minimax.io/v1"
         case .ollama:     return "http://localhost:11434/v1"
         case .lmStudio:   return "http://localhost:1234/v1"
         }
@@ -82,6 +85,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .chutes:     return SecretKey.chutesAPIKey
         case .groq:       return SecretKey.groqAPIKey
         case .google:     return SecretKey.googleAPIKey
+        case .miniMax:    return SecretKey.miniMaxAPIKey
         case .ollama, .lmStudio:
             return nil
         }

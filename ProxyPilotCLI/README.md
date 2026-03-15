@@ -88,7 +88,7 @@ proxypilot start [--port <port>] [--provider <provider>] [--upstream-url <url>] 
 | Flag | Default | Description |
 |---|---|---|
 | `--port`, `-p` | `4000` | Port to listen on |
-| `--provider` | `openai` | Upstream provider. Valid: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `ollama`, `lmstudio` |
+| `--provider` | `openai` | Upstream provider. Valid: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `minimax`, `ollama`, `lmstudio` |
 | `--upstream-url` | provider default | Override upstream API base URL |
 | `--key` | — | Upstream API key. Falls back to environment variable, then keychain/secrets store |
 | `--key-stdin` | false | Read one API key line from stdin |
@@ -98,7 +98,7 @@ proxypilot start [--port <port>] [--provider <provider>] [--upstream-url <url>] 
 
 Key resolution order: `--key` flag > environment variable > keychain (macOS) / `secrets.json` (Linux).
 
-Environment variable names: `OPENAI_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `CHUTES_API_KEY`, `GOOGLE_API_KEY`.
+Environment variable names: `OPENAI_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `CHUTES_API_KEY`, `GOOGLE_API_KEY`, `MINIMAX_API_KEY`.
 
 ---
 
@@ -185,7 +185,7 @@ proxypilot auth set --provider <provider> [--key <value>] [--stdin] [--json]
 
 | Flag | Default | Description |
 |---|---|---|
-| `--provider` | — | Required provider. Cloud only: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google` |
+| `--provider` | — | Required provider. Cloud only: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `minimax` |
 | `--key` | — | Non-interactive key value (highest priority) |
 | `--stdin` | false | Read one key line from stdin |
 | `--json` | false | Emit JSON output |
@@ -351,6 +351,7 @@ The server inherits `--provider` and `--key` defaults but tools can override bot
 | xAI (Grok) | `xai` | `https://api.x.ai/v1` |
 | Chutes | `chutes` | `https://llm.chutes.ai/v1` |
 | Google (Gemini) | `google` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| MiniMax | `minimax` | `https://api.minimax.io/v1` |
 | Ollama | `ollama` | `http://localhost:11434/v1` |
 | LM Studio | `lmstudio` | `http://localhost:1234/v1` |
 
@@ -401,7 +402,7 @@ Respects `$XDG_CONFIG_HOME` if set. Format is a flat JSON object:
 }
 ```
 
-Keys: `OPENAI_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `CHUTES_API_KEY`, `GOOGLE_API_KEY`.
+Keys: `OPENAI_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `CHUTES_API_KEY`, `GOOGLE_API_KEY`, `MINIMAX_API_KEY`.
 
 Overrides:
 
@@ -423,7 +424,7 @@ Pass `--json` to any command to get machine-readable output on stdout.
 **Error:**
 
 ```json
-{"ok": false, "error": {"code": "E001", "message": "Unknown provider: foo", "suggestion": "Valid: openai, groq, zai, openrouter, xai, chutes, google, ollama, lmstudio"}}
+{"ok": false, "error": {"code": "E001", "message": "Unknown provider: foo", "suggestion": "Valid: openai, groq, zai, openrouter, xai, chutes, google, minimax, ollama, lmstudio"}}
 ```
 
 Error codes:
