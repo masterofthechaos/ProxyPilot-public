@@ -1,5 +1,15 @@
 import Foundation
 
+/// Error wrapper for throwing `AppIssue` values through standard error handling.
+/// Used by AppViewModel and ProxyLifecycleManager to propagate typed issues.
+struct AppIssueError: LocalizedError {
+    let issue: AppIssue
+
+    var errorDescription: String? {
+        issue.message
+    }
+}
+
 struct AppIssue: Identifiable, Equatable, Error {
     enum Code: String, Codable {
         case missingMasterKey = "E001"

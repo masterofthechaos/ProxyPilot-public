@@ -16,7 +16,7 @@ struct StartCommand: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Port to listen on.")
     var port: UInt16 = 4000
 
-    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, ollama, lmstudio).")
+    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, ollama, lmstudio).")
     var provider: String = "openai"
 
     @Option(name: .long, help: "Override the upstream API base URL (e.g. http://localhost:11434/v1).")

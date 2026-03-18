@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import ProxyPilotCore
 
 enum AnthropicTranslatorMode: String, Sendable {
     case hardened
@@ -38,7 +39,7 @@ final class LocalProxyServer: @unchecked Sendable {
         let host: String
         let port: UInt16
         let masterKey: String
-        let upstreamProvider: AppViewModel.UpstreamProvider
+        let upstreamProvider: UpstreamProvider
         let upstreamAPIBase: URL
         let upstreamAPIKey: String?
         let allowedModels: Set<String>
@@ -383,8 +384,7 @@ final class LocalProxyServer: @unchecked Sendable {
     // MARK: - Streaming Detection
 
     private func isStreamingRequest(body: Data) -> Bool {
-        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return false }
-        return json["stream"] as? Bool == true
+        LocalProxyServerHelpers.isStreamingRequest(body: body)
     }
 
     // MARK: - POST /v1/chat/completions (buffered)
@@ -625,12 +625,10 @@ final class LocalProxyServer: @unchecked Sendable {
         // Remap model: Xcode sends Claude model names (e.g. "claude-sonnet-4-5-20250514")
         // which the upstream provider won't recognize. Use explicit preferred model if allowed.
         let requestedModel = anthropicRequest["model"] as? String ?? "unknown"
-        let upstreamModel: String = {
-            if config.allowedModels.contains(config.preferredAnthropicUpstreamModel) {
-                return config.preferredAnthropicUpstreamModel
-            }
-            return config.allowedModels.sorted().first ?? config.preferredAnthropicUpstreamModel
-        }()
+        let upstreamModel = LocalProxyServerHelpers.resolveAnthropicUpstreamModel(
+            preferredModel: config.preferredAnthropicUpstreamModel,
+            allowedModels: config.allowedModels
+        )
         let translationContext = AnthropicTranslator.TranslationContext(
             upstreamProvider: config.upstreamProvider,
             resolvedUpstreamModel: upstreamModel,
@@ -1007,22 +1005,7 @@ final class LocalProxyServer: @unchecked Sendable {
     }
 
     private func isAuthorized(headers: [String: String], config: Config) -> Bool {
-        let candidates = [
-            headers["authorization"],
-            headers["x-api-key"],
-            headers["api-key"]
-        ]
-            .compactMap { $0 }
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-        for value in candidates {
-            if value.hasPrefix("Bearer ") {
-                let token = value.dropFirst("Bearer ".count).trimmingCharacters(in: .whitespacesAndNewlines)
-                if token == config.masterKey { return true }
-            }
-            if value == config.masterKey { return true }
-        }
-        return false
+        LocalProxyServerHelpers.isAuthorized(headers: headers, masterKey: config.masterKey)
     }
 
     private func respond(connection: NWConnection, status: Int, body: String, contentType: String) {
@@ -1044,17 +1027,7 @@ final class LocalProxyServer: @unchecked Sendable {
     }
 
     private func reasonPhrase(_ status: Int) -> String {
-        switch status {
-        case 200: return "OK"
-        case 400: return "Bad Request"
-        case 401: return "Unauthorized"
-        case 413: return "Payload Too Large"
-        case 429: return "Too Many Requests"
-        case 404: return "Not Found"
-        case 500: return "Internal Server Error"
-        case 502: return "Bad Gateway"
-        default: return "Unknown"
-        }
+        LocalProxyServerHelpers.reasonPhrase(status)
     }
 
     private func appendLog(_ message: String) {
@@ -1217,52 +1190,15 @@ final class LocalProxyServer: @unchecked Sendable {
     }
 
     private func redact(_ text: String, max: Int? = nil) -> String {
-        let limit = max ?? logMaxValueLength
-        let cleaned = text.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
-        let tokenScrubbed = scrubKeyValueSecrets(in: scrubBearer(in: cleaned))
-        if tokenScrubbed.count <= limit { return tokenScrubbed }
-        return String(tokenScrubbed.prefix(limit)) + "..."
+        LocalProxyServerHelpers.redact(text, max: max ?? logMaxValueLength)
     }
 
-    private func scrubBearer(in text: String) -> String {
-        let marker = "Bearer "
-        guard let range = text.range(of: marker) else { return text }
-        let suffix = text[range.upperBound...]
-        let tokenEnd = suffix.firstIndex(where: { $0.isWhitespace || $0 == "," || $0 == ";" }) ?? text.endIndex
-        let token = String(text[range.upperBound..<tokenEnd])
-        if token.isEmpty { return text }
-        return text.replacingOccurrences(of: marker + token, with: marker + "***")
-    }
-
-    private func scrubKeyValueSecrets(in text: String) -> String {
-        let rules: [(String, String)] = [
-            (#"(?i)(x-api-key\s*[:=]\s*)([^\s\"']+)"#, "$1***"),
-            (#"(?i)(api[-_ ]?key\s*[:=]\s*)([^\s\"']+)"#, "$1***"),
-            (#"(?i)(\"api_key\"\s*:\s*\")([^\"]+)(\")"#, "$1***$3")
-        ]
-
-        var output = text
-        for (pattern, replacement) in rules {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            let range = NSRange(output.startIndex..<output.endIndex, in: output)
-            output = regex.stringByReplacingMatches(in: output, options: [], range: range, withTemplate: replacement)
-        }
-        return output
-    }
-
-    private func sanitizedChatRequestBody(_ body: Data, provider: AppViewModel.UpstreamProvider) -> Data {
-        guard !provider.unsupportedOpenAIParameters.isEmpty,
-              var request = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
-            return body
-        }
-
-        AnthropicTranslator.stripUnsupportedParameters(&request, for: provider)
-        return (try? JSONSerialization.data(withJSONObject: request)) ?? body
+    private func sanitizedChatRequestBody(_ body: Data, provider: UpstreamProvider) -> Data {
+        LocalProxyServerHelpers.sanitizedChatRequestBody(body, provider: provider)
     }
 
     private func buildUpstreamURL(config: Config, path: String) -> URL {
-        let normalizedPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        return config.upstreamAPIBase.appendingPathComponent(normalizedPath)
+        LocalProxyServerHelpers.buildUpstreamURL(base: config.upstreamAPIBase, path: path)
     }
 
     private func applyUpstreamAuth(config: Config, request: inout URLRequest) {
@@ -1273,14 +1209,9 @@ final class LocalProxyServer: @unchecked Sendable {
     private func upstreamErrorMessage(
         statusCode: Int,
         body: String,
-        provider: AppViewModel.UpstreamProvider
+        provider: UpstreamProvider
     ) -> String {
-        if provider == .google,
-           statusCode == 400,
-           body.localizedCaseInsensitiveContains("thought_signature") {
-            return "Google direct rejected the tool-call continuation due to thought_signature validation. If this persists, use OpenRouter as the current workaround."
-        }
-        return "Upstream error: \(body)"
+        LocalProxyServerHelpers.upstreamErrorMessage(statusCode: statusCode, body: body, provider: provider)
     }
 
     static func limitStatusCode(headerBytes: Int, bodyBytes: Int, activeConnections: Int) -> Int? {

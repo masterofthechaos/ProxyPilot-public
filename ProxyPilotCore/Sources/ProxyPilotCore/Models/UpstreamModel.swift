@@ -65,6 +65,33 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable {
 
         return caps
     }
+
+    public func estimatedCostUSD(promptTokens: Int, completionTokens: Int) -> Double? {
+        guard promptPricePer1M != nil || completionPricePer1M != nil else { return nil }
+        let sanitizedPromptTokens = max(promptTokens, 0)
+        let sanitizedCompletionTokens = max(completionTokens, 0)
+
+        let promptCost = (Double(sanitizedPromptTokens) / 1_000_000) * (promptPricePer1M ?? 0)
+        let completionCost = (Double(sanitizedCompletionTokens) / 1_000_000) * (completionPricePer1M ?? 0)
+        return promptCost + completionCost
+    }
+
+    public var pricingPerMillionLabel: String? {
+        guard promptPricePer1M != nil || completionPricePer1M != nil else { return nil }
+        let promptLabel = promptPricePer1M.map { Self.formatUSDCurrency($0) } ?? "-"
+        let completionLabel = completionPricePer1M.map { Self.formatUSDCurrency($0) } ?? "-"
+        return "In \(promptLabel)/M · Out \(completionLabel)/M"
+    }
+
+    private static func formatUSDCurrency(_ amount: Double) -> String {
+        if amount < 0.01 {
+            return String(format: "$%.4f", amount)
+        }
+        if amount < 1 {
+            return String(format: "$%.3f", amount)
+        }
+        return String(format: "$%.2f", amount)
+    }
 }
 
 public enum PricingTier: String, Sendable {

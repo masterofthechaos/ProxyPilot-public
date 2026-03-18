@@ -121,6 +121,8 @@ public enum AnthropicTranslator {
         }
 
         stripUnsupportedParameters(&openAI, for: context.upstreamProvider)
+        applyParameterRewrites(&openAI, for: context.upstreamProvider)
+        clampTemperature(&openAI, for: context.upstreamProvider)
 
         return RequestTranslationResult(
             payload: openAI,
@@ -136,6 +138,28 @@ public enum AnthropicTranslator {
         for key in provider.unsupportedOpenAIParameters {
             request.removeValue(forKey: key)
         }
+    }
+
+    /// Renames request parameter keys for providers that use non-standard names.
+    public static func applyParameterRewrites(
+        _ request: inout [String: Any],
+        for provider: UpstreamProvider
+    ) {
+        for (oldKey, newKey) in provider.parameterRewrites {
+            if let value = request.removeValue(forKey: oldKey) {
+                request[newKey] = value
+            }
+        }
+    }
+
+    /// Clamps the temperature parameter to the provider's valid range.
+    public static func clampTemperature(
+        _ request: inout [String: Any],
+        for provider: UpstreamProvider
+    ) {
+        guard let range = provider.temperatureRange,
+              let temp = request["temperature"] as? Double else { return }
+        request["temperature"] = min(max(temp, range.lowerBound), range.upperBound)
     }
 
     private static func convertMessage(

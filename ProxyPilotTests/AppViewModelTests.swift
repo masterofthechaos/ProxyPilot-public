@@ -1,4 +1,5 @@
 import XCTest
+import ProxyPilotCore
 @testable import ProxyPilot
 
 @MainActor
@@ -49,7 +50,7 @@ final class AppViewModelTests: XCTestCase {
 
     func testStoredOpenRouterModelIsUsedWithoutLiveFetch() {
         defaults.set(
-            AppViewModel.UpstreamProvider.openRouter.rawValue,
+            UpstreamProvider.openRouter.rawValue,
             forKey: "proxypilot.upstreamProvider"
         )
         defaults.set(
@@ -225,19 +226,19 @@ final class AppViewModelTests: XCTestCase {
     // MARK: - API Key Page URL
 
     func testCloudProvidersHaveAPIKeyPageURL() {
-        let cloudProviders: [AppViewModel.UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google]
+        let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax]
         for provider in cloudProviders {
             XCTAssertNotNil(provider.apiKeyPageURL, "\(provider.title) should have an API key page URL")
         }
     }
 
     func testLocalProvidersHaveNoAPIKeyPageURL() {
-        XCTAssertNil(AppViewModel.UpstreamProvider.ollama.apiKeyPageURL)
-        XCTAssertNil(AppViewModel.UpstreamProvider.lmStudio.apiKeyPageURL)
+        XCTAssertNil(UpstreamProvider.ollama.apiKeyPageURL)
+        XCTAssertNil(UpstreamProvider.lmStudio.apiKeyPageURL)
     }
 
     func testAllCloudProvidersHaveKeychainKeys() {
-        let cloudProviders: [AppViewModel.UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google]
+        let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax]
         for provider in cloudProviders {
             XCTAssertNotNil(provider.keychainKey, "\(provider.title) should have a keychain key")
             XCTAssertTrue(provider.requiresAPIKey, "\(provider.title) should require API key")
@@ -246,10 +247,10 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testGoogleProviderUsesExpectedDefaults() {
-        XCTAssertEqual(AppViewModel.UpstreamProvider.google.defaultAPIBaseURL, "https://generativelanguage.googleapis.com/v1beta/openai")
-        XCTAssertEqual(AppViewModel.UpstreamProvider.google.chatCompletionsPath, "/chat/completions")
-        XCTAssertEqual(AppViewModel.UpstreamProvider.openAI.chatCompletionsPath, "/chat/completions")
-        XCTAssertEqual(AppViewModel.UpstreamProvider.google.keychainKey, .googleAPIKey)
+        XCTAssertEqual(UpstreamProvider.google.defaultAPIBaseURL, "https://generativelanguage.googleapis.com/v1beta/openai")
+        XCTAssertEqual(UpstreamProvider.google.chatCompletionsPath, "/chat/completions")
+        XCTAssertEqual(UpstreamProvider.openAI.chatCompletionsPath, "/chat/completions")
+        XCTAssertEqual(UpstreamProvider.google.keychainKey, .googleAPIKey)
     }
 
     func testFeedbackDraftURLUsesCanonicalRecipientAndIncludesContext() throws {
@@ -270,7 +271,7 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testLocalProvidersDontRequireKeys() {
-        let localProviders: [AppViewModel.UpstreamProvider] = [.ollama, .lmStudio]
+        let localProviders: [UpstreamProvider] = [.ollama, .lmStudio]
         for provider in localProviders {
             XCTAssertNil(provider.keychainKey, "\(provider.title) should not have a keychain key")
             XCTAssertFalse(provider.requiresAPIKey, "\(provider.title) should not require API key")

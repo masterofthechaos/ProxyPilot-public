@@ -1,4 +1,5 @@
 import Foundation
+import ProxyPilotCore
 
 @MainActor
 final class ProxyService {
@@ -135,7 +136,7 @@ final class ProxyService {
     func fetchUpstreamModels(
         apiBase: URL,
         apiKey: String,
-        provider: AppViewModel.UpstreamProvider = .openAI
+        provider: UpstreamProvider = .openAI
     ) async throws -> [UpstreamModel] {
         let modelsURL = Self.buildUpstreamURL(
             base: Self.normalizedUpstreamAPIBase(apiBase),
@@ -170,7 +171,7 @@ final class ProxyService {
         apiBase: URL,
         apiKey: String,
         model: String,
-        provider: AppViewModel.UpstreamProvider = .openAI
+        provider: UpstreamProvider = .openAI
     ) async throws -> String {
         let url = Self.buildUpstreamURL(
             base: Self.normalizedUpstreamAPIBase(apiBase),
@@ -244,7 +245,7 @@ final class ProxyService {
 
     private func applyUpstreamAuth(
         apiKey: String,
-        provider: AppViewModel.UpstreamProvider,
+        provider: UpstreamProvider,
         request: inout URLRequest
     ) {
         guard !apiKey.isEmpty else { return }
@@ -293,6 +294,24 @@ private struct ChatCompletionResponse: Decodable {
     struct Choice: Decodable {
         struct ResponseMessage: Decodable {
             let content: String?
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                // Some providers (e.g., Mistral) may return content as an array
+                // of typed parts instead of a plain string.
+                if let str = try? container.decode(String.self, forKey: .content) {
+                    content = str
+                } else if let parts = try? container.decode([ContentPart].self, forKey: .content) {
+                    content = parts.compactMap(\.text).joined()
+                } else {
+                    content = nil
+                }
+            }
+
+            private struct ContentPart: Decodable {
+                let text: String?
+            }
+            private enum CodingKeys: String, CodingKey { case content }
         }
         let message: ResponseMessage
     }

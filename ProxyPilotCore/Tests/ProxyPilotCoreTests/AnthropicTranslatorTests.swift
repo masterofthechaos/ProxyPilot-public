@@ -164,6 +164,63 @@ private enum ParseError: Error {
     #expect(store.lookup(toolCallID: "call_1") == "sig_abc")
 }
 
+// MARK: - Parameter Rewrite Tests (v1.4.9)
+
+@Test func parameterRewriteRenamesSeedForMistral() {
+    var request: [String: Any] = [
+        "model": "devstral-2-25-12",
+        "seed": 42,
+        "messages": [["role": "user", "content": "hi"]]
+    ]
+    AnthropicTranslator.applyParameterRewrites(&request, for: .mistral)
+    #expect(request["seed"] == nil)
+    #expect(request["random_seed"] as? Int == 42)
+    #expect(request["model"] as? String == "devstral-2-25-12")
+}
+
+@Test func parameterRewriteRenamesMaxCompletionTokensForMistral() {
+    var request: [String: Any] = [
+        "model": "devstral-2-25-12",
+        "max_completion_tokens": 1024,
+        "messages": [["role": "user", "content": "hi"]]
+    ]
+    AnthropicTranslator.applyParameterRewrites(&request, for: .mistral)
+    #expect(request["max_completion_tokens"] == nil)
+    #expect(request["max_tokens"] as? Int == 1024)
+}
+
+@Test func parameterRewriteNoOpForOpenAI() {
+    var request: [String: Any] = [
+        "model": "gpt-4",
+        "seed": 42,
+        "max_completion_tokens": 1024
+    ]
+    AnthropicTranslator.applyParameterRewrites(&request, for: .openAI)
+    #expect(request["seed"] as? Int == 42)
+    #expect(request["max_completion_tokens"] as? Int == 1024)
+}
+
+@Test func parameterRewritePreservesUnrelatedKeys() {
+    var request: [String: Any] = [
+        "model": "devstral-2-25-12",
+        "seed": 42,
+        "temperature": 0.7,
+        "messages": [["role": "user", "content": "hi"]]
+    ]
+    AnthropicTranslator.applyParameterRewrites(&request, for: .mistral)
+    #expect(request["temperature"] as? Double == 0.7)
+    #expect((request["messages"] as? [[String: Any]])?.count == 1)
+}
+
+@Test func temperatureClampNoOpWhenNilRange() {
+    var request: [String: Any] = [
+        "model": "gpt-4",
+        "temperature": 0.0
+    ]
+    AnthropicTranslator.clampTemperature(&request, for: .openAI)
+    #expect(request["temperature"] as? Double == 0.0)
+}
+
 @Test func stripUnsupportedParametersRemovesGoogleOnlyKeys() {
     var request: [String: Any] = [
         "model": "gemini-3.1-pro",
@@ -382,6 +439,126 @@ private enum ParseError: Error {
     // sentMessageStart is false by default
     let events = AnthropicTranslator.streamingFinishEvents(state: state)
     #expect(events.isEmpty)
+}
+
+// MARK: - Streaming SSE Event Generator Tests
+
+@Test func streamingStartEventsContainsMessageStart() throws {
+    let events = AnthropicTranslator.streamingStartEvents(messageId: "msg_test123", model: "glm-5")
+    #expect(events.count == 1)
+    let (event, data) = try parseSSE(events[0])
+    #expect(event == "message_start")
+    let message = try #require(data["message"] as? [String: Any])
+    #expect(message["id"] as? String == "msg_test123")
+    #expect(message["model"] as? String == "glm-5")
+    #expect(message["role"] as? String == "assistant")
+}
+
+@Test func streamingTextStartEventHasCorrectIndex() throws {
+    let sse = AnthropicTranslator.streamingTextStartEvent(index: 2)
+    let (event, data) = try parseSSE(sse)
+    #expect(event == "content_block_start")
+    #expect(data["index"] as? Int == 2)
+    let block = try #require(data["content_block"] as? [String: Any])
+    #expect(block["type"] as? String == "text")
+}
+
+@Test func streamingDeltaEventContainsText() throws {
+    let sse = AnthropicTranslator.streamingDeltaEvent(index: 0, text: "hello world")
+    let (event, data) = try parseSSE(sse)
+    #expect(event == "content_block_delta")
+    #expect(data["index"] as? Int == 0)
+    let delta = try #require(data["delta"] as? [String: Any])
+    #expect(delta["type"] as? String == "text_delta")
+    #expect(delta["text"] as? String == "hello world")
+}
+
+@Test func streamingDeltaEventDefaultIndexIsZero() throws {
+    let sse = AnthropicTranslator.streamingDeltaEvent(text: "hi")
+    let (_, data) = try parseSSE(sse)
+    #expect(data["index"] as? Int == 0)
+}
+
+@Test func streamingToolUseStartEventHasIDAndName() throws {
+    let sse = AnthropicTranslator.streamingToolUseStartEvent(index: 1, id: "toolu_abc", name: "search")
+    let (event, data) = try parseSSE(sse)
+    #expect(event == "content_block_start")
+    #expect(data["index"] as? Int == 1)
+    let block = try #require(data["content_block"] as? [String: Any])
+    #expect(block["type"] as? String == "tool_use")
+    #expect(block["id"] as? String == "toolu_abc")
+    #expect(block["name"] as? String == "search")
+}
+
+@Test func streamingToolUseInputDeltaContainsPartialJSON() throws {
+    let sse = AnthropicTranslator.streamingToolUseInputDeltaEvent(index: 1, partialJSON: "{\"query\":")
+    let (event, data) = try parseSSE(sse)
+    #expect(event == "content_block_delta")
+    #expect(data["index"] as? Int == 1)
+    let delta = try #require(data["delta"] as? [String: Any])
+    #expect(delta["type"] as? String == "input_json_delta")
+    #expect(delta["partial_json"] as? String == "{\"query\":")
+}
+
+@Test func streamingContentBlockStopEventHasIndex() throws {
+    let sse = AnthropicTranslator.streamingContentBlockStopEvent(index: 3)
+    let (event, data) = try parseSSE(sse)
+    #expect(event == "content_block_stop")
+    #expect(data["index"] as? Int == 3)
+}
+
+@Test func streamingMessageDeltaEventHasStopReason() throws {
+    let sse = AnthropicTranslator.streamingMessageDeltaEvent(stopReason: "tool_use", outputTokens: 42)
+    let (event, data) = try parseSSE(sse)
+    #expect(event == "message_delta")
+    let delta = try #require(data["delta"] as? [String: Any])
+    #expect(delta["stop_reason"] as? String == "tool_use")
+    let usage = try #require(data["usage"] as? [String: Any])
+    #expect(usage["output_tokens"] as? Int == 42)
+}
+
+@Test func streamingMessageStopEventFormat() throws {
+    let sse = AnthropicTranslator.streamingMessageStopEvent()
+    let (event, data) = try parseSSE(sse)
+    #expect(event == "message_stop")
+    #expect(data["type"] as? String == "message_stop")
+}
+
+@Test func streamingDoneEventsContainsThreeEvents() throws {
+    let events = AnthropicTranslator.streamingDoneEvents(messageId: "msg_test", model: "glm-5")
+    #expect(events.count == 3)
+    let (ev1, _) = try parseSSE(events[0])
+    let (ev2, _) = try parseSSE(events[1])
+    let (ev3, _) = try parseSSE(events[2])
+    #expect(ev1 == "content_block_stop")
+    #expect(ev2 == "message_delta")
+    #expect(ev3 == "message_stop")
+}
+
+// MARK: - Additional Streaming State Machine Tests
+
+@Test func processChunkToolArgumentsAccumulateBytes() throws {
+    var state = AnthropicTranslator.StreamingState(requestID: "req_1", messageID: "msg_1")
+    // First chunk: create the tool
+    let chunk1: [String: Any] = [
+        "choices": [["delta": ["tool_calls": [["index": 0, "id": "call_1", "function": ["name": "search", "arguments": ""]]]], "finish_reason": NSNull()]]
+    ]
+    _ = AnthropicTranslator.processStreamingChunk(chunk1, state: &state, model: "glm-5")
+
+    // Second chunk: send arguments
+    let chunk2: [String: Any] = [
+        "choices": [["delta": ["tool_calls": [["index": 0, "function": ["arguments": "{\"q\":"]]]], "finish_reason": NSNull()]]
+    ]
+    _ = AnthropicTranslator.processStreamingChunk(chunk2, state: &state, model: "glm-5")
+
+    let chunk3: [String: Any] = [
+        "choices": [["delta": ["tool_calls": [["index": 0, "function": ["arguments": "\"test\"}"]]]], "finish_reason": NSNull()]]
+    ]
+    _ = AnthropicTranslator.processStreamingChunk(chunk3, state: &state, model: "glm-5")
+
+    let toolState = try #require(state.toolStatesByOpenAIIndex[0])
+    // {"q": is 5 chars + "test"} is 7 chars = 12
+    #expect(toolState.argsBytes == 12)
 }
 
 // MARK: - Error Helper Test

@@ -1,4 +1,5 @@
 import XCTest
+import ProxyPilotCore
 @testable import ProxyPilot
 
 final class UpstreamModelTests: XCTestCase {

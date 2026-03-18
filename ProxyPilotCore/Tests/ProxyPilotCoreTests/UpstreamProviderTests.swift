@@ -7,7 +7,7 @@ struct UpstreamProviderTests {
     @Test func ollamaIsLocal() { #expect(UpstreamProvider.ollama.isLocal == true) }
     @Test func lmStudioIsLocal() { #expect(UpstreamProvider.lmStudio.isLocal == true) }
     @Test func cloudProvidersAreNotLocal() {
-        for provider in [UpstreamProvider.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google] {
+        for provider in [UpstreamProvider.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax] {
             #expect(provider.isLocal == false)
         }
     }
@@ -87,5 +87,81 @@ struct UpstreamProviderTests {
                 "Provider \(provider.rawValue) URL doesn't end with /chat/completions: \(urlString)"
             )
         }
+    }
+
+    // MARK: - New Provider Tests (v1.4.9)
+
+    @Test func deepSeekSecretKey() {
+        #expect(UpstreamProvider.deepSeek.secretKey == SecretKey.deepSeekAPIKey)
+    }
+    @Test func mistralSecretKey() {
+        #expect(UpstreamProvider.mistral.secretKey == SecretKey.mistralAPIKey)
+    }
+    @Test func deepSeekDefaultURL() {
+        #expect(UpstreamProvider.deepSeek.defaultAPIBaseURL == "https://api.deepseek.com/v1")
+    }
+    @Test func mistralDefaultURL() {
+        #expect(UpstreamProvider.mistral.defaultAPIBaseURL == "https://api.mistral.ai/v1")
+    }
+    @Test func deepSeekTitle() { #expect(UpstreamProvider.deepSeek.title == "DeepSeek") }
+    @Test func mistralTitle() { #expect(UpstreamProvider.mistral.title == "Mistral") }
+
+    @Test func mistralParameterRewritesContainsSeedAndMaxTokens() {
+        let rewrites = UpstreamProvider.mistral.parameterRewrites
+        #expect(rewrites["seed"] == "random_seed")
+        #expect(rewrites["max_completion_tokens"] == "max_tokens")
+    }
+    @Test func openAIParameterRewritesIsEmpty() {
+        #expect(UpstreamProvider.openAI.parameterRewrites.isEmpty)
+    }
+    @Test func deepSeekParameterRewritesIsEmpty() {
+        #expect(UpstreamProvider.deepSeek.parameterRewrites.isEmpty)
+    }
+    @Test func miniMaxTemperatureRange() {
+        let range = UpstreamProvider.miniMax.temperatureRange
+        #expect(range != nil)
+        #expect(range?.lowerBound == 0.01)
+        #expect(range?.upperBound == 1.0)
+    }
+    @Test func nonMiniMaxProvidersHaveNilTemperatureRange() {
+        for provider in UpstreamProvider.allCases where provider != .miniMax {
+            #expect(provider.temperatureRange == nil, "\(provider.rawValue) should have nil temperatureRange")
+        }
+    }
+    @Test func miniMaxSecretKey() {
+        #expect(UpstreamProvider.miniMax.secretKey == SecretKey.minimaxAPIKey)
+    }
+    @Test func miniMaxDefaultURL() {
+        #expect(UpstreamProvider.miniMax.defaultAPIBaseURL == "https://api.minimax.io/v1")
+    }
+    @Test func miniMaxTitle() { #expect(UpstreamProvider.miniMax.title == "MiniMax") }
+    @Test func miniMaxIsPreview() { #expect(UpstreamProvider.miniMax.isPreview == true) }
+    @Test func nonPreviewProviders() {
+        for provider in UpstreamProvider.allCases where provider != .miniMax {
+            #expect(provider.isPreview == false, "\(provider.rawValue) should not be preview")
+        }
+    }
+    @Test func miniMaxHasFallbackModels() {
+        let fallback = UpstreamProvider.miniMax.fallbackModelIDs
+        #expect(fallback != nil)
+        #expect(fallback?.contains("MiniMax-M2.5") == true)
+    }
+    @Test func nonMiniMaxProvidersHaveNoFallbackModels() {
+        for provider in UpstreamProvider.allCases where provider != .miniMax {
+            #expect(provider.fallbackModelIDs == nil, "\(provider.rawValue) should have nil fallbackModelIDs")
+        }
+    }
+    @Test func temperatureClampForMiniMax() {
+        var request: [String: Any] = ["model": "MiniMax-M2.5", "temperature": 0.0]
+        AnthropicTranslator.clampTemperature(&request, for: .miniMax)
+        #expect(request["temperature"] as? Double == 0.01)
+
+        request["temperature"] = 2.0
+        AnthropicTranslator.clampTemperature(&request, for: .miniMax)
+        #expect(request["temperature"] as? Double == 1.0)
+
+        request["temperature"] = 0.5
+        AnthropicTranslator.clampTemperature(&request, for: .miniMax)
+        #expect(request["temperature"] as? Double == 0.5)
     }
 }

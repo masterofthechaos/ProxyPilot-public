@@ -1,4 +1,5 @@
 import AppKit
+import ProxyPilotCore
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -394,15 +395,26 @@ struct ContentView: View {
                     get: { vm.upstreamProvider },
                     set: { vm.upstreamProvider = $0 }
                 )) {
-                    ForEach(AppViewModel.UpstreamProvider.allCases.filter { !$0.isLocal }) { provider in
-                        Text(provider.title).tag(provider)
+                    ForEach(UpstreamProvider.allCases.filter { !$0.isLocal }) { provider in
+                        Text(provider.isPreview ? "\(provider.title) (Preview)" : provider.title).tag(provider)
                     }
                     Divider()
-                    ForEach(AppViewModel.UpstreamProvider.allCases.filter { $0.isLocal }) { provider in
+                    ForEach(UpstreamProvider.allCases.filter { $0.isLocal }) { provider in
                         Text(provider.title).tag(provider)
                     }
                 }
                 .pickerStyle(.menu)
+
+                if vm.upstreamProvider.isPreview {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .font(.caption)
+                        Text("\(vm.upstreamProvider.title) support is in **Preview** and may be unstable. [Report issues on GitHub.](https://github.com/masterofthechaos/ProxyPilot)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 Button { selectedTab = .keys } label: {
                     Text("Manage API keys in the **Keys** tab.")
@@ -834,6 +846,11 @@ struct ContentView: View {
                         Spacer()
                         Button("Open README") { vm.openReadme() }
                         Button("Open micah.chat") { vm.openWebsite() }
+                        Button("GitHub") {
+                            if let url = URL(string: "https://github.com/masterofthechaos/ProxyPilot") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
                     }
 
                     Text("Send Feedback opens a prefilled email draft and copies the current support summary to your clipboard.")
@@ -914,7 +931,7 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                ForEach(AppViewModel.UpstreamProvider.allCases.filter { $0.requiresAPIKey }, id: \.self) { provider in
+                ForEach(UpstreamProvider.allCases.filter { $0.requiresAPIKey }, id: \.self) { provider in
                     providerKeyRow(provider)
                 }
             }
@@ -935,7 +952,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func providerKeyRow(_ provider: AppViewModel.UpstreamProvider) -> some View {
+    private func providerKeyRow(_ provider: UpstreamProvider) -> some View {
         let hasKey = vm.hasKey(for: provider)
         let isEditing = vm.providerKeyEditing[provider] ?? false
         let testState = vm.providerKeyTestStates[provider] ?? .idle

@@ -13,7 +13,7 @@ struct AuthSetCommand: AsyncParsableCommand {
         abstract: "Store an upstream API key."
     )
 
-    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google).")
+    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax).")
     var provider: String
 
     @Option(name: .long, help: "API key value (non-interactive).")
@@ -50,7 +50,7 @@ struct AuthSetCommand: AsyncParsableCommand {
             OutputFormatter.error(
                 code: "E041",
                 message: "Provider \(upstreamProvider.rawValue) does not require an API key.",
-                suggestion: "Choose a cloud provider (openai, groq, zai, openrouter, xai, chutes, google).",
+                suggestion: "Choose a cloud provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax).",
                 json: json
             )
             throw ExitCode.failure

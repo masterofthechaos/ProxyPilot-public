@@ -11,7 +11,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Port to listen on.")
     var port: UInt16 = 4000
 
-    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, ollama, lmstudio).")
+    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, ollama, lmstudio).")
     var provider: String = "openai"
 
     @Option(name: .long, help: "Override the upstream API base URL (e.g. http://localhost:11434/v1).")
@@ -104,8 +104,11 @@ struct ServeCommand: AsyncParsableCommand {
             json: json
         )
 
-        // Park until interrupted
-        await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in
+        // Park the process until interrupted.
+        // Uses withUnsafeContinuation (not withCheckedContinuation) because
+        // the continuation intentionally never resumes — the process exits
+        // via signal handler. Checked variant emits a runtime warning.
+        await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in
             signal(SIGINT) { _ in
                 PidFile.remove()
                 _exit(0)

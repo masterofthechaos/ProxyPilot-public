@@ -2,7 +2,7 @@
 /ProxyPilot.xcodeproj/project.xcworkspace/xcuserdata
 /ProxyPilot.xcodeproj/xcuserdata
 *.xcuserstate
-/build
+build/
 
 # Swift Package Manager
 .build/

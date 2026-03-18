@@ -47,7 +47,7 @@ struct AuthRemoveCommand: AsyncParsableCommand {
             OutputFormatter.error(
                 code: "E041",
                 message: "Provider \(upstreamProvider.rawValue) does not require an API key.",
-                suggestion: "Choose a cloud provider (openai, groq, zai, openrouter, xai, chutes, google).",
+                suggestion: "Choose a cloud provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax).",
                 json: json
             )
             throw ExitCode.failure

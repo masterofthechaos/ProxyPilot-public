@@ -683,12 +683,17 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func sanitizedChatRequestBody(_ body: Data) -> Data {
-        guard !config.upstreamProvider.unsupportedOpenAIParameters.isEmpty,
+        let provider = config.upstreamProvider
+        guard !provider.unsupportedOpenAIParameters.isEmpty
+                || !provider.parameterRewrites.isEmpty
+                || provider.temperatureRange != nil,
               var request = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             return body
         }
 
-        AnthropicTranslator.stripUnsupportedParameters(&request, for: config.upstreamProvider)
+        AnthropicTranslator.stripUnsupportedParameters(&request, for: provider)
+        AnthropicTranslator.applyParameterRewrites(&request, for: provider)
+        AnthropicTranslator.clampTemperature(&request, for: provider)
         return (try? JSONSerialization.data(withJSONObject: request)) ?? body
     }
 

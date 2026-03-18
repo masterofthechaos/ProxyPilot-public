@@ -11,7 +11,7 @@ struct SetupXcodeCommand: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Proxy port for the local listener.")
     var port: UInt16 = 4000
 
-    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, ollama, lmstudio).")
+    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, ollama, lmstudio).")
     var provider: String = "zai"
 
     @Option(name: .long, help: "Override the upstream API base URL.")
