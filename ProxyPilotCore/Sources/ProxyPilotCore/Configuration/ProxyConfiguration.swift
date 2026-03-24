@@ -12,6 +12,7 @@ public struct ProxyConfiguration: Sendable {
     public let allowedModels: Set<String>
     public let requiresAuth: Bool
     public let anthropicTranslatorMode: AnthropicTranslatorMode
+    public let miniMaxRoutingMode: MiniMaxRoutingMode
     public let preferredAnthropicUpstreamModel: String
     public let sessionStats: SessionStats?
     public let googleThoughtSignatureStore: GoogleThoughtSignatureStore?
@@ -26,6 +27,7 @@ public struct ProxyConfiguration: Sendable {
         allowedModels: Set<String> = [],
         requiresAuth: Bool = false,
         anthropicTranslatorMode: AnthropicTranslatorMode = .hardened,
+        miniMaxRoutingMode: MiniMaxRoutingMode = .standard,
         preferredAnthropicUpstreamModel: String = "",
         sessionStats: SessionStats? = nil,
         googleThoughtSignatureStore: GoogleThoughtSignatureStore? = nil
@@ -39,9 +41,15 @@ public struct ProxyConfiguration: Sendable {
         self.allowedModels = allowedModels
         self.requiresAuth = requiresAuth
         self.anthropicTranslatorMode = anthropicTranslatorMode
+        self.miniMaxRoutingMode = miniMaxRoutingMode
         self.preferredAnthropicUpstreamModel = preferredAnthropicUpstreamModel
         self.sessionStats = sessionStats
         self.googleThoughtSignatureStore = googleThoughtSignatureStore
+    }
+
+    /// Whether Anthropic passthrough is active for the current provider.
+    public var isAnthropicPassthroughActive: Bool {
+        miniMaxRoutingMode == .anthropicPassthrough && upstreamProvider.isMiniMax
     }
 }
 
@@ -49,4 +57,12 @@ public struct ProxyConfiguration: Sendable {
 public enum AnthropicTranslatorMode: String, Sendable {
     case hardened
     case legacyFallback
+}
+
+/// Routing mode for MiniMax providers.
+public enum MiniMaxRoutingMode: String, Sendable {
+    /// Route through OpenAI-compatible `/v1/chat/completions` with Anthropic translation.
+    case standard
+    /// Forward `/v1/messages` directly to MiniMax's `/anthropic` endpoint.
+    case anthropicPassthrough
 }

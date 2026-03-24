@@ -63,6 +63,7 @@ struct ContentView: View {
             vm.refreshStatus()
             vm.startLogUpdates()
             vm.maybeShowKeychainAccessPrimerOnLaunch()
+            vm.maybeShowAnalyticsPrompt()
         }
         .onDisappear {
             vm.stopLogUpdates()
@@ -80,6 +81,16 @@ struct ContentView: View {
         )) {
             KeychainAccessPrimerView()
                 .environmentObject(vm)
+        }
+        .sheet(isPresented: Binding(
+            get: { vm.showAnalyticsPrompt },
+            set: { vm.showAnalyticsPrompt = $0 }
+        )) {
+            AnalyticsOptInView(
+                onEnable: { vm.dismissAnalyticsPrompt(optIn: true) },
+                onDisable: { vm.dismissAnalyticsPrompt(optIn: false) }
+            )
+            .interactiveDismissDisabled(true)
         }
         .frame(minWidth: 700, minHeight: 620)
     }
@@ -448,6 +459,22 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                if vm.upstreamProvider.isMiniMax {
+                    HStack(spacing: 8) {
+                        Picker("Routing Mode", selection: $vm.miniMaxRoutingMode) {
+                            Text("Standard").tag(MiniMaxRoutingMode.standard)
+                            Text("Anthropic Passthrough").tag(MiniMaxRoutingMode.anthropicPassthrough)
+                        }
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                    }
+                    Text(vm.miniMaxRoutingMode == .anthropicPassthrough
+                         ? "Forwards /v1/messages directly to MiniMax's Anthropic-compatible endpoint. Skips translation but validates responses for Xcode compatibility."
+                         : "Translates Anthropic requests to OpenAI format before forwarding to MiniMax.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 HStack(spacing: 12) {
                     Button("Fetch Live Models") { Task { await vm.fetchUpstreamModels() } }
                         .accessibilityLabel("Fetch models from upstream provider")
@@ -804,72 +831,60 @@ struct ContentView: View {
                 }
             }
 
-            Section("Support") {
-                VStack(spacing: 8) {
-                    HStack(spacing: 12) {
-                        Button("Export Diagnostics") {
-                            vm.exportDiagnostics()
-                        }
+            Section("Diagnostics") {
+                HStack(spacing: 8) {
+                    Button("Export Diagnostics") { vm.exportDiagnostics() }
                         .accessibilityLabel("Export diagnostics bundle")
-
-                        Button("Copy Support Summary") {
-                            vm.copySupportSummaryToPasteboard()
-                        }
+                    Button("Copy Support Summary") { vm.copySupportSummaryToPasteboard() }
                         .accessibilityLabel("Copy support summary")
-
-                        Button("Send Feedback") {
-                            vm.openFeedbackDraft()
-                        }
+                    Button("Send Feedback") { vm.openFeedbackDraft() }
                         .accessibilityLabel("Send app feedback")
-
-                        Button("Check for Updates") {
-                            updateService.checkForUpdates()
-                        }
-                        .disabled(!updateService.canCheckForUpdates)
-                        .accessibilityLabel("Check for software updates")
-
-                        Spacer()
-                    }
-
-                    HStack(spacing: 12) {
-                        Button(vm.isUpdatingCLITool ? "Updating CLI Tool..." : "Update CLI Tool") {
-                            Task { await vm.updateCLITool() }
-                        }
-                        .disabled(vm.isUpdatingCLITool)
-                        .accessibilityLabel("Update ProxyPilot CLI tool")
-
-                        if vm.isUpdatingCLITool {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-
-                        Spacer()
-                        Button("Open README") { vm.openReadme() }
-                        Button("Open micah.chat") { vm.openWebsite() }
-                        Button("GitHub") {
-                            if let url = URL(string: "https://github.com/masterofthechaos/ProxyPilot") {
-                                NSWorkspace.shared.open(url)
-                            }
-                        }
-                    }
-
-                    Text("Send Feedback opens a prefilled email draft and copies the current support summary to your clipboard.")
+                    Spacer()
+                }
+                if !vm.diagnosticsArchivePath.isEmpty {
+                    Text(verbatim: String(localized: "Archive:") + " " + vm.diagnosticsArchivePath)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                Text("Send Feedback opens a prefilled email draft and copies the current support summary to your clipboard.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
 
+            Section("Updates") {
+                HStack(spacing: 8) {
+                    Button("Check for Updates") { updateService.checkForUpdates() }
+                        .disabled(!updateService.canCheckForUpdates)
+                        .accessibilityLabel("Check for software updates")
+                    Button(vm.isUpdatingCLITool ? "Updating..." : "Update CLI Tool") {
+                        Task { await vm.updateCLITool() }
+                    }
+                    .disabled(vm.isUpdatingCLITool)
+                    .accessibilityLabel("Update ProxyPilot CLI tool")
+                    if vm.isUpdatingCLITool {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Spacer()
+                }
                 if !vm.cliUpdateStatusText.isEmpty {
                     Text(vm.cliUpdateStatusText)
                         .font(.caption2)
                         .foregroundStyle(vm.cliUpdateStatusIsError ? .orange : .secondary)
                         .textSelection(.enabled)
                 }
+            }
 
-                if !vm.diagnosticsArchivePath.isEmpty {
-                    Text(verbatim: String(localized: "Archive:") + " " + vm.diagnosticsArchivePath)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+            Section("Links") {
+                HStack(spacing: 8) {
+                    Button("README") { vm.openReadme() }
+                    Button("Website") { vm.openWebsite() }
+                    Button("GitHub") {
+                        if let url = URL(string: "https://github.com/masterofthechaos/ProxyPilot") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    Spacer()
                 }
 
                 if !vm.supportSummary.isEmpty {
@@ -924,15 +939,52 @@ struct ContentView: View {
 
     // MARK: - Keys Tab
 
+    @State private var showAddCustomProviderSheet = false
+
     private var keysTab: some View {
         Form {
-            Section("API Keys") {
+            Section {
                 Text("API keys are stored in macOS Keychain under the \"proxypilot\" service.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 ForEach(UpstreamProvider.allCases.filter { $0.requiresAPIKey }, id: \.self) { provider in
                     providerKeyRow(provider)
+                }
+            } header: {
+                Text("Supported Providers")
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Always check official provider documentation for accurate API base URLs. Some providers may be incompatible with ProxyPilot.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Link("Want to request official support for a new provider? Submit a GitHub Issue.",
+                         destination: URL(string: "https://github.com/masterofthechaos/ProxyPilot-public/issues")!)
+                        .font(.caption)
+                }
+
+                if vm.customProviders.isEmpty {
+                    Text("No custom providers added.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(vm.customProviders) { provider in
+                        customProviderKeyRow(provider)
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("Custom Providers (Preview)")
+                    Spacer()
+                    Button {
+                        showAddCustomProviderSheet = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.plain)
                 }
             }
 
@@ -949,6 +1001,51 @@ struct ContentView: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showAddCustomProviderSheet) {
+            AddCustomProviderView { name, url, key in
+                vm.addCustomProvider(name: name, apiBaseURL: url, apiKey: key)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func customProviderKeyRow(_ provider: CustomProvider) -> some View {
+        let hasKey = vm.customProviderHasKey(provider)
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(provider.name)
+                        .font(.subheadline.bold())
+                    Text(provider.apiBaseURL)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if hasKey {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("Key stored")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("No key")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            HStack(spacing: 12) {
+                Button("Delete") {
+                    vm.deleteCustomProvider(provider)
+                }
+                .foregroundStyle(.red)
+                Spacer()
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     @ViewBuilder
@@ -1473,6 +1570,37 @@ private struct KeychainAccessPrimerView: View {
         }
         .padding(20)
         .frame(width: 560)
+    }
+}
+
+private struct AnalyticsOptInView: View {
+    var onEnable: () -> Void
+    var onDisable: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Enable anonymous app analytics?")
+                .font(.title3.bold())
+
+            Text("ProxyPilot can collect anonymous debugging data to improve product quality for everyone. Please consider enabling this feature to support this open source project.")
+                .foregroundStyle(.secondary)
+
+            Text("All data collection is **disabled** by default.")
+                .font(.callout)
+
+            HStack {
+                Spacer()
+                Button("Leave Disabled") {
+                    onDisable()
+                }
+                Button("Enable") {
+                    onEnable()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
     }
 }
 

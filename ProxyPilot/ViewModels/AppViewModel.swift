@@ -17,6 +17,7 @@ final class AppViewModel: ObservableObject {
     private static let requireLocalAuthDefaultsKey = "proxypilot.requireLocalAuth"
     private static let preflightSnapshotDefaultsKey = "proxypilot.lastPreflightSnapshot"
     private static let suppressKeychainPrimerDefaultsKey = "proxypilot.suppressKeychainPrimer"
+    private static let analyticsPromptShownVersionKey = "proxypilot.analyticsPromptShownVersion"
     private static let xcodeDefaultsDomain = "com.apple.dt.Xcode"
     private static let xcodeAgentAPIKeyOverrideDefaultsKey = "IDEChatClaudeAgentAPIKeyOverride"
 
@@ -32,6 +33,7 @@ final class AppViewModel: ObservableObject {
 
     let providerManager: ProviderManager
     let proxyLifecycle: ProxyLifecycleManager
+    let customProviderStorage: CustomProviderStorage
 
     private let defaults: UserDefaults
     private let proxyService: ProxyService
@@ -93,6 +95,45 @@ final class AppViewModel: ObservableObject {
     var upstreamProvider: UpstreamProvider {
         get { providerManager.upstreamProvider }
         set { providerManager.upstreamProvider = newValue }
+    }
+
+    var miniMaxRoutingMode: MiniMaxRoutingMode {
+        get { providerManager.miniMaxRoutingMode }
+        set { providerManager.miniMaxRoutingMode = newValue }
+    }
+
+    // MARK: - Custom Providers
+
+    var customProviders: [CustomProvider] { customProviderStorage.providers }
+
+    func addCustomProvider(name: String, apiBaseURL: String, apiKey: String) {
+        let provider = CustomProvider(name: name, apiBaseURL: apiBaseURL)
+        customProviderStorage.add(provider, apiKey: apiKey)
+        objectWillChange.send()
+    }
+
+    func deleteCustomProvider(_ provider: CustomProvider) {
+        customProviderStorage.delete(provider)
+        objectWillChange.send()
+    }
+
+    func updateCustomProvider(_ provider: CustomProvider) {
+        customProviderStorage.update(provider)
+        objectWillChange.send()
+    }
+
+    func customProviderHasKey(_ provider: CustomProvider) -> Bool {
+        customProviderStorage.hasAPIKey(for: provider)
+    }
+
+    func saveCustomProviderKey(_ key: String, for provider: CustomProvider) {
+        customProviderStorage.saveAPIKey(key, for: provider)
+        objectWillChange.send()
+    }
+
+    func deleteCustomProviderKey(for provider: CustomProvider) {
+        try? KeychainService.delete(account: provider.keychainAccountName)
+        objectWillChange.send()
     }
 
     @Published var xcodeProviderConfirmed: Bool = false
@@ -196,6 +237,7 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: ProviderManager.exactoFilterDefaultsKey)
         defaults.removeObject(forKey: ProviderManager.verifiedFilterDefaultsKey)
         defaults.removeObject(forKey: Self.suppressKeychainPrimerDefaultsKey)
+        defaults.removeObject(forKey: Self.analyticsPromptShownVersionKey)
         defaults.removeObject(forKey: Self.anthropicFallbackDefaultsKey)
         defaults.removeObject(forKey: ProviderManager.xcodeAgentModelLegacyDefaultsKey)
         defaults.removeObject(forKey: Self.preflightExpandedDefaultsKey)
@@ -336,6 +378,8 @@ final class AppViewModel: ObservableObject {
     }
 
     @Published var showKeychainAccessPrimer: Bool = false
+    @Published var showAnalyticsPrompt: Bool = false
+
     @Published var suppressKeychainAccessPrimer: Bool = false {
         didSet {
             defaults.set(suppressKeychainAccessPrimer, forKey: Self.suppressKeychainPrimerDefaultsKey)
@@ -575,6 +619,7 @@ final class AppViewModel: ObservableObject {
         self.cliUpdateRunner = cliUpdateRunner
 
         self.providerManager = ProviderManager(defaults: defaults, proxyService: proxyService)
+        self.customProviderStorage = CustomProviderStorage(defaults: defaults)
         self.proxyLifecycle = ProxyLifecycleManager(
             defaults: defaults,
             localProxyServer: localProxyServer,
@@ -717,6 +762,23 @@ final class AppViewModel: ObservableObject {
 
     func dismissKeychainAccessPrimer() {
         showKeychainAccessPrimer = false
+    }
+
+    // MARK: - Analytics Opt-In Prompt
+
+    func maybeShowAnalyticsPrompt() {
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        let shownVersion = defaults.string(forKey: Self.analyticsPromptShownVersionKey)
+        guard shownVersion != currentVersion else { return }
+        guard !showOnboardingWizard else { return }
+        showAnalyticsPrompt = true
+    }
+
+    func dismissAnalyticsPrompt(optIn: Bool) {
+        telemetryOptIn = optIn
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        defaults.set(currentVersion, forKey: Self.analyticsPromptShownVersionKey)
+        showAnalyticsPrompt = false
     }
 
     func startLogUpdates() {
@@ -1483,6 +1545,7 @@ general_settings:
         var allowedModels: Set<String> = {
             if !selectedUpstreamModels.isEmpty { return selectedUpstreamModels }
             if !upstreamModels.isEmpty { return Set(upstreamModels.map(\.id)) }
+            if let fallback = upstreamProvider.fallbackModelIDs { return Set(fallback) }
             return Set(savedDefaultModels)
         }()
         let preferredModel = effectiveXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1511,6 +1574,7 @@ general_settings:
             allowedModels: allowedModels,
             requiresAuth: requireLocalAuth,
             anthropicTranslatorMode: anthropicTranslatorFallbackEnabled ? .legacyFallback : .hardened,
+            miniMaxRoutingMode: providerManager.miniMaxRoutingMode,
             preferredAnthropicUpstreamModel: preferredModel.isEmpty
                 ? providerManager.preferredXcodeAgentModel(from: savedDefaultModels)
                 : preferredModel,

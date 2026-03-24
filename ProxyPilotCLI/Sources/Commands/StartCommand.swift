@@ -16,7 +16,7 @@ struct StartCommand: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Port to listen on.")
     var port: UInt16 = 4000
 
-    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, ollama, lmstudio).")
+    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, ollama, lmstudio).")
     var provider: String = "openai"
 
     @Option(name: .long, help: "Override the upstream API base URL (e.g. http://localhost:11434/v1).")
@@ -134,7 +134,7 @@ struct StartCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        let modelList = model?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
+        let modelList = parsedModelList(for: upstreamProvider)
         let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
         let config = ProxyConfiguration(
             port: port,
@@ -192,5 +192,13 @@ struct StartCommand: AsyncParsableCommand {
                 _exit(0)
             }
         }
+    }
+
+    private func parsedModelList(for provider: UpstreamProvider) -> [String] {
+        let explicitModels = model?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
+        if !explicitModels.isEmpty {
+            return explicitModels
+        }
+        return provider.fallbackModelIDs ?? []
     }
 }

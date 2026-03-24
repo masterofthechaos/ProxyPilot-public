@@ -2,6 +2,16 @@ import Foundation
 
 /// Translates between Anthropic /v1/messages format and OpenAI /v1/chat/completions format.
 public enum AnthropicTranslator {
+    public struct NormalizedOpenAICompatibleResponse: Sendable {
+        public let statusCode: Int
+        public let data: Data
+
+        public init(statusCode: Int, data: Data) {
+            self.statusCode = statusCode
+            self.data = data
+        }
+    }
+
     public struct TranslationContext: Sendable {
         public let upstreamProvider: UpstreamProvider
         public let resolvedUpstreamModel: String
@@ -160,6 +170,334 @@ public enum AnthropicTranslator {
         guard let range = provider.temperatureRange,
               let temp = request["temperature"] as? Double else { return }
         request["temperature"] = min(max(temp, range.lowerBound), range.upperBound)
+    }
+
+    // MARK: - Anthropic Passthrough
+
+    /// Sanitizes an Anthropic `/v1/messages` request body before forwarding
+    /// to a provider's Anthropic-compatible endpoint (e.g. MiniMax `/anthropic`).
+    /// Strips unsupported parameters and clamps temperature.
+    public static func sanitizeAnthropicPassthroughRequest(
+        _ request: inout [String: Any],
+        for provider: UpstreamProvider
+    ) {
+        for key in provider.unsupportedAnthropicParameters {
+            request.removeValue(forKey: key)
+        }
+        clampTemperature(&request, for: provider)
+    }
+
+    /// Validates and normalizes an Anthropic-format response from a non-Claude
+    /// upstream before forwarding to Xcode Agent. Strips proprietary fields and
+    /// patches known deviations from the Anthropic response spec.
+    public static func validateAnthropicPassthroughResponse(
+        statusCode: Int,
+        responseData: Data,
+        provider: UpstreamProvider
+    ) -> NormalizedOpenAICompatibleResponse {
+        guard provider.isMiniMax,
+              var root = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+            return NormalizedOpenAICompatibleResponse(statusCode: statusCode, data: responseData)
+        }
+
+        // Strip MiniMax proprietary fields.
+        ["base_resp", "input_sensitive", "input_sensitive_type",
+         "output_sensitive", "output_sensitive_type"].forEach {
+            root.removeValue(forKey: $0)
+        }
+
+        // Check for embedded MiniMax errors (base_resp with non-zero status).
+        // Already stripped above, but check the original data.
+        if let origRoot = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+           let embeddedError = miniMaxEmbeddedError(from: origRoot) {
+            let errorPayload: [String: Any] = [
+                "type": "error",
+                "error": [
+                    "type": embeddedError.type,
+                    "message": embeddedError.message
+                ]
+            ]
+            let errorData = (try? JSONSerialization.data(withJSONObject: errorPayload)) ?? responseData
+            return NormalizedOpenAICompatibleResponse(statusCode: embeddedError.httpStatus, data: errorData)
+        }
+
+        // Ensure id is present.
+        if root["id"] == nil || (root["id"] as? String)?.isEmpty == true {
+            root["id"] = "msg_minimax_\(UUID().uuidString.prefix(12).lowercased())"
+        }
+
+        // Validate and fix role.
+        if let role = root["role"] as? String, role.isEmpty {
+            root["role"] = "assistant"
+        }
+
+        // Validate stop_reason if present.
+        let validStopReasons: Set<String> = ["end_turn", "tool_use", "max_tokens", "stop_sequence"]
+        if let stopReason = root["stop_reason"] as? String, !validStopReasons.contains(stopReason) {
+            root["stop_reason"] = "end_turn"
+        }
+
+        // Validate content blocks.
+        if var content = root["content"] as? [[String: Any]] {
+            let validTypes: Set<String> = ["text", "tool_use", "thinking"]
+            for i in content.indices {
+                if let type = content[i]["type"] as? String, !validTypes.contains(type) {
+                    content[i]["type"] = "text"
+                }
+            }
+            root["content"] = content
+        }
+
+        let normalizedData = (try? JSONSerialization.data(withJSONObject: root)) ?? responseData
+        return NormalizedOpenAICompatibleResponse(statusCode: statusCode, data: normalizedData)
+    }
+
+    /// Validates a single SSE line from a MiniMax Anthropic passthrough stream.
+    /// Returns the line with any fixups applied.
+    public static func validateAnthropicPassthroughStreamingLine(
+        _ line: String,
+        provider: UpstreamProvider
+    ) -> String {
+        guard provider.isMiniMax,
+              line.hasPrefix("data: "),
+              line != "data: [DONE]" else {
+            return line
+        }
+
+        let payload = String(line.dropFirst(6))
+        guard let data = payload.data(using: .utf8),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return line
+        }
+
+        // Strip proprietary fields from event payloads.
+        ["base_resp", "input_sensitive", "output_sensitive"].forEach {
+            json.removeValue(forKey: $0)
+        }
+
+        // Fix empty role in message_start events.
+        if var message = json["message"] as? [String: Any] {
+            if let role = message["role"] as? String, role.isEmpty {
+                message["role"] = "assistant"
+            }
+            if message["id"] == nil || (message["id"] as? String)?.isEmpty == true {
+                message["id"] = "msg_minimax_\(UUID().uuidString.prefix(12).lowercased())"
+            }
+            json["message"] = message
+        }
+
+        // Fix empty role in delta payloads.
+        if var delta = json["delta"] as? [String: Any] {
+            if let stopReason = delta["stop_reason"] as? String {
+                let validStopReasons: Set<String> = ["end_turn", "tool_use", "max_tokens", "stop_sequence"]
+                if !validStopReasons.contains(stopReason) {
+                    delta["stop_reason"] = "end_turn"
+                }
+            }
+            json["delta"] = delta
+        }
+
+        guard let normalizedData = try? JSONSerialization.data(withJSONObject: json),
+              let normalizedString = String(data: normalizedData, encoding: .utf8) else {
+            return line
+        }
+        return "data: \(normalizedString)"
+    }
+
+    // MARK: - OpenAI-Compatible Normalization
+
+    /// Normalizes provider-specific buffered chat responses back into an
+    /// OpenAI-compatible envelope before forwarding to strict clients.
+    public static func normalizeOpenAICompatibleResponse(
+        statusCode: Int,
+        responseData: Data,
+        provider: UpstreamProvider
+    ) -> NormalizedOpenAICompatibleResponse {
+        guard provider.isMiniMax,
+              var root = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+            return NormalizedOpenAICompatibleResponse(statusCode: statusCode, data: responseData)
+        }
+
+        if let embeddedError = miniMaxEmbeddedError(from: root) {
+            let errorPayload: [String: Any] = [
+                "error": [
+                    "message": embeddedError.message,
+                    "type": embeddedError.type,
+                    "code": embeddedError.code
+                ]
+            ]
+            let errorData = (try? JSONSerialization.data(withJSONObject: errorPayload)) ?? responseData
+            return NormalizedOpenAICompatibleResponse(statusCode: embeddedError.httpStatus, data: errorData)
+        }
+
+        sanitizeMiniMaxResponseRoot(&root)
+
+        // Synthesize id for buffered responses only — streaming chunks must NOT get
+        // per-chunk random ids as that breaks the OpenAI chunk contract.
+        if root["id"] == nil || (root["id"] as? String)?.isEmpty == true {
+            root["id"] = "chatcmpl-minimax-\(UUID().uuidString.prefix(8))"
+        }
+
+        let normalizedData = (try? JSONSerialization.data(withJSONObject: root)) ?? responseData
+        return NormalizedOpenAICompatibleResponse(statusCode: statusCode, data: normalizedData)
+    }
+
+    /// Normalizes a single SSE `data:` line for strict OpenAI-compatible
+    /// clients. Non-JSON or non-data lines are passed through unchanged.
+    /// Unlike the buffered normalizer, this does NOT synthesize missing ids —
+    /// streaming chunks must share a consistent id across the stream, which the
+    /// per-line normalizer cannot guarantee.
+    public static func normalizeOpenAICompatibleStreamingLine(
+        _ line: String,
+        provider: UpstreamProvider
+    ) -> String {
+        guard provider.isMiniMax,
+              line.hasPrefix("data: "),
+              line != "data: [DONE]" else {
+            return line
+        }
+
+        let payload = String(line.dropFirst(6))
+        guard let data = payload.data(using: .utf8),
+              var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return line
+        }
+
+        // Check for embedded errors first.
+        if let embeddedError = miniMaxEmbeddedError(from: root) {
+            let errorPayload: [String: Any] = [
+                "error": [
+                    "message": embeddedError.message,
+                    "type": embeddedError.type,
+                    "code": embeddedError.code
+                ]
+            ]
+            if let errorData = try? JSONSerialization.data(withJSONObject: errorPayload),
+               let errorString = String(data: errorData, encoding: .utf8) {
+                return "data: \(errorString)"
+            }
+            return line
+        }
+
+        // Sanitize without id synthesis.
+        sanitizeMiniMaxResponseRoot(&root)
+
+        guard let normalizedData = try? JSONSerialization.data(withJSONObject: root),
+              let normalizedString = String(data: normalizedData, encoding: .utf8) else {
+            return line
+        }
+
+        return "data: \(normalizedString)"
+    }
+
+    private struct MiniMaxEmbeddedError {
+        let httpStatus: Int
+        let message: String
+        let type: String
+        let code: String
+    }
+
+    private static func miniMaxEmbeddedError(from root: [String: Any]) -> MiniMaxEmbeddedError? {
+        guard let baseResp = root["base_resp"] as? [String: Any],
+              let statusCode = intValue(from: baseResp["status_code"]),
+              statusCode != 0 else {
+            return nil
+        }
+
+        let rawMessage = (baseResp["status_msg"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = (rawMessage?.isEmpty == false ? rawMessage : nil) ?? "MiniMax request failed"
+        let httpStatus = miniMaxHTTPStatus(for: statusCode, message: message)
+        let type: String
+        switch httpStatus {
+        case 401:
+            type = "authentication_error"
+        case 429:
+            type = "rate_limit_error"
+        default:
+            type = "invalid_request_error"
+        }
+        return MiniMaxEmbeddedError(
+            httpStatus: httpStatus,
+            message: message,
+            type: type,
+            code: String(statusCode)
+        )
+    }
+
+    private static func miniMaxHTTPStatus(for statusCode: Int, message: String) -> Int {
+        let lowered = message.lowercased()
+        if lowered.contains("auth")
+            || lowered.contains("token")
+            || lowered.contains("api key")
+            || lowered.contains("apikey")
+            || lowered.contains("unauthor")
+            || lowered.contains("forbidden") {
+            return 401
+        }
+        if lowered.contains("rate")
+            || lowered.contains("quota")
+            || lowered.contains("balance")
+            || lowered.contains("too many") {
+            return 429
+        }
+        if lowered.contains("not found") {
+            return 404
+        }
+        return statusCode == 429 ? 429 : 400
+    }
+
+    private static func sanitizeMiniMaxResponseRoot(_ root: inout [String: Any]) {
+        [
+            "base_resp",
+            "input_sensitive",
+            "input_sensitive_type",
+            "output_sensitive",
+            "output_sensitive_type"
+        ].forEach { root.removeValue(forKey: $0) }
+
+        if var usage = root["usage"] as? [String: Any] {
+            usage = Dictionary(
+                uniqueKeysWithValues: usage.filter { key, _ in
+                    ["prompt_tokens", "completion_tokens", "total_tokens"].contains(key)
+                }
+            )
+            root["usage"] = usage
+        }
+
+        if var choices = root["choices"] as? [[String: Any]] {
+            for index in choices.indices {
+                if var message = choices[index]["message"] as? [String: Any] {
+                    message.removeValue(forKey: "reasoning_details")
+                    // Fix empty role in buffered responses.
+                    if let role = message["role"] as? String, role.isEmpty {
+                        message["role"] = "assistant"
+                    }
+                    choices[index]["message"] = message
+                }
+                if var delta = choices[index]["delta"] as? [String: Any] {
+                    delta.removeValue(forKey: "reasoning_details")
+                    // Fix empty role in streaming deltas (known MiniMax quirk).
+                    if let role = delta["role"] as? String, role.isEmpty {
+                        delta["role"] = "assistant"
+                    }
+                    choices[index]["delta"] = delta
+                }
+            }
+            root["choices"] = choices
+        }
+    }
+
+    private static func intValue(from value: Any?) -> Int? {
+        switch value {
+        case let int as Int:
+            return int
+        case let number as NSNumber:
+            return number.intValue
+        case let string as String:
+            return Int(string)
+        default:
+            return nil
+        }
     }
 
     private static func convertMessage(

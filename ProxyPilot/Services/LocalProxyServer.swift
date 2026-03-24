@@ -45,6 +45,7 @@ final class LocalProxyServer: @unchecked Sendable {
         let allowedModels: Set<String>
         let requiresAuth: Bool
         let anthropicTranslatorMode: AnthropicTranslatorMode
+        let miniMaxRoutingMode: MiniMaxRoutingMode
         let preferredAnthropicUpstreamModel: String
         let googleThoughtSignatureStore: GoogleThoughtSignatureStore?
 
@@ -52,6 +53,14 @@ final class LocalProxyServer: @unchecked Sendable {
             let host = upstreamAPIBase.host ?? ""
             let lowered = host.lowercased()
             return lowered == "localhost" || lowered == "127.0.0.1" || lowered == "::1"
+        }
+
+        var upstreamAPIBaseURL: String {
+            upstreamAPIBase.absoluteString
+        }
+
+        var isAnthropicPassthroughActive: Bool {
+            miniMaxRoutingMode == .anthropicPassthrough && upstreamProvider.isMiniMax
         }
     }
 
@@ -430,12 +439,17 @@ final class LocalProxyServer: @unchecked Sendable {
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 502
-            let text = String(decoding: data, as: UTF8.self)
-            respond(connection: connection, status: status, body: text, contentType: "application/json")
+            let upstreamStatus = (response as? HTTPURLResponse)?.statusCode ?? 502
+            let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+                statusCode: upstreamStatus,
+                responseData: data,
+                provider: config.upstreamProvider
+            )
+            let text = String(decoding: normalized.data, as: UTF8.self)
+            respond(connection: connection, status: normalized.statusCode, body: text, contentType: "application/json")
 
-            if status == 200,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            if normalized.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: normalized.data) as? [String: Any],
                let usage = json["usage"] as? [String: Any] {
                 let resolvedModel = (json["model"] as? String).flatMap { value in
                     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -531,12 +545,16 @@ final class LocalProxyServer: @unchecked Sendable {
             var lastSeenModel = requestModel
 
             for try await line in bytes.lines {
-                let sseData = Data((line + "\n").utf8)
+                let normalizedLine = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+                    line,
+                    provider: config.upstreamProvider
+                )
+                let sseData = Data((normalizedLine + "\n").utf8)
                 await sendData(sseData, on: connection)
 
                 // Extract usage from SSE chunks (best-effort, provider-dependent)
-                if line.hasPrefix("data: ") && line != "data: [DONE]" {
-                    let payload = String(line.dropFirst(6))
+                if normalizedLine.hasPrefix("data: ") && normalizedLine != "data: [DONE]" {
+                    let payload = String(normalizedLine.dropFirst(6))
                     if let chunkData = payload.data(using: .utf8),
                        let chunk = try? JSONSerialization.jsonObject(with: chunkData) as? [String: Any] {
                         if let chunkModel = chunk["model"] as? String {
@@ -552,7 +570,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     }
                 }
 
-                if line == "data: [DONE]" {
+                if normalizedLine == "data: [DONE]" {
                     // Send final newline and close
                     await sendData(Data("\n".utf8), on: connection)
                     let record = SessionReportCard.RequestRecord(
@@ -609,7 +627,7 @@ final class LocalProxyServer: @unchecked Sendable {
             }
         }
 
-        guard let anthropicRequest = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+        guard var anthropicRequest = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             respond(
                 connection: connection,
                 status: 400,
@@ -621,14 +639,68 @@ final class LocalProxyServer: @unchecked Sendable {
         logIncomingAnthropicRequest(anthropicRequest, requestID: requestID, mode: config.anthropicTranslatorMode)
 
         let isStreaming = anthropicRequest["stream"] as? Bool == true
-
-        // Remap model: Xcode sends Claude model names (e.g. "claude-sonnet-4-5-20250514")
-        // which the upstream provider won't recognize. Use explicit preferred model if allowed.
         let requestedModel = anthropicRequest["model"] as? String ?? "unknown"
         let upstreamModel = LocalProxyServerHelpers.resolveAnthropicUpstreamModel(
             preferredModel: config.preferredAnthropicUpstreamModel,
             allowedModels: config.allowedModels
         )
+
+        // --- Anthropic Passthrough: forward directly to MiniMax /anthropic endpoint ---
+        if config.isAnthropicPassthroughActive,
+           let passthroughBase = config.upstreamProvider.anthropicPassthroughBaseURL(from: config.upstreamAPIBaseURL) {
+
+            anthropicRequest["model"] = upstreamModel
+            AnthropicTranslator.sanitizeAnthropicPassthroughRequest(&anthropicRequest, for: config.upstreamProvider)
+
+            guard let passthroughData = try? JSONSerialization.data(withJSONObject: anthropicRequest) else {
+                respond(connection: connection, status: 500,
+                        body: AnthropicTranslator.errorJSON(message: "Failed to encode passthrough request"),
+                        contentType: "application/json")
+                return
+            }
+
+            appendLog("anthropic passthrough: \(requestedModel) → \(upstreamModel) via \(passthroughBase)/v1/messages")
+            Task { @MainActor [weak self] in
+                self?.state.lastUpstreamModelUsed = upstreamModel
+            }
+
+            guard let passthroughURL = URL(string: passthroughBase + "/v1/messages") else {
+                respond(connection: connection, status: 500,
+                        body: AnthropicTranslator.errorJSON(message: "Invalid passthrough URL"),
+                        contentType: "application/json")
+                return
+            }
+            var request = URLRequest(url: passthroughURL)
+            request.httpMethod = "POST"
+            request.httpBody = passthroughData
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            applyUpstreamAuth(config: config, request: &request)
+            request.timeoutInterval = 120
+
+            if isStreaming {
+                request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                await handleAnthropicPassthroughStreaming(
+                    request: request,
+                    model: requestedModel,
+                    reportModel: upstreamModel,
+                    requestID: requestID,
+                    connection: connection,
+                    provider: config.upstreamProvider
+                )
+            } else {
+                await handleAnthropicPassthroughBuffered(
+                    request: request,
+                    model: requestedModel,
+                    reportModel: upstreamModel,
+                    requestID: requestID,
+                    connection: connection,
+                    provider: config.upstreamProvider
+                )
+            }
+            return
+        }
+
+        // --- Standard path: translate Anthropic → OpenAI ---
         let translationContext = AnthropicTranslator.TranslationContext(
             upstreamProvider: config.upstreamProvider,
             resolvedUpstreamModel: upstreamModel,
@@ -977,6 +1049,96 @@ final class LocalProxyServer: @unchecked Sendable {
                 connection: connection,
                 status: 502,
                 body: AnthropicTranslator.errorJSON(message: "Upstream streaming failed"),
+                contentType: "application/json"
+            )
+        }
+    }
+
+    // MARK: - Anthropic Passthrough Handlers
+
+    private func handleAnthropicPassthroughBuffered(
+        request: URLRequest,
+        model: String,
+        reportModel: String,
+        requestID: String,
+        connection: NWConnection,
+        provider: UpstreamProvider = .miniMax
+    ) async {
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 502
+
+            let validated = AnthropicTranslator.validateAnthropicPassthroughResponse(
+                statusCode: statusCode,
+                responseData: data,
+                provider: provider
+            )
+
+            let text = String(decoding: validated.data, as: UTF8.self)
+            respond(connection: connection, status: validated.statusCode, body: text, contentType: "application/json")
+
+            appendLog("passthrough buffered response: status=\(validated.statusCode) model=\(reportModel)")
+        } catch {
+            appendLog("passthrough error: \(error.localizedDescription)")
+            respond(
+                connection: connection,
+                status: 502,
+                body: AnthropicTranslator.errorJSON(message: "Passthrough upstream error: \(error.localizedDescription)"),
+                contentType: "application/json"
+            )
+        }
+    }
+
+    private func handleAnthropicPassthroughStreaming(
+        request: URLRequest,
+        model: String,
+        reportModel: String,
+        requestID: String,
+        connection: NWConnection,
+        provider: UpstreamProvider = .miniMax
+    ) async {
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 502
+
+            if statusCode >= 400 {
+                var errorData = Data()
+                for try await byte in bytes { errorData.append(byte) }
+                let text = String(decoding: errorData, as: UTF8.self)
+                respond(connection: connection, status: statusCode, body: text, contentType: "application/json")
+                return
+            }
+
+            // Send SSE response headers before streaming data.
+            let headers =
+                "HTTP/1.1 200 OK\r\n" +
+                "Date: \(HTTPDateFormatter.shared.string(from: Date()))\r\n" +
+                "Server: ProxyPilot\r\n" +
+                "Content-Type: text/event-stream\r\n" +
+                "Cache-Control: no-cache\r\n" +
+                "Connection: keep-alive\r\n" +
+                "\r\n"
+            await sendData(Data(headers.utf8), on: connection)
+
+            for try await line in bytes.lines {
+                let validatedLine = AnthropicTranslator.validateAnthropicPassthroughStreamingLine(
+                    line,
+                    provider: provider
+                )
+                let sseData = Data((validatedLine + "\n").utf8)
+                await sendData(sseData, on: connection)
+            }
+
+            // Send final newline and close.
+            await sendData(Data("\n".utf8), on: connection)
+            connection.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
+            appendLog("passthrough streaming complete: model=\(reportModel)")
+        } catch {
+            appendLog("passthrough streaming error: \(error.localizedDescription)")
+            respond(
+                connection: connection,
+                status: 502,
+                body: AnthropicTranslator.errorJSON(message: "Passthrough streaming error: \(error.localizedDescription)"),
                 contentType: "application/json"
             )
         }

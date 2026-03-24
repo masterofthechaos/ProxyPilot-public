@@ -51,10 +51,29 @@ public enum ModelDiscovery {
         }
 
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            if shouldUseFallbackModels(for: provider, statusCode: http.statusCode) {
+                return provider.fallbackModelIDs ?? []
+            }
             throw Error.httpError(statusCode: http.statusCode)
         }
 
-        return try parseModelIDs(from: data)
+        let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+            statusCode: 200,
+            responseData: data,
+            provider: provider
+        )
+        if normalized.statusCode != 200 {
+            throw Error.httpError(statusCode: normalized.statusCode)
+        }
+
+        do {
+            return try parseModelIDs(from: normalized.data)
+        } catch Error.invalidJSON {
+            if let fallback = provider.fallbackModelIDs {
+                return fallback
+            }
+            throw Error.invalidJSON
+        }
     }
 
     /// Filter to only :exacto suffixed models (OpenRouter).
@@ -65,5 +84,10 @@ public enum ModelDiscovery {
     /// Filter to only verified models.
     public static func filterVerified(_ models: [String], verified: VerifiedModels) -> [String] {
         models.filter { verified.contains($0) }
+    }
+
+    private static func shouldUseFallbackModels(for provider: UpstreamProvider, statusCode: Int) -> Bool {
+        guard provider.fallbackModelIDs != nil else { return false }
+        return [404, 405, 410, 501].contains(statusCode)
     }
 }

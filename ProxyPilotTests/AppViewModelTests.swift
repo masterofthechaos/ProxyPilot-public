@@ -223,10 +223,134 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(vm.canSyncProxyModels)
     }
 
+    func testNoGenericGPTFallbackWithoutSavedOrProviderFallbackModels() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm.upstreamProvider, .zAI)
+        XCTAssertEqual(vm.effectiveXcodeAgentModel, "")
+        XCTAssertTrue(vm.xcodeAgentModelCandidates.isEmpty)
+        XCTAssertFalse(vm.canSyncProxyModels)
+    }
+
+    func testMiniMaxFallsBackToKnownProviderModelsWithoutLiveFetch() {
+        defaults.set(
+            UpstreamProvider.miniMax.rawValue,
+            forKey: "proxypilot.upstreamProvider"
+        )
+
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm.upstreamProvider, .miniMax)
+        XCTAssertEqual(vm.effectiveXcodeAgentModel, "MiniMax-M2.7")
+        XCTAssertTrue(vm.xcodeAgentModelCandidates.contains("MiniMax-M2.7"))
+        XCTAssertTrue(vm.proxySyncModelCandidates.contains("MiniMax-M2.7"))
+        XCTAssertTrue(vm.canSyncProxyModels)
+    }
+
+    func testMiniMaxCNFallsBackToKnownProviderModelsWithoutLiveFetch() {
+        defaults.set(
+            UpstreamProvider.miniMaxCN.rawValue,
+            forKey: "proxypilot.upstreamProvider"
+        )
+
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm.upstreamProvider, .miniMaxCN)
+        XCTAssertEqual(vm.effectiveXcodeAgentModel, "MiniMax-M2.7")
+        XCTAssertTrue(vm.xcodeAgentModelCandidates.contains("MiniMax-M2.7"))
+        XCTAssertTrue(vm.proxySyncModelCandidates.contains("MiniMax-M2.7"))
+        XCTAssertTrue(vm.canSyncProxyModels)
+    }
+
+    // MARK: - MiniMax Routing Mode (v1.4.16)
+
+    func testMiniMaxRoutingModeDefaultsToStandard() {
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertEqual(vm.miniMaxRoutingMode, .standard)
+    }
+
+    func testMiniMaxRoutingModePersistsAcrossInit() {
+        defaults.set(
+            MiniMaxRoutingMode.anthropicPassthrough.rawValue,
+            forKey: ProviderManager.miniMaxRoutingModeDefaultsKey
+        )
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertEqual(vm.miniMaxRoutingMode, .anthropicPassthrough)
+    }
+
+    // MARK: - Analytics Opt-In Prompt (v1.4.19)
+
+    func testAnalyticsPromptShowsOnFirstLaunchAfterOnboarding() {
+        // Simulate completed onboarding so the prompt isn't suppressed
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertFalse(vm.showOnboardingWizard)
+        vm.maybeShowAnalyticsPrompt()
+        XCTAssertTrue(vm.showAnalyticsPrompt)
+    }
+
+    func testAnalyticsPromptDoesNotRepeatForSameVersion() {
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        defaults.set(currentVersion, forKey: "proxypilot.analyticsPromptShownVersion")
+        let vm = AppViewModel(defaults: defaults)
+        vm.maybeShowAnalyticsPrompt()
+        XCTAssertFalse(vm.showAnalyticsPrompt)
+    }
+
+    func testAnalyticsPromptOptInSetsFlag() {
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertFalse(vm.telemetryOptIn)
+        vm.dismissAnalyticsPrompt(optIn: true)
+        XCTAssertTrue(vm.telemetryOptIn)
+        XCTAssertFalse(vm.showAnalyticsPrompt)
+        XCTAssertNotNil(defaults.string(forKey: "proxypilot.analyticsPromptShownVersion"))
+    }
+
+    func testAnalyticsPromptOptOutLeavesDisabled() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.dismissAnalyticsPrompt(optIn: false)
+        XCTAssertFalse(vm.telemetryOptIn)
+        XCTAssertFalse(vm.showAnalyticsPrompt)
+        XCTAssertNotNil(defaults.string(forKey: "proxypilot.analyticsPromptShownVersion"))
+    }
+
+    func testAnalyticsPromptSuppressedDuringOnboarding() {
+        // Onboarding not completed → showOnboardingWizard = true → suppress analytics prompt
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertTrue(vm.showOnboardingWizard) // fresh defaults, onboarding not done
+        vm.maybeShowAnalyticsPrompt()
+        XCTAssertFalse(vm.showAnalyticsPrompt)
+    }
+
+    // MARK: - Custom Providers (v1.4.18)
+
+    func testAddCustomProviderAppearsInList() {
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertTrue(vm.customProviders.isEmpty)
+        vm.addCustomProvider(name: "Together", apiBaseURL: "https://api.together.xyz/v1", apiKey: "sk-test")
+        XCTAssertEqual(vm.customProviders.count, 1)
+        XCTAssertEqual(vm.customProviders.first?.name, "Together")
+    }
+
+    func testDeleteCustomProviderRemovesIt() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.addCustomProvider(name: "TestProvider", apiBaseURL: "https://example.com/v1", apiKey: "sk-test")
+        XCTAssertEqual(vm.customProviders.count, 1)
+        let provider = vm.customProviders.first!
+        vm.deleteCustomProvider(provider)
+        XCTAssertTrue(vm.customProviders.isEmpty)
+    }
+
+    func testCustomProviderKeychainAccountFormat() {
+        let provider = CustomProvider(name: "Test", apiBaseURL: "https://example.com/v1")
+        XCTAssertTrue(provider.keychainAccountName.hasPrefix("CUSTOM_"))
+        XCTAssertTrue(provider.keychainAccountName.count > 10)
+    }
+
     // MARK: - API Key Page URL
 
     func testCloudProvidersHaveAPIKeyPageURL() {
-        let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax]
+        let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN]
         for provider in cloudProviders {
             XCTAssertNotNil(provider.apiKeyPageURL, "\(provider.title) should have an API key page URL")
         }
@@ -238,7 +362,7 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testAllCloudProvidersHaveKeychainKeys() {
-        let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax]
+        let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN]
         for provider in cloudProviders {
             XCTAssertNotNil(provider.keychainKey, "\(provider.title) should have a keychain key")
             XCTAssertTrue(provider.requiresAPIKey, "\(provider.title) should require API key")

@@ -79,7 +79,7 @@ enum MCPServerSetup {
 
         let server = Server(
             name: "proxypilot",
-            version: "1.4.9",
+            version: "1.5.0",
             title: "ProxyPilot",
             instructions: """
             ProxyPilot routes Xcode Agent Mode requests through alternative AI providers.
@@ -105,8 +105,8 @@ enum MCPServerSetup {
                     description: "Start the ProxyPilot local AI proxy server on a specified port with an upstream provider and model.",
                     inputSchema: jsonSchemaObject(properties: [
                         "port": intProp("Port to listen on (default 4000, range 1024-65535)"),
-                        "provider": stringProp("Upstream provider: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, ollama, lmstudio"),
-                        "model": stringProp("Upstream model(s) to route requests to, comma-separated (e.g. 'gpt-4o,claude-3-opus'). First model is preferred for Anthropic translation. If omitted, all models are allowed."),
+                        "provider": stringProp("Upstream provider: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, ollama, lmstudio"),
+                        "model": stringProp("Upstream model(s) to route requests to, comma-separated (e.g. 'gpt-4o,claude-3-opus'). First model is preferred for Anthropic translation. If omitted, provider fallback models are used when available."),
                         "key": stringProp("Upstream API key (optional, falls back to secrets store)"),
                         "url": stringProp("Upstream API base URL override (e.g. http://localhost:11434/v1)"),
                     ]),
@@ -135,7 +135,7 @@ enum MCPServerSetup {
                     description: "Restart the ProxyPilot proxy server with the same or new configuration.",
                     inputSchema: jsonSchemaObject(properties: [
                         "port": intProp("Port to listen on (range 1024-65535)"),
-                        "provider": stringProp("Upstream provider: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, ollama, lmstudio"),
+                        "provider": stringProp("Upstream provider: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, ollama, lmstudio"),
                         "model": stringProp("Upstream model(s) to route requests to, comma-separated (e.g. 'gpt-4o,claude-3-opus'). First model is preferred for Anthropic translation."),
                         "key": stringProp("Upstream API key"),
                         "url": stringProp("Upstream API base URL override (e.g. http://localhost:11434/v1)"),
@@ -190,7 +190,7 @@ enum MCPServerSetup {
                     title: "List Upstream Models",
                     description: "Fetch available models from an upstream provider's /v1/models endpoint.",
                     inputSchema: jsonSchemaObject(properties: [
-                        "provider": stringProp("Upstream provider (default: current proxy provider). Options: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, ollama, lmstudio"),
+                        "provider": stringProp("Upstream provider (default: current proxy provider). Options: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, ollama, lmstudio"),
                         "key": stringProp("API key (optional, falls back to secrets store)"),
                         "url": stringProp("Override base URL"),
                         "filter": stringProp("Filter: 'exacto' for OpenRouter :exacto models, 'verified' for ProxyPilot Verified models"),
@@ -266,7 +266,7 @@ enum MCPServerSetup {
                     return .init(content: [.text("No API key found for provider \(upstream.rawValue). Pass a 'key' parameter, set the provider env var, or store it in the secrets store.")], isError: true)
                 }
 
-                let modelList = reqModel?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
+                let modelList = resolvedModelList(reqModel, provider: upstream)
                 let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
                 let config = ProxyConfiguration(
                     port: reqPort,
@@ -336,7 +336,7 @@ enum MCPServerSetup {
                     return .init(content: [.text("No API key found for provider \(upstream.rawValue). Pass a 'key' parameter, set the provider env var, or store it in the secrets store.")], isError: true)
                 }
 
-                let modelList = reqModel?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
+                let modelList = resolvedModelList(reqModel, provider: upstream)
                 let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
                 let config = ProxyConfiguration(
                     port: reqPort,
@@ -546,5 +546,13 @@ enum MCPServerSetup {
 
     private static func secretKeyForProvider(_ provider: UpstreamProvider) -> String? {
         provider.secretKey
+    }
+
+    private static func resolvedModelList(_ rawModels: String?, provider: UpstreamProvider) -> [String] {
+        let explicitModels = rawModels?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
+        if !explicitModels.isEmpty {
+            return explicitModels
+        }
+        return provider.fallbackModelIDs ?? []
     }
 }

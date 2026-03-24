@@ -236,6 +236,318 @@ private enum ParseError: Error {
     #expect(request["model"] as? String == "gemini-3.1-pro")
 }
 
+@Test func normalizeMiniMaxResponseStripsNonStandardKeys() throws {
+    let payload = """
+    {
+      "id": "chatcmpl_123",
+      "object": "chat.completion",
+      "model": "MiniMax-M2.7",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning_details": [{"text": "hidden"}]
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 2,
+        "total_tokens": 3,
+        "completion_tokens_details": {"reasoning_tokens": 9}
+      },
+      "base_resp": {"status_code": 0, "status_msg": "success"},
+      "input_sensitive": false,
+      "output_sensitive": false
+    }
+    """.data(using: .utf8)!
+
+    let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+        statusCode: 200,
+        responseData: payload,
+        provider: .miniMax
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: normalized.data) as? [String: Any])
+    #expect(normalized.statusCode == 200)
+    #expect(json["base_resp"] == nil)
+    #expect(json["input_sensitive"] == nil)
+    let usage = try #require(json["usage"] as? [String: Any])
+    #expect(usage["completion_tokens_details"] == nil)
+    let choices = try #require(json["choices"] as? [[String: Any]])
+    let message = try #require(choices.first?["message"] as? [String: Any])
+    #expect(message["reasoning_details"] == nil)
+}
+
+@Test func normalizeMiniMaxEmbeddedErrorRewritesHTTPStatus() throws {
+    let payload = """
+    {
+      "base_resp": {
+        "status_code": 1001,
+        "status_msg": "Invalid API key"
+      }
+    }
+    """.data(using: .utf8)!
+
+    let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+        statusCode: 200,
+        responseData: payload,
+        provider: .miniMax
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: normalized.data) as? [String: Any])
+    let error = try #require(json["error"] as? [String: Any])
+    #expect(normalized.statusCode == 401)
+    #expect(error["message"] as? String == "Invalid API key")
+}
+
+// MARK: - MiniMax Streaming Quirk Fixes (v1.4.14)
+
+@Test func miniMaxStreamingDeltaWithEmptyRoleIsNormalized() throws {
+    let payload = """
+    {
+      "id": "chatcmpl-123",
+      "choices": [{"delta": {"role": "", "content": "hello"}}],
+      "model": "MiniMax-M2.5"
+    }
+    """.data(using: .utf8)!
+
+    let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+        statusCode: 200,
+        responseData: payload,
+        provider: .miniMax
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: normalized.data) as? [String: Any])
+    let choices = try #require(json["choices"] as? [[String: Any]])
+    let delta = try #require(choices.first?["delta"] as? [String: Any])
+    #expect(delta["role"] as? String == "assistant")
+    #expect(delta["content"] as? String == "hello")
+}
+
+@Test func miniMaxStreamingChunkWithMissingIDIsHandled() throws {
+    let payload = """
+    {
+      "choices": [{"delta": {"content": "hi"}}],
+      "model": "MiniMax-M2.5"
+    }
+    """.data(using: .utf8)!
+
+    let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+        statusCode: 200,
+        responseData: payload,
+        provider: .miniMax
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: normalized.data) as? [String: Any])
+    let id = try #require(json["id"] as? String)
+    #expect(id.hasPrefix("chatcmpl-minimax-"))
+}
+
+@Test func miniMaxCNSameStreamingFixesApply() throws {
+    let payload = """
+    {
+      "choices": [{"delta": {"role": "", "content": "test"}}],
+      "model": "MiniMax-M2.5"
+    }
+    """.data(using: .utf8)!
+
+    let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+        statusCode: 200,
+        responseData: payload,
+        provider: .miniMaxCN
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: normalized.data) as? [String: Any])
+    let choices = try #require(json["choices"] as? [[String: Any]])
+    let delta = try #require(choices.first?["delta"] as? [String: Any])
+    #expect(delta["role"] as? String == "assistant")
+    // Also verify id was synthesized
+    let id = try #require(json["id"] as? String)
+    #expect(id.hasPrefix("chatcmpl-minimax-"))
+}
+
+@Test func miniMaxStreamingLineWithEmptyRoleIsNormalized() throws {
+    let line = """
+    data: {"choices":[{"delta":{"role":"","content":"hi"}}],"model":"MiniMax-M2.5"}
+    """
+    let normalized = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        line,
+        provider: .miniMax
+    )
+    #expect(normalized.hasPrefix("data: "))
+    let jsonStr = String(normalized.dropFirst(6))
+    let json = try #require(JSONSerialization.jsonObject(with: Data(jsonStr.utf8)) as? [String: Any])
+    let choices = try #require(json["choices"] as? [[String: Any]])
+    let delta = try #require(choices.first?["delta"] as? [String: Any])
+    #expect(delta["role"] as? String == "assistant")
+}
+
+@Test func miniMaxStreamingLineDoesNotSynthesizeID() throws {
+    let line = #"data: {"choices":[{"delta":{"content":"hi"}}],"model":"MiniMax-M2.5"}"#
+    let normalized = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        line,
+        provider: .miniMax
+    )
+    let jsonStr = String(normalized.dropFirst(6))
+    let json = try #require(JSONSerialization.jsonObject(with: Data(jsonStr.utf8)) as? [String: Any])
+    // Streaming line normalizer must NOT synthesize an id — callers manage stream-wide ids.
+    #expect(json["id"] == nil)
+}
+
+@Test func miniMaxBufferedResponseWithEmptyRoleIsNormalized() throws {
+    let payload = """
+    {
+      "id": "chatcmpl-456",
+      "choices": [{"message": {"role": "", "content": "done"}, "finish_reason": "stop"}],
+      "model": "MiniMax-M2.5"
+    }
+    """.data(using: .utf8)!
+
+    let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+        statusCode: 200,
+        responseData: payload,
+        provider: .miniMax
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: normalized.data) as? [String: Any])
+    let choices = try #require(json["choices"] as? [[String: Any]])
+    let message = try #require(choices.first?["message"] as? [String: Any])
+    #expect(message["role"] as? String == "assistant")
+}
+
+@Test func miniMaxExistingIDIsPreserved() throws {
+    let payload = """
+    {
+      "id": "chatcmpl-existing",
+      "choices": [{"delta": {"content": "hi"}}],
+      "model": "MiniMax-M2.5"
+    }
+    """.data(using: .utf8)!
+
+    let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+        statusCode: 200,
+        responseData: payload,
+        provider: .miniMax
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: normalized.data) as? [String: Any])
+    #expect(json["id"] as? String == "chatcmpl-existing")
+}
+
+// MARK: - Anthropic Passthrough Validation (v1.4.15)
+
+@Test func passthroughResponseValidation_validResponse() throws {
+    let payload = """
+    {
+      "id": "msg_123",
+      "type": "message",
+      "role": "assistant",
+      "content": [{"type": "text", "text": "hello"}],
+      "stop_reason": "end_turn",
+      "model": "MiniMax-M2.5"
+    }
+    """.data(using: .utf8)!
+
+    let validated = AnthropicTranslator.validateAnthropicPassthroughResponse(
+        statusCode: 200, responseData: payload, provider: .miniMax
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: validated.data) as? [String: Any])
+    #expect(validated.statusCode == 200)
+    #expect(json["id"] as? String == "msg_123")
+    #expect(json["role"] as? String == "assistant")
+}
+
+@Test func passthroughResponseValidation_stripsBaseResp() throws {
+    let payload = """
+    {
+      "id": "msg_123",
+      "role": "assistant",
+      "content": [{"type": "text", "text": "hi"}],
+      "stop_reason": "end_turn",
+      "base_resp": {"status_code": 0, "status_msg": "success"},
+      "input_sensitive": false,
+      "output_sensitive": false
+    }
+    """.data(using: .utf8)!
+
+    let validated = AnthropicTranslator.validateAnthropicPassthroughResponse(
+        statusCode: 200, responseData: payload, provider: .miniMax
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: validated.data) as? [String: Any])
+    #expect(json["base_resp"] == nil)
+    #expect(json["input_sensitive"] == nil)
+    #expect(json["output_sensitive"] == nil)
+}
+
+@Test func passthroughResponseValidation_fixesEmptyRole() throws {
+    let payload = """
+    {"id": "msg_123", "role": "", "content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
+    """.data(using: .utf8)!
+
+    let validated = AnthropicTranslator.validateAnthropicPassthroughResponse(
+        statusCode: 200, responseData: payload, provider: .miniMax
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: validated.data) as? [String: Any])
+    #expect(json["role"] as? String == "assistant")
+}
+
+@Test func passthroughResponseValidation_synthesizesMissingID() throws {
+    let payload = """
+    {"role": "assistant", "content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
+    """.data(using: .utf8)!
+
+    let validated = AnthropicTranslator.validateAnthropicPassthroughResponse(
+        statusCode: 200, responseData: payload, provider: .miniMax
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: validated.data) as? [String: Any])
+    let id = try #require(json["id"] as? String)
+    #expect(id.hasPrefix("msg_minimax_"))
+}
+
+@Test func passthroughResponseValidation_fixesInvalidStopReason() throws {
+    let payload = """
+    {"id": "msg_123", "role": "assistant", "content": [{"type": "text", "text": "hi"}], "stop_reason": "length"}
+    """.data(using: .utf8)!
+
+    let validated = AnthropicTranslator.validateAnthropicPassthroughResponse(
+        statusCode: 200, responseData: payload, provider: .miniMax
+    )
+    let json = try #require(JSONSerialization.jsonObject(with: validated.data) as? [String: Any])
+    #expect(json["stop_reason"] as? String == "end_turn")
+}
+
+@Test func passthroughRequestSanitization_stripsUnsupportedParams() {
+    var request: [String: Any] = [
+        "model": "MiniMax-M2.5",
+        "messages": [["role": "user", "content": "hi"]],
+        "max_tokens": 1024,
+        "temperature": 0.0,
+        "top_k": 40,
+        "stop_sequences": ["STOP"],
+        "service_tier": "auto"
+    ]
+    AnthropicTranslator.sanitizeAnthropicPassthroughRequest(&request, for: .miniMax)
+    #expect(request["top_k"] == nil)
+    #expect(request["stop_sequences"] == nil)
+    #expect(request["service_tier"] == nil)
+    #expect(request["model"] as? String == "MiniMax-M2.5")
+    #expect(request["max_tokens"] as? Int == 1024)
+    // Temperature should be clamped to 0.01
+    #expect(request["temperature"] as? Double == 0.01)
+}
+
+@Test func passthroughStreamingLineValidation_fixesEmptyRole() throws {
+    let line = #"data: {"type":"message_start","message":{"id":"msg_1","role":"","model":"MiniMax-M2.5"}}"#
+    let validated = AnthropicTranslator.validateAnthropicPassthroughStreamingLine(line, provider: .miniMax)
+    let jsonStr = String(validated.dropFirst(6))
+    let json = try #require(JSONSerialization.jsonObject(with: Data(jsonStr.utf8)) as? [String: Any])
+    let message = try #require(json["message"] as? [String: Any])
+    #expect(message["role"] as? String == "assistant")
+}
+
+@Test func passthroughStreamingLineValidation_passesNonMiniMaxThrough() {
+    let line = "data: {\"type\":\"message_start\"}"
+    let validated = AnthropicTranslator.validateAnthropicPassthroughStreamingLine(line, provider: .openAI)
+    #expect(validated == line)
+}
+
 // MARK: - Response Conversion Tests
 
 @Test func responseFromOpenAIToolCallsForcesToolUseStopReason() throws {

@@ -12,6 +12,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     case deepSeek   = "deepseek"
     case mistral    = "mistral"
     case miniMax    = "minimax"
+    case miniMaxCN  = "minimax-cn"
     case ollama     = "ollama"
     case lmStudio   = "lmstudio"
 
@@ -29,6 +30,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .deepSeek:   return "DeepSeek"
         case .mistral:    return "Mistral"
         case .miniMax:    return "MiniMax"
+        case .miniMaxCN:  return "MiniMax CN"
         case .ollama:     return "Ollama"
         case .lmStudio:   return "LM Studio"
         }
@@ -46,6 +48,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .deepSeek:   return "https://api.deepseek.com/v1"
         case .mistral:    return "https://api.mistral.ai/v1"
         case .miniMax:    return "https://api.minimax.io/v1"
+        case .miniMaxCN:  return "https://api.minimaxi.com/v1"
         case .ollama:     return "http://localhost:11434/v1"
         case .lmStudio:   return "http://localhost:1234/v1"
         }
@@ -81,7 +84,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
                 "logit_bias",
                 "stream_options"
             ]
-        case .miniMax:
+        case .miniMax, .miniMaxCN:
             return [
                 "n",
                 "response_format",
@@ -107,7 +110,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// Valid temperature range for this provider, or nil if no clamping is needed.
     public var temperatureRange: ClosedRange<Double>? {
         switch self {
-        case .miniMax: return 0.01...1.0
+        case .miniMax, .miniMaxCN: return 0.01...1.0
         default: return nil
         }
     }
@@ -115,7 +118,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// Whether this provider is in preview (may have incomplete API compatibility).
     public var isPreview: Bool {
         switch self {
-        case .miniMax: return true
+        case .miniMax, .miniMaxCN: return true
         default: return false
         }
     }
@@ -123,8 +126,10 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// Hardcoded model IDs for providers whose `/v1/models` endpoint may be absent.
     public var fallbackModelIDs: [String]? {
         switch self {
-        case .miniMax:
+        case .miniMax, .miniMaxCN:
             return [
+                "MiniMax-M2.7",
+                "MiniMax-M2.7-highspeed",
                 "MiniMax-M2.5",
                 "MiniMax-M2.5-highspeed",
                 "MiniMax-M2.1",
@@ -132,6 +137,18 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
                 "MiniMax-M2"
             ]
         default: return nil
+        }
+    }
+
+    /// Alternate API base URLs that are officially supported for the provider.
+    public var alternateAPIBaseURLs: [String] {
+        switch self {
+        case .miniMax:
+            return ["https://api.minimaxi.com/v1"]
+        case .miniMaxCN:
+            return []
+        default:
+            return []
         }
     }
 
@@ -158,8 +175,43 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .deepSeek:   return SecretKey.deepSeekAPIKey
         case .mistral:    return SecretKey.mistralAPIKey
         case .miniMax:    return SecretKey.minimaxAPIKey
+        case .miniMaxCN:  return SecretKey.minimaxCNAPIKey
         case .ollama, .lmStudio:
             return nil
         }
+    }
+
+    /// Whether this provider is a MiniMax variant (global or CN).
+    public var isMiniMax: Bool {
+        self == .miniMax || self == .miniMaxCN
+    }
+
+    /// Derives the Anthropic passthrough base URL from the OpenAI-compat base URL.
+    /// Returns nil for providers that don't support Anthropic passthrough.
+    ///
+    /// Example: `https://api.minimax.io/v1` → `https://api.minimax.io/anthropic`
+    public func anthropicPassthroughBaseURL(from openAIBaseURL: String) -> String? {
+        guard isMiniMax else { return nil }
+        var base = openAIBaseURL
+        while base.hasSuffix("/") { base.removeLast() }
+        if base.hasSuffix("/v1") {
+            return String(base.dropLast(3)) + "/anthropic"
+        }
+        // Fallback: append /anthropic if the URL doesn't end with /v1
+        return base + "/anthropic"
+    }
+
+    /// Parameters to strip from Anthropic-format requests before forwarding to
+    /// MiniMax's `/anthropic` endpoint (which doesn't support them).
+    public var unsupportedAnthropicParameters: [String] {
+        guard isMiniMax else { return [] }
+        return [
+            "top_k",
+            "stop_sequences",
+            "service_tier",
+            "mcp_servers",
+            "container",
+            "context_management"
+        ]
     }
 }

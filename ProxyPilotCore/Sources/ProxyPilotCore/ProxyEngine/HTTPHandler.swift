@@ -151,13 +151,69 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             bodyData = Data()
         }
 
-        guard let anthropicRequest = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
+        guard var anthropicRequest = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
             sendErrorResponse(context: context, status: .badRequest, message: "Invalid JSON body")
             return
         }
 
         let isStreaming = anthropicRequest["stream"] as? Bool == true
+        let headers: [(String, String)] = head.headers.map { ($0.name, $0.value) }
+        let ctxBox = UnsafeSendableBox(value: context)
+        let eventLoop = context.eventLoop
 
+        // --- Anthropic Passthrough: forward directly to MiniMax /anthropic endpoint ---
+        if config.isAnthropicPassthroughActive {
+            // Remap model to the preferred upstream model.
+            if !config.preferredAnthropicUpstreamModel.isEmpty {
+                anthropicRequest["model"] = config.preferredAnthropicUpstreamModel
+            }
+            AnthropicTranslator.sanitizeAnthropicPassthroughRequest(&anthropicRequest, for: config.upstreamProvider)
+
+            guard let passthroughBody = try? JSONSerialization.data(withJSONObject: anthropicRequest) else {
+                sendErrorResponse(context: context, status: .internalServerError, message: "Failed to serialize passthrough request")
+                return
+            }
+
+            guard let passthroughBase = config.upstreamProvider.anthropicPassthroughBaseURL(from: config.upstreamAPIBaseURL) else {
+                sendErrorResponse(context: context, status: .internalServerError, message: "No Anthropic passthrough URL for provider")
+                return
+            }
+
+            // Build a temporary config with the passthrough base URL so UpstreamClient targets the right host.
+            let passthroughConfig = ProxyConfiguration(
+                host: config.host,
+                port: config.port,
+                upstreamProvider: config.upstreamProvider,
+                upstreamAPIBaseURL: passthroughBase,
+                upstreamAPIKey: config.upstreamAPIKey,
+                masterKey: config.masterKey,
+                allowedModels: config.allowedModels,
+                requiresAuth: config.requiresAuth,
+                preferredAnthropicUpstreamModel: config.preferredAnthropicUpstreamModel,
+                sessionStats: config.sessionStats
+            )
+
+            if isStreaming {
+                handleAnthropicPassthroughStreaming(
+                    ctxBox: ctxBox,
+                    eventLoop: eventLoop,
+                    headers: headers,
+                    body: passthroughBody,
+                    config: passthroughConfig
+                )
+            } else {
+                handleAnthropicPassthroughBuffered(
+                    ctxBox: ctxBox,
+                    eventLoop: eventLoop,
+                    headers: headers,
+                    body: passthroughBody,
+                    config: passthroughConfig
+                )
+            }
+            return
+        }
+
+        // --- Standard path: translate Anthropic → OpenAI ---
         let originalModel = anthropicRequest["model"] as? String ?? "claude"
         let resolvedUpstreamModel = config.preferredAnthropicUpstreamModel.isEmpty
             ? (anthropicRequest["model"] as? String ?? "")
@@ -185,12 +241,6 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        // Collect headers as tuples
-        let headers: [(String, String)] = head.headers.map { ($0.name, $0.value) }
-
-        let ctxBox = UnsafeSendableBox(value: context)
-        let eventLoop = context.eventLoop
-
         if isStreaming {
             handleAnthropicStreaming(
                 ctxBox: ctxBox,
@@ -213,6 +263,148 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             )
         }
     }
+
+    // MARK: - Anthropic Passthrough Handlers
+
+    private func handleAnthropicPassthroughBuffered(
+        ctxBox: UnsafeSendableBox<ChannelHandlerContext>,
+        eventLoop: EventLoop,
+        headers: [(String, String)],
+        body: Data,
+        config: ProxyConfiguration
+    ) {
+        Task {
+            do {
+                let (responseData, statusCode, _) = try await UpstreamClient.forward(
+                    path: "/v1/messages",
+                    method: "POST",
+                    headers: headers,
+                    body: body,
+                    config: config
+                )
+
+                let validated = AnthropicTranslator.validateAnthropicPassthroughResponse(
+                    statusCode: statusCode,
+                    responseData: responseData,
+                    provider: config.upstreamProvider
+                )
+
+                guard let responseString = String(data: validated.data, encoding: .utf8) else {
+                    eventLoop.execute {
+                        self.sendErrorResponse(context: ctxBox.value, status: .badGateway, message: "Failed to decode passthrough response")
+                        ctxBox.value.flush()
+                    }
+                    return
+                }
+
+                let httpStatus: HTTPResponseStatus = .init(statusCode: validated.statusCode)
+                eventLoop.execute {
+                    self.sendJSONResponse(context: ctxBox.value, status: httpStatus, json: responseString)
+                    ctxBox.value.flush()
+                }
+            } catch {
+                let message: String
+                if case let UpstreamClient.UpstreamError.httpError(statusCode, bodyData) = error {
+                    message = self.upstreamErrorMessage(
+                        statusCode: statusCode,
+                        responseData: bodyData,
+                        provider: config.upstreamProvider
+                    )
+                } else {
+                    message = "Upstream passthrough error: \(error.localizedDescription)"
+                }
+                eventLoop.execute {
+                    self.sendErrorResponse(context: ctxBox.value, status: .badGateway, message: message)
+                    ctxBox.value.flush()
+                }
+            }
+        }
+    }
+
+    private func handleAnthropicPassthroughStreaming(
+        ctxBox: UnsafeSendableBox<ChannelHandlerContext>,
+        eventLoop: EventLoop,
+        headers: [(String, String)],
+        body: Data,
+        config: ProxyConfiguration
+    ) {
+        Task {
+            var streamStarted = false
+
+            do {
+                let stream = UpstreamClient.forwardStreaming(
+                    path: "/v1/messages",
+                    method: "POST",
+                    headers: headers,
+                    body: body,
+                    config: config
+                )
+
+                for try await chunk in stream {
+                    guard let line = String(data: chunk, encoding: .utf8)?.trimmingCharacters(in: .newlines) else {
+                        continue
+                    }
+
+                    // Validate each SSE event.
+                    let validatedLine = AnthropicTranslator.validateAnthropicPassthroughStreamingLine(
+                        line,
+                        provider: config.upstreamProvider
+                    )
+
+                    let lineData = Data((validatedLine + "\n").utf8)
+
+                    if !streamStarted {
+                        streamStarted = true
+                        eventLoop.execute {
+                            var headers = HTTPHeaders()
+                            headers.add(name: "Content-Type", value: "text/event-stream")
+                            headers.add(name: "Cache-Control", value: "no-cache")
+                            headers.add(name: "Connection", value: "keep-alive")
+                            let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+                            ctxBox.value.write(self.wrapOutboundOut(.head(head)), promise: nil)
+                        }
+                    }
+
+                    let chunkCopy = lineData
+                    eventLoop.execute {
+                        var buffer = ctxBox.value.channel.allocator.buffer(capacity: chunkCopy.count)
+                        buffer.writeBytes(chunkCopy)
+                        ctxBox.value.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+                        ctxBox.value.flush()
+                    }
+                }
+
+                // Send end
+                eventLoop.execute {
+                    if !streamStarted {
+                        let head = HTTPResponseHead(version: .http1_1, status: .ok)
+                        ctxBox.value.write(self.wrapOutboundOut(.head(head)), promise: nil)
+                    }
+                    ctxBox.value.write(self.wrapOutboundOut(.end(nil)), promise: nil)
+                    ctxBox.value.flush()
+                }
+            } catch {
+                let message: String
+                if case let UpstreamClient.UpstreamError.httpError(_, bodyData) = error {
+                    message = self.upstreamErrorMessage(
+                        statusCode: 502,
+                        responseData: bodyData,
+                        provider: config.upstreamProvider
+                    )
+                } else {
+                    message = "Upstream passthrough streaming error: \(error.localizedDescription)"
+                }
+                eventLoop.execute {
+                    if !streamStarted {
+                        self.sendErrorResponse(context: ctxBox.value, status: .badGateway, message: message)
+                    }
+                    ctxBox.value.flush()
+                }
+            }
+        }
+    }
+
+    // MARK: - Standard Anthropic Translation Handlers
 
     private func handleAnthropicBuffered(
         ctxBox: UnsafeSendableBox<ChannelHandlerContext>,
@@ -490,19 +682,24 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     ) {
         Task {
             do {
-                let (responseData, statusCode, responseHeaders) = try await UpstreamClient.forward(
+                let (responseData, upstreamStatusCode, responseHeaders) = try await UpstreamClient.forward(
                     path: config.upstreamProvider.chatCompletionsPath,
                     method: method,
                     headers: headers,
                     body: body,
                     config: config
                 )
+                let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+                    statusCode: upstreamStatusCode,
+                    responseData: responseData,
+                    provider: config.upstreamProvider
+                )
 
                 eventLoop.execute {
                     self.sendUpstreamResponse(
                         context: ctxBox.value,
-                        data: responseData,
-                        statusCode: statusCode,
+                        data: normalized.data,
+                        statusCode: normalized.statusCode,
                         upstreamHeaders: responseHeaders
                     )
                     ctxBox.value.flush()
@@ -543,6 +740,12 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 )
 
                 for try await chunk in stream {
+                    let normalizedLine = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+                        String(decoding: chunk, as: UTF8.self).trimmingCharacters(in: .newlines),
+                        provider: config.upstreamProvider
+                    )
+                    let chunkData = Data((normalizedLine + "\n").utf8)
+
                     if !streamStarted {
                         streamStarted = true
                         eventLoop.execute {
@@ -561,7 +764,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         }
                     }
 
-                    let chunkCopy = chunk
+                    let chunkCopy = chunkData
                     eventLoop.execute {
                         var buffer = ctxBox.value.channel.allocator.buffer(capacity: chunkCopy.count)
                         buffer.writeBytes(chunkCopy)

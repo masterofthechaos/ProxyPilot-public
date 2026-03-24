@@ -27,6 +27,7 @@ public enum SecretKey {
     public static let deepSeekAPIKey   = "DEEPSEEK_API_KEY"
     public static let mistralAPIKey    = "MISTRAL_API_KEY"
     public static let minimaxAPIKey    = "MINIMAX_API_KEY"
+    public static let minimaxCNAPIKey  = "MINIMAX_CN_API_KEY"
     public static let masterKey        = "LITELLM_MASTER_KEY"
 }
 

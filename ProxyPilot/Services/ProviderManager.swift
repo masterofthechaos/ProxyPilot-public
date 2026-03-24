@@ -14,6 +14,7 @@ final class ProviderManager: ObservableObject {
     static let exactoFilterDefaultsKey = "proxypilot.openrouter.exactoFilter"
     static let verifiedFilterDefaultsKey = "proxypilot.openrouter.verifiedFilter"
     static let showModelMetadataDefaultsKey = "proxypilot.showModelMetadata"
+    static let miniMaxRoutingModeDefaultsKey = "proxypilot.miniMaxRoutingMode"
     private static let verifiedModelsRemoteURL = URL(string: "https://micah.chat/proxypilot/verified-models.json")!
 
     static func defaultModelsKey(for provider: UpstreamProvider) -> String {
@@ -80,6 +81,12 @@ final class ProviderManager: ObservableObject {
         }
     }
 
+    @Published var miniMaxRoutingMode: MiniMaxRoutingMode = .standard {
+        didSet {
+            defaults.set(miniMaxRoutingMode.rawValue, forKey: Self.miniMaxRoutingModeDefaultsKey)
+        }
+    }
+
     @Published var verifiedModels: VerifiedModels = VerifiedModels(entries: [])
 
     @Published var showModelMetadata: Bool = true {
@@ -126,6 +133,11 @@ final class ProviderManager: ObservableObject {
         exactoFilterEnabled = defaults.object(forKey: Self.exactoFilterDefaultsKey) as? Bool ?? true
         verifiedFilterEnabled = defaults.object(forKey: Self.verifiedFilterDefaultsKey) as? Bool ?? false
         showModelMetadata = defaults.object(forKey: Self.showModelMetadataDefaultsKey) as? Bool ?? true
+
+        if let rawMode = defaults.string(forKey: Self.miniMaxRoutingModeDefaultsKey),
+           let mode = MiniMaxRoutingMode(rawValue: rawMode) {
+            miniMaxRoutingMode = mode
+        }
     }
 
     // MARK: - Computed Properties
@@ -153,6 +165,8 @@ final class ProviderManager: ObservableObject {
             candidates = selected.sorted()
         } else if !ids.isEmpty {
             candidates = ids.sorted()
+        } else if let fallback = upstreamProvider.fallbackModelIDs {
+            candidates = fallback
         } else {
             candidates = savedDefaultModels
         }
@@ -179,6 +193,9 @@ final class ProviderManager: ObservableObject {
         }
 
         var fallbackModels = Set(savedDefaultModels)
+        if fallbackModels.isEmpty, let providerFallback = upstreamProvider.fallbackModelIDs {
+            fallbackModels.formUnion(providerFallback)
+        }
         let trimmedSelection = selectedXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedSelection.isEmpty {
             fallbackModels.insert(trimmedSelection)
@@ -305,7 +322,9 @@ final class ProviderManager: ObservableObject {
     func preferredXcodeAgentModel(from models: [String], provider: UpstreamProvider? = nil) -> String {
         let activeProvider = provider ?? upstreamProvider
         let hints = defaults.stringArray(forKey: Self.defaultModelsKey(for: activeProvider)) ?? []
-        let fallback = hints.first ?? "gpt-4o"
+        let fallback = hints.first
+            ?? activeProvider.fallbackModelIDs?.first
+            ?? ""
         guard !models.isEmpty else { return fallback }
         let lowerToOriginal = Dictionary(uniqueKeysWithValues: models.map { ($0.lowercased(), $0) })
         for preferred in hints {

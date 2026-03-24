@@ -8,7 +8,7 @@ struct ModelsCommand: AsyncParsableCommand {
         abstract: "List available models from an upstream provider."
     )
 
-    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, ollama, lmstudio).")
+    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, ollama, lmstudio).")
     var provider: String = "openai"
 
     @Option(name: .long, help: "Override the upstream API base URL.")

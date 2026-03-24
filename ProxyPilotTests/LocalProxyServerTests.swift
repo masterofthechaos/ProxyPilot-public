@@ -469,6 +469,7 @@ final class LocalProxyServerTests: XCTestCase {
             allowedModels: [],
             requiresAuth: false,
             anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
             preferredAnthropicUpstreamModel: "llama3",
             googleThoughtSignatureStore: nil
         )
@@ -486,6 +487,7 @@ final class LocalProxyServerTests: XCTestCase {
             allowedModels: ["glm-5"],
             requiresAuth: true,
             anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
             preferredAnthropicUpstreamModel: "glm-5",
             googleThoughtSignatureStore: nil
         )

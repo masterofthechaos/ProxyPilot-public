@@ -150,21 +150,41 @@ final class ProxyService {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            if let fallback = fallbackModels(for: provider, statusCode: http.statusCode) {
+                return fallback
+            }
             let body = String(data: data, encoding: .utf8) ?? ""
             throw ProxyServiceError.httpStatus(http.statusCode, body)
         }
 
-        let decoded = try JSONDecoder().decode(OpenAIModelsResponse.self, from: data)
-        return decoded.data.map { model in
-            let promptPer1M = model.pricing?.prompt.flatMap(Double.init).map { $0 * 1_000_000 }
-            let completionPer1M = model.pricing?.completion.flatMap(Double.init).map { $0 * 1_000_000 }
-            return UpstreamModel(
-                id: model.id,
-                contextLength: model.contextLength,
-                promptPricePer1M: promptPer1M,
-                completionPricePer1M: completionPer1M
-            )
-        }.sorted { $0.id < $1.id }
+        let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+            statusCode: 200,
+            responseData: data,
+            provider: provider
+        )
+        if normalized.statusCode != 200 {
+            let body = String(data: normalized.data, encoding: .utf8) ?? ""
+            throw ProxyServiceError.httpStatus(normalized.statusCode, body)
+        }
+
+        do {
+            let decoded = try JSONDecoder().decode(OpenAIModelsResponse.self, from: normalized.data)
+            return decoded.data.map { model in
+                let promptPer1M = model.pricing?.prompt.flatMap(Double.init).map { $0 * 1_000_000 }
+                let completionPer1M = model.pricing?.completion.flatMap(Double.init).map { $0 * 1_000_000 }
+                return UpstreamModel(
+                    id: model.id,
+                    contextLength: model.contextLength,
+                    promptPricePer1M: promptPer1M,
+                    completionPricePer1M: completionPer1M
+                )
+            }.sorted { $0.id < $1.id }
+        } catch {
+            if let fallback = provider.fallbackModelIDs {
+                return fallback.map(UpstreamModel.idOnly)
+            }
+            throw error
+        }
     }
 
     func testUpstreamChat(
@@ -184,16 +204,19 @@ final class ProxyService {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 20
 
-        let body = ChatCompletionRequest(
-            model: model,
-            messages: [
-                .init(role: "system", content: "You are a brief assistant."),
-                .init(role: "user", content: "Reply with exactly: ok")
+        var body: [String: Any] = [
+            "model": model,
+            "messages": [
+                ["role": "system", "content": "You are a brief assistant."],
+                ["role": "user", "content": "Reply with exactly: ok"]
             ],
-            temperature: 0.0,
-            maxTokens: 256
-        )
-        request.httpBody = try JSONEncoder().encode(body)
+            "temperature": 0.0,
+            "max_tokens": 256
+        ]
+        AnthropicTranslator.stripUnsupportedParameters(&body, for: provider)
+        AnthropicTranslator.applyParameterRewrites(&body, for: provider)
+        AnthropicTranslator.clampTemperature(&body, for: provider)
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
@@ -201,8 +224,26 @@ final class ProxyService {
             throw ProxyServiceError.httpStatus(http.statusCode, bodyText)
         }
 
-        let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
+        let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
+            statusCode: 200,
+            responseData: data,
+            provider: provider
+        )
+        if normalized.statusCode != 200 {
+            let bodyText = String(data: normalized.data, encoding: .utf8) ?? ""
+            throw ProxyServiceError.httpStatus(normalized.statusCode, bodyText)
+        }
+
+        let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: normalized.data)
         return decoded.text ?? ""
+    }
+
+    private func fallbackModels(for provider: UpstreamProvider, statusCode: Int) -> [UpstreamModel]? {
+        guard [404, 405, 410, 501].contains(statusCode),
+              let fallback = provider.fallbackModelIDs else {
+            return nil
+        }
+        return fallback.map(UpstreamModel.idOnly)
     }
 
     private func run(script: URL) async throws {
@@ -271,23 +312,6 @@ private struct OpenAIModelsResponse: Decodable {
         }
     }
     let data: [Model]
-}
-
-private struct ChatCompletionRequest: Encodable {
-    let model: String
-    let messages: [Message]
-    let temperature: Double?
-    let maxTokens: Int?
-
-    struct Message: Encodable {
-        let role: String
-        let content: String
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case model, messages, temperature
-        case maxTokens = "max_tokens"
-    }
 }
 
 private struct ChatCompletionResponse: Decodable {
