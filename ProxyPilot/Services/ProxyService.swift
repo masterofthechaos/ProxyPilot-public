@@ -176,7 +176,8 @@ final class ProxyService {
                     id: model.id,
                     contextLength: model.contextLength,
                     promptPricePer1M: promptPer1M,
-                    completionPricePer1M: completionPer1M
+                    completionPricePer1M: completionPer1M,
+                    supportedParameters: Set(model.supportedParameters ?? [])
                 )
             }.sorted { $0.id < $1.id }
         } catch {
@@ -299,6 +300,7 @@ private struct OpenAIModelsResponse: Decodable {
         let id: String
         let contextLength: Int?
         let pricing: Pricing?
+        let supportedParameters: [String]?
 
         struct Pricing: Decodable {
             let prompt: String?
@@ -309,6 +311,7 @@ private struct OpenAIModelsResponse: Decodable {
             case id
             case contextLength = "context_length"
             case pricing
+            case supportedParameters = "supported_parameters"
         }
     }
     let data: [Model]

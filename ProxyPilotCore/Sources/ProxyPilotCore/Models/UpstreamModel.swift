@@ -5,16 +5,50 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable {
     public let contextLength: Int?
     public let promptPricePer1M: Double?
     public let completionPricePer1M: Double?
+    public let supportedParameters: Set<String>
 
-    public init(id: String, contextLength: Int?, promptPricePer1M: Double?, completionPricePer1M: Double?) {
+    public init(
+        id: String,
+        contextLength: Int?,
+        promptPricePer1M: Double?,
+        completionPricePer1M: Double?,
+        supportedParameters: Set<String> = []
+    ) {
         self.id = id
         self.contextLength = contextLength
         self.promptPricePer1M = promptPricePer1M
         self.completionPricePer1M = completionPricePer1M
+        self.supportedParameters = supportedParameters
     }
 
     public static func idOnly(_ id: String) -> UpstreamModel {
         UpstreamModel(id: id, contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil)
+    }
+
+    public var baseIDWithoutExactoSuffix: String {
+        id.hasSuffix(":exacto") ? String(id.dropLast(":exacto".count)) : id
+    }
+
+    public var exactoVariantID: String {
+        baseIDWithoutExactoSuffix + ":exacto"
+    }
+
+    public var supportsToolCalling: Bool {
+        supportedParameters.contains("tools") || supportedParameters.contains("tool_choice")
+    }
+
+    public var isExactoEligible: Bool {
+        id.hasSuffix(":exacto") || supportsToolCalling
+    }
+
+    public var exactoVariant: UpstreamModel {
+        UpstreamModel(
+            id: exactoVariantID,
+            contextLength: contextLength,
+            promptPricePer1M: promptPricePer1M,
+            completionPricePer1M: completionPricePer1M,
+            supportedParameters: supportedParameters
+        )
     }
 
     public var contextFormatted: String? {
@@ -61,6 +95,10 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable {
         let codingKeywords = ["code", "coder", "codestral", "starcoder", "deepseek-v"]
         if codingKeywords.contains(where: { lower.contains($0) }) {
             caps.insert(.coding)
+        }
+
+        if supportsToolCalling {
+            caps.insert(.toolCalling)
         }
 
         return caps
@@ -113,11 +151,15 @@ public enum PricingTier: String, Sendable {
 }
 
 public enum ModelCapability: String, Hashable, Sendable {
+    case toolCalling
     case reasoning
     case vision
     case coding
 
     public var label: String {
-        rawValue.capitalized
+        switch self {
+        case .toolCalling: return "Tools"
+        default: return rawValue.capitalized
+        }
     }
 }

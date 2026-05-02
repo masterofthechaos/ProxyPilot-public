@@ -79,7 +79,7 @@ enum MCPServerSetup {
 
         let server = Server(
             name: "proxypilot",
-            version: "1.5.0",
+            version: "1.5.1",
             title: "ProxyPilot",
             instructions: """
             ProxyPilot routes Xcode Agent Mode requests through alternative AI providers.
@@ -193,7 +193,7 @@ enum MCPServerSetup {
                         "provider": stringProp("Upstream provider (default: current proxy provider). Options: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, ollama, lmstudio"),
                         "key": stringProp("API key (optional, falls back to secrets store)"),
                         "url": stringProp("Override base URL"),
-                        "filter": stringProp("Filter: 'exacto' for OpenRouter :exacto models, 'verified' for ProxyPilot Verified models"),
+                        "filter": stringProp("Filter: 'exacto' to return explicit OpenRouter :exacto slugs, 'verified' for ProxyPilot Verified models"),
                     ]),
                     annotations: .init(
                         readOnlyHint: true,

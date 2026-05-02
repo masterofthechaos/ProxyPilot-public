@@ -30,10 +30,10 @@ final class ModelDiscoveryTests: XCTestCase {
         XCTAssertThrowsError(try ModelDiscovery.parseModelIDs(from: json))
     }
 
-    func testFilterExactoModels() {
-        let models = ["gpt-4o", "anthropic/claude-3:exacto", "google/gemini-2:exacto", "meta/llama-3"]
+    func testFilterExactoModelsReturnsExplicitVirtualVariants() {
+        let models = ["gpt-4o", "anthropic/claude-3:exacto", "google/gemini-2", "anthropic/claude-3"]
         let filtered = ModelDiscovery.filterExacto(models)
-        XCTAssertEqual(filtered, ["anthropic/claude-3:exacto", "google/gemini-2:exacto"])
+        XCTAssertEqual(filtered, ["gpt-4o:exacto", "anthropic/claude-3:exacto", "google/gemini-2:exacto"])
     }
 
     func testFilterVerifiedModels() {

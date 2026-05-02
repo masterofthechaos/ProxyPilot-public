@@ -510,13 +510,14 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                     if vm.upstreamProvider == .openRouter {
-                        Toggle("Show :exacto models only", isOn: Binding(
+                        Toggle("Use Exacto routing for tool-capable models", isOn: Binding(
                             get: { vm.exactoFilterEnabled },
                             set: { vm.exactoFilterEnabled = $0 }
                         ))
                         .toggleStyle(.switch)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .help("Shows OpenRouter models that advertise tool calling and appends :exacto to selected slugs. OpenRouter Auto Exacto also applies automatically to tool-calling requests.")
 
                         Toggle("Show ProxyPilot Verified only", isOn: Binding(
                             get: { vm.verifiedFilterEnabled },
@@ -1187,7 +1188,7 @@ struct ContentView: View {
                     set: { vm.telemetryOptIn = $0 }
                 ))
                 .toggleStyle(.switch)
-                .help("Default off. Local event logs are always recorded for support diagnostics.")
+                .help("Optional analytics are off by default. Minimal app-open and version health reporting stays on.")
             }
 
             Section("Startup") {
@@ -1579,14 +1580,11 @@ private struct AnalyticsOptInView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Enable anonymous app analytics?")
+            Text("Please consider sharing basic, anonymous analytics.")
                 .font(.title3.bold())
 
-            Text("ProxyPilot can collect anonymous debugging data to improve product quality for everyone. Please consider enabling this feature to support this open source project.")
+            Text("ProxyPilot is an open-source project that benefits from anonymous debugging data. By default, ProxyPilot only reports app opens and app version so update adoption can be tracked. If you opt in, anonymous analytics also include successful proxy engagement and crash reporting. Prompts, endpoint IDs, and system info are never collected, and you can change this any time under the Advanced tab.")
                 .foregroundStyle(.secondary)
-
-            Text("All data collection is **disabled** by default.")
-                .font(.callout)
 
             HStack {
                 Spacer()

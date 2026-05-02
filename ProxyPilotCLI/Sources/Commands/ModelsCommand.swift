@@ -17,7 +17,7 @@ struct ModelsCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Upstream API key. Falls back to keychain/secrets store if omitted.")
     var key: String?
 
-    @Option(name: .long, help: "Filter: 'exacto' for OpenRouter :exacto models, 'verified' for ProxyPilot Verified models.")
+    @Option(name: .long, help: "Filter: 'exacto' to return explicit OpenRouter :exacto slugs, 'verified' for ProxyPilot Verified models.")
     var filter: String?
 
     @Flag(name: .long, help: "Emit JSON output.")

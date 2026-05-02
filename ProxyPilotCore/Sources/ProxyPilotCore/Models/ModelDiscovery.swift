@@ -76,9 +76,24 @@ public enum ModelDiscovery {
         }
     }
 
-    /// Filter to only :exacto suffixed models (OpenRouter).
+    /// Convert model IDs to explicit OpenRouter :exacto variants.
+    ///
+    /// OpenRouter now treats :exacto as a virtual suffix instead of listing
+    /// separate endpoint records, so callers that only have IDs should preserve
+    /// the old CLI/MCP affordance by returning explicit :exacto slugs.
     public static func filterExacto(_ models: [String]) -> [String] {
-        models.filter { $0.hasSuffix(":exacto") }
+        var seen = Set<String>()
+        var result: [String] = []
+
+        for model in models {
+            let base = model.hasSuffix(":exacto") ? String(model.dropLast(":exacto".count)) : model
+            let exacto = base + ":exacto"
+            if seen.insert(exacto).inserted {
+                result.append(exacto)
+            }
+        }
+
+        return result
     }
 
     /// Filter to only verified models.

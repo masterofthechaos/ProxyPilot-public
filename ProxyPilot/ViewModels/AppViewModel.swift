@@ -84,6 +84,8 @@ final class AppViewModel: ObservableObject {
     private var hasTrackedFirstSuccessfulRequest = false
     private var hasEvaluatedKeychainPrimerThisLaunch = false
     private static let preflightExpandedDefaultsKey = "proxypilot.preflightExpanded"
+    private static let appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+    private static let buildNumber: String = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
 
     @Published var proxyURLString: String = "http://127.0.0.1:4000"
 
@@ -689,10 +691,9 @@ final class AppViewModel: ObservableObject {
             }
 
         let priorSessionLikelyCrashed = telemetryService.beginSession()
-        telemetryService.track(
-            name: "app_opened",
-            payload: ["mode": useBuiltInProxy ? "builtin" : "litellm"],
-            telemetryOptIn: telemetryOptIn
+        telemetryService.trackCoreHealthAppOpen(
+            appVersion: Self.appVersion,
+            buildNumber: Self.buildNumber
         )
         if priorSessionLikelyCrashed {
             telemetryService.track(name: "previous_session_may_have_crashed", telemetryOptIn: telemetryOptIn)

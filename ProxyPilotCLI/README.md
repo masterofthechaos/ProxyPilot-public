@@ -256,7 +256,7 @@ proxypilot models [--provider <provider>] [--url <base-url>] [--key <key>] [--fi
 | `--provider` | `openai` | Upstream provider |
 | `--url` | provider default | Override upstream API base URL |
 | `--key` | — | Upstream API key |
-| `--filter` | — | Optional filter (`exacto`, `verified`) |
+| `--filter` | — | Optional filter (`exacto` returns explicit OpenRouter `:exacto` slugs; `verified` uses ProxyPilot Verified models) |
 | `--json` | false | Emit JSON output |
 
 ---

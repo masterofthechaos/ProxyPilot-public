@@ -12,17 +12,28 @@ struct TelemetryEvent: Codable {
 final class TelemetryService {
     static let shared = TelemetryService()
 
+    private enum RemoteDeliveryKind {
+        case coreHealth
+        case analytics
+    }
+
     private let defaults = UserDefaults.standard
     private let installIDKey = "proxypilot.telemetry.installID"
     private let crashMarkerURL: URL
     private let localEventLogURL: URL
+    private let remoteCaptureHook: ((String, [String: String]) -> Void)?
     private var sessionID = UUID().uuidString
 
-    private init() {
-        let base = FileManager.default.temporaryDirectory.appendingPathComponent("ProxyPilotTelemetry", isDirectory: true)
+    init(
+        baseDirectory: URL? = nil,
+        remoteCaptureHook: ((String, [String: String]) -> Void)? = nil
+    ) {
+        let base = (baseDirectory ?? FileManager.default.temporaryDirectory)
+            .appendingPathComponent("ProxyPilotTelemetry", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         crashMarkerURL = base.appendingPathComponent("session.marker")
         localEventLogURL = base.appendingPathComponent("events.ndjson")
+        self.remoteCaptureHook = remoteCaptureHook
     }
 
     var installID: String {
@@ -45,19 +56,36 @@ final class TelemetryService {
         try? FileManager.default.removeItem(at: crashMarkerURL)
     }
 
+    func trackCoreHealthAppOpen(appVersion: String, buildNumber: String) {
+        let event = makeEvent(
+            name: "app_opened",
+            payload: [
+                "app_version": appVersion,
+                "build_number": buildNumber
+            ]
+        )
+
+        persistLocally(event: event)
+        sendToPostHog(event: event, delivery: .coreHealth)
+    }
+
     func track(name: String, payload: [String: String] = [:], telemetryOptIn: Bool) {
-        let event = TelemetryEvent(
+        let event = makeEvent(name: name, payload: payload)
+
+        persistLocally(event: event)
+        if telemetryOptIn {
+            sendToPostHog(event: event, delivery: .analytics)
+        }
+    }
+
+    private func makeEvent(name: String, payload: [String: String]) -> TelemetryEvent {
+        TelemetryEvent(
             name: name,
             timestamp: Date(),
             installID: installID,
             sessionID: sessionID,
             payload: payload
         )
-
-        persistLocally(event: event)
-        if telemetryOptIn {
-            sendToPostHog(event: event)
-        }
     }
 
     private func persistLocally(event: TelemetryEvent) {
@@ -78,20 +106,26 @@ final class TelemetryService {
         }
     }
 
-    private func sendToPostHog(event: TelemetryEvent) {
+    private func sendToPostHog(event: TelemetryEvent, delivery: RemoteDeliveryKind) {
+        var properties: [String: String] = event.payload
+        switch delivery {
+        case .analytics:
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+            properties["session_id"] = event.sessionID
+            properties["$lib"] = "proxypilot"
+            properties["$lib_version"] = version
+            properties["$os"] = "macOS"
+        case .coreHealth:
+            break
+        }
+
+        remoteCaptureHook?(event.name, properties)
+
         guard let apiKey = Bundle.main.object(forInfoDictionaryKey: "POSTHOG_API_KEY") as? String,
               !apiKey.isEmpty,
               let url = URL(string: "https://us.i.posthog.com/capture/") else {
             return
         }
-
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
-
-        var properties: [String: String] = event.payload
-        properties["session_id"] = event.sessionID
-        properties["$lib"] = "proxypilot"
-        properties["$lib_version"] = version
-        properties["$os"] = "macOS"
 
         let body: [String: Any] = [
             "api_key": apiKey,

@@ -151,18 +151,21 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.selectedUpstreamModels.isEmpty)
     }
 
-    func testExactoFilterShowsOnlyExactoModelsForOpenRouter() {
+    func testExactoFilterShowsToolCapableModelsAsExactoVariantsForOpenRouter() {
         let vm = AppViewModel(defaults: defaults)
         vm.upstreamProvider = .openRouter
         vm.upstreamModels = [
-            UpstreamModel(id: "anthropic/claude-opus-4:exacto", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
-            UpstreamModel(id: "anthropic/claude-opus-4", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "anthropic/claude-opus-4", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil, supportedParameters: ["tools"]),
+            UpstreamModel(id: "meta/llama-3", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
             UpstreamModel(id: "google/gemini-3.1-pro:exacto", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
         ]
         vm.exactoFilterEnabled = true
 
         XCTAssertEqual(vm.filteredUpstreamModels.count, 2)
-        XCTAssertTrue(vm.filteredUpstreamModels.allSatisfy { $0.id.contains(":exacto") })
+        XCTAssertEqual(vm.filteredUpstreamModels.map(\.id), [
+            "anthropic/claude-opus-4:exacto",
+            "google/gemini-3.1-pro:exacto"
+        ])
     }
 
     func testExactoFilterDisabledShowsAllModels() {
@@ -193,14 +196,15 @@ final class AppViewModelTests: XCTestCase {
         let vm = AppViewModel(defaults: defaults)
         vm.upstreamProvider = .openRouter
         vm.upstreamModels = [
-            UpstreamModel(id: "anthropic/claude-opus-4:exacto", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
-            UpstreamModel(id: "anthropic/claude-opus-4", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "anthropic/claude-opus-4", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil, supportedParameters: ["tools"]),
+            UpstreamModel(id: "meta/llama-3", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
         ]
         vm.exactoFilterEnabled = true
         vm.selectedUpstreamModels = []
 
         vm.selectAllUpstreamModels()
         XCTAssertEqual(vm.selectedUpstreamModels, ["anthropic/claude-opus-4:exacto"])
+        XCTAssertEqual(vm.effectiveXcodeAgentModel, "anthropic/claude-opus-4:exacto")
     }
 
     func testExactoFilterPersistence() {
@@ -320,6 +324,24 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.showOnboardingWizard) // fresh defaults, onboarding not done
         vm.maybeShowAnalyticsPrompt()
         XCTAssertFalse(vm.showAnalyticsPrompt)
+    }
+
+    func testAppOpenedHealthHeartbeatIsSentWithoutAnalyticsOptIn() {
+        var capturedEvents: [(name: String, properties: [String: String])] = []
+        let telemetryService = TelemetryService(
+            baseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true),
+            remoteCaptureHook: { name, properties in
+                capturedEvents.append((name: name, properties: properties))
+            }
+        )
+
+        _ = AppViewModel(defaults: defaults, telemetryService: telemetryService)
+
+        XCTAssertEqual(capturedEvents.count, 1)
+        XCTAssertEqual(capturedEvents[0].name, "app_opened")
+        XCTAssertEqual(Set(capturedEvents[0].properties.keys), ["app_version", "build_number"])
+        XCTAssertNotNil(capturedEvents[0].properties["app_version"])
+        XCTAssertNotNil(capturedEvents[0].properties["build_number"])
     }
 
     // MARK: - Custom Providers (v1.4.18)

@@ -20,7 +20,13 @@ public struct VerifiedModels: Sendable {
     public var isEmpty: Bool { ids.isEmpty }
 
     public func contains(_ modelID: String) -> Bool {
-        ids.contains(modelID)
+        if ids.contains(modelID) {
+            return true
+        }
+        if modelID.hasSuffix(":exacto") {
+            return ids.contains(String(modelID.dropLast(":exacto".count)))
+        }
+        return ids.contains(modelID + ":exacto")
     }
 
     /// Fetch from a remote URL. Returns empty array on failure.

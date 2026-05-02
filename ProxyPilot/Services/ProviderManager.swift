@@ -159,10 +159,10 @@ final class ProviderManager: ObservableObject {
 
     var xcodeAgentModelCandidates: [String] {
         let ids = upstreamModels.map(\.id)
-        let selected = ids.filter { selectedUpstreamModels.contains($0) }
+        let selected = selectedUpstreamModels.isEmpty ? [] : selectedUpstreamModels.sorted()
         var candidates: [String]
         if !selected.isEmpty {
-            candidates = selected.sorted()
+            candidates = selected
         } else if !ids.isEmpty {
             candidates = ids.sorted()
         } else if let fallback = upstreamProvider.fallbackModelIDs {
@@ -211,7 +211,12 @@ final class ProviderManager: ObservableObject {
         var models = upstreamModels
 
         if exactoFilterEnabled && upstreamProvider == .openRouter {
-            models = models.filter { $0.id.contains(":exacto") }
+            var seen = Set<String>()
+            models = models.compactMap { model in
+                guard model.isExactoEligible else { return nil }
+                let exacto = model.exactoVariant
+                return seen.insert(exacto.id).inserted ? exacto : nil
+            }
         }
 
         if verifiedFilterEnabled && upstreamProvider == .openRouter && !verifiedModels.isEmpty {
@@ -315,8 +320,19 @@ final class ProviderManager: ObservableObject {
         if let direct = upstreamModels.first(where: { $0.id == id }) {
             return direct
         }
+        if id.hasSuffix(":exacto"),
+           let base = upstreamModels.first(where: { $0.id == String(id.dropLast(":exacto".count)) }) {
+            return base.exactoVariant
+        }
         let lower = id.lowercased()
-        return upstreamModels.first { $0.id.lowercased() == lower }
+        if let caseInsensitive = upstreamModels.first(where: { $0.id.lowercased() == lower }) {
+            return caseInsensitive
+        }
+        if lower.hasSuffix(":exacto") {
+            let baseLower = String(lower.dropLast(":exacto".count))
+            return upstreamModels.first { $0.id.lowercased() == baseLower }?.exactoVariant
+        }
+        return nil
     }
 
     func preferredXcodeAgentModel(from models: [String], provider: UpstreamProvider? = nil) -> String {

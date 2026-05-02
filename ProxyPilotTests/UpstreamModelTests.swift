@@ -135,6 +135,35 @@ final class UpstreamModelTests: XCTestCase {
         XCTAssertFalse(model.capabilities.contains(.coding))
     }
 
+    func testCapabilitiesToolCallingFromSupportedParameters() {
+        let model = UpstreamModel(
+            id: "anthropic/claude-sonnet-4.5",
+            contextLength: nil,
+            promptPricePer1M: nil,
+            completionPricePer1M: nil,
+            supportedParameters: ["tools"]
+        )
+        XCTAssertTrue(model.supportsToolCalling)
+        XCTAssertTrue(model.capabilities.contains(.toolCalling))
+    }
+
+    func testExactoVariantAppendsSuffixAndPreservesMetadata() {
+        let model = UpstreamModel(
+            id: "anthropic/claude-sonnet-4.5",
+            contextLength: 200_000,
+            promptPricePer1M: 3.0,
+            completionPricePer1M: 15.0,
+            supportedParameters: ["tools"]
+        )
+        let exacto = model.exactoVariant
+
+        XCTAssertEqual(exacto.id, "anthropic/claude-sonnet-4.5:exacto")
+        XCTAssertEqual(exacto.contextLength, 200_000)
+        XCTAssertEqual(exacto.promptPricePer1M, 3.0)
+        XCTAssertEqual(exacto.completionPricePer1M, 15.0)
+        XCTAssertEqual(exacto.supportedParameters, Set(["tools"]))
+    }
+
     // MARK: - idOnly
 
     func testIdOnlyHasNilMetadata() {
@@ -143,5 +172,6 @@ final class UpstreamModelTests: XCTestCase {
         XCTAssertNil(model.contextLength)
         XCTAssertNil(model.promptPricePer1M)
         XCTAssertNil(model.completionPricePer1M)
+        XCTAssertTrue(model.supportedParameters.isEmpty)
     }
 }
