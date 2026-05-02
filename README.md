@@ -4,16 +4,17 @@ macOS utility that makes Xcode Intelligence and Agent Mode work with non-native 
 
 ## What It Does
 
-Xcode's built-in Intelligence features only support a handful of providers natively. ProxyPilot runs a local proxy on your Mac that translates requests, letting you use **any OpenAI-compatible provider** (or Anthropic's API) with Xcode Intelligence and Agent Mode.
+Xcode's built-in Intelligence features only support a handful of providers natively. ProxyPilot runs a local proxy on your Mac that translates requests, letting you use **any OpenAI-compatible provider** (or Anthropic's API) with Xcode Intelligence using the Claude Agent framework.
 
 ## Prerequisites
 
 - macOS 15+
 - Xcode with Intelligence enabled
+- Optimized for Apple Silicon
 
 ## Build from Source
 
-> **First-time setup:** Before building, read **[BUILDING.md](BUILDING.md)** to configure bundle identifiers and optional integrations (Sparkle, PostHog). The project ships with placeholder values that you'll need to replace.
+> **First-time setup:** Before building, read **[BUILDING.md](BUILDING.md)** to configure bundle identifiers and optional integrations (Sparkle, PostHog). *The project ships with placeholder values* that you'll need to replace.
 
 ProxyPilot uses [XcodeGen](https://github.com/yonaskolb/XcodeGen) to generate its Xcode project.
 
