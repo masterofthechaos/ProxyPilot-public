@@ -145,6 +145,7 @@ final class ProxyService {
         var request = URLRequest(url: modelsURL)
         request.httpMethod = "GET"
         applyUpstreamAuth(apiKey: apiKey, provider: provider, request: &request)
+        applyProviderCompatibilityHeaders(provider: provider, path: provider.modelsPath, request: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 10
 
@@ -201,6 +202,7 @@ final class ProxyService {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         applyUpstreamAuth(apiKey: apiKey, provider: provider, request: &request)
+        applyProviderCompatibilityHeaders(provider: provider, path: provider.chatCompletionsPath, request: &request)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 20
@@ -292,6 +294,23 @@ final class ProxyService {
     ) {
         guard !apiKey.isEmpty else { return }
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+    }
+
+    private func applyProviderCompatibilityHeaders(
+        provider: UpstreamProvider,
+        path: String,
+        request: inout URLRequest
+    ) {
+        guard provider == .githubCopilot else { return }
+
+        let userAgent = request.value(forHTTPHeaderField: "User-Agent") ?? ""
+        if path.contains("/messages") {
+            if !userAgent.hasPrefix("claude-cli/") {
+                request.setValue("claude-cli/2.1.14 (external, sdk-cli)", forHTTPHeaderField: "User-Agent")
+            }
+        } else if !userAgent.hasPrefix("Xcode/") {
+            request.setValue("Xcode/24577 CFNetwork/3860.300.31 Darwin/25.2.0", forHTTPHeaderField: "User-Agent")
+        }
     }
 }
 

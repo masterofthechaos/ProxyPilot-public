@@ -274,6 +274,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         config: ProxyConfiguration
     ) {
         Task {
+            let requestStart = Date()
+            let requestModel = HTTPRequestParser.extractModel(from: body)
             do {
                 let (responseData, statusCode, _) = try await UpstreamClient.forward(
                     path: "/v1/messages",
@@ -295,6 +297,17 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         ctxBox.value.flush()
                     }
                     return
+                }
+
+                if (200..<300).contains(validated.statusCode) {
+                    await recordSessionRequest(
+                        model: modelFromResponse(validated.data) ?? requestModel,
+                        path: "/v1/messages",
+                        wasStreaming: false,
+                        startedAt: requestStart,
+                        responseData: validated.data,
+                        config: config
+                    )
                 }
 
                 let httpStatus: HTTPResponseStatus = .init(statusCode: validated.statusCode)
@@ -330,6 +343,10 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     ) {
         Task {
             var streamStarted = false
+            let requestStart = Date()
+            var lastSeenModel = HTTPRequestParser.extractModel(from: body) ?? config.preferredAnthropicUpstreamModel
+            var lastSeenPromptTokens = 0
+            var lastSeenCompletionTokens = 0
 
             do {
                 let stream = UpstreamClient.forwardStreaming(
@@ -349,6 +366,12 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     let validatedLine = AnthropicTranslator.validateAnthropicPassthroughStreamingLine(
                         line,
                         provider: config.upstreamProvider
+                    )
+                    updateStreamingUsage(
+                        from: validatedLine,
+                        model: &lastSeenModel,
+                        promptTokens: &lastSeenPromptTokens,
+                        completionTokens: &lastSeenCompletionTokens
                     )
 
                     let lineData = Data((validatedLine + "\n").utf8)
@@ -374,9 +397,22 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                 }
 
+                let didStart = streamStarted
+                if didStart {
+                    await recordSessionRequest(
+                        model: lastSeenModel,
+                        path: "/v1/messages",
+                        wasStreaming: true,
+                        startedAt: requestStart,
+                        promptTokens: lastSeenPromptTokens,
+                        completionTokens: lastSeenCompletionTokens,
+                        config: config
+                    )
+                }
+
                 // Send end
                 eventLoop.execute {
-                    if !streamStarted {
+                    if !didStart {
                         let head = HTTPResponseHead(version: .http1_1, status: .ok)
                         ctxBox.value.write(self.wrapOutboundOut(.head(head)), promise: nil)
                     }
@@ -394,8 +430,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 } else {
                     message = "Upstream passthrough streaming error: \(error.localizedDescription)"
                 }
+                let didStart = streamStarted
                 eventLoop.execute {
-                    if !streamStarted {
+                    if !didStart {
                         self.sendErrorResponse(context: ctxBox.value, status: .badGateway, message: message)
                     }
                     ctxBox.value.flush()
@@ -416,6 +453,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         config: ProxyConfiguration
     ) {
         Task {
+            let requestStart = Date()
             do {
                 let (responseData, statusCode, _) = try await UpstreamClient.forward(
                     path: config.upstreamProvider.chatCompletionsPath,
@@ -461,6 +499,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     return
                 }
 
+                await recordSessionRequest(
+                    model: originalModel,
+                    path: "/v1/messages",
+                    wasStreaming: false,
+                    startedAt: requestStart,
+                    responseData: responseJSON,
+                    config: config
+                )
+
                 eventLoop.execute {
                     self.sendJSONResponse(context: ctxBox.value, status: .ok, json: responseString)
                     ctxBox.value.flush()
@@ -495,6 +542,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     ) {
         Task {
             var streamStarted = false
+            let requestStart = Date()
             let messageID = "msg_\(UUID().uuidString.prefix(24).lowercased())"
             var state = AnthropicTranslator.StreamingState(
                 requestID: UUID().uuidString,
@@ -577,6 +625,18 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         ctxBox.value.flush()
                     }
                 } else {
+                    if didStart {
+                        await recordSessionRequest(
+                            model: originalModel,
+                            path: "/v1/messages",
+                            wasStreaming: true,
+                            startedAt: requestStart,
+                            promptTokens: state.lastSeenPromptTokens,
+                            completionTokens: state.lastSeenCompletionTokens,
+                            config: config
+                        )
+                    }
+
                     for event in finishEvents {
                         let eventCopy = event
                         eventLoop.execute {
@@ -639,6 +699,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let isStreaming = HTTPRequestParser.isStreamingRequest(body: bodyData)
         let sanitizedBody = sanitizedChatRequestBody(bodyData)
+        let requestModel = HTTPRequestParser.extractModel(from: bodyData)
+            ?? config.preferredAnthropicUpstreamModel
 
         // Collect headers as tuples
         let headers: [(String, String)] = head.headers.map { ($0.name, $0.value) }
@@ -656,6 +718,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 method: String(describing: head.method),
                 headers: headers,
                 body: sanitizedBody,
+                requestModel: requestModel,
                 config: config
             )
         } else {
@@ -666,6 +729,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 method: String(describing: head.method),
                 headers: headers,
                 body: sanitizedBody,
+                requestModel: requestModel,
                 config: config
             )
         }
@@ -678,9 +742,11 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         method: String,
         headers: [(String, String)],
         body: Data,
+        requestModel: String?,
         config: ProxyConfiguration
     ) {
         Task {
+            let requestStart = Date()
             do {
                 let (responseData, upstreamStatusCode, responseHeaders) = try await UpstreamClient.forward(
                     path: config.upstreamProvider.chatCompletionsPath,
@@ -694,6 +760,17 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     responseData: responseData,
                     provider: config.upstreamProvider
                 )
+
+                if (200..<300).contains(normalized.statusCode) {
+                    await recordSessionRequest(
+                        model: modelFromResponse(normalized.data) ?? requestModel,
+                        path: path,
+                        wasStreaming: false,
+                        startedAt: requestStart,
+                        responseData: normalized.data,
+                        config: config
+                    )
+                }
 
                 eventLoop.execute {
                     self.sendUpstreamResponse(
@@ -725,10 +802,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         method: String,
         headers: [(String, String)],
         body: Data,
+        requestModel: String?,
         config: ProxyConfiguration
     ) {
         Task {
             var streamStarted = false
+            let requestStart = Date()
+            var lastSeenPromptTokens = 0
+            var lastSeenCompletionTokens = 0
+            var lastSeenModel = requestModel ?? config.preferredAnthropicUpstreamModel
 
             do {
                 let stream = UpstreamClient.forwardStreaming(
@@ -740,8 +822,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 )
 
                 for try await chunk in stream {
+                    let rawLine = String(decoding: chunk, as: UTF8.self).trimmingCharacters(in: .newlines)
+                    updateStreamingUsage(
+                        from: rawLine,
+                        model: &lastSeenModel,
+                        promptTokens: &lastSeenPromptTokens,
+                        completionTokens: &lastSeenCompletionTokens
+                    )
                     let normalizedLine = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
-                        String(decoding: chunk, as: UTF8.self).trimmingCharacters(in: .newlines),
+                        rawLine,
                         provider: config.upstreamProvider
                     )
                     let chunkData = Data((normalizedLine + "\n").utf8)
@@ -774,6 +863,17 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
 
                 let didStart = streamStarted
+                if didStart {
+                    await recordSessionRequest(
+                        model: lastSeenModel,
+                        path: path,
+                        wasStreaming: true,
+                        startedAt: requestStart,
+                        promptTokens: lastSeenPromptTokens,
+                        completionTokens: lastSeenCompletionTokens,
+                        config: config
+                    )
+                }
                 eventLoop.execute {
                     if !didStart {
                         self.sendErrorResponse(
@@ -889,7 +989,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let provider = config.upstreamProvider
         guard !provider.unsupportedOpenAIParameters.isEmpty
                 || !provider.parameterRewrites.isEmpty
-                || provider.temperatureRange != nil,
+                || provider.temperatureRange != nil
+                || provider == .openAI,
               var request = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             return body
         }
@@ -898,6 +999,93 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         AnthropicTranslator.applyParameterRewrites(&request, for: provider)
         AnthropicTranslator.clampTemperature(&request, for: provider)
         return (try? JSONSerialization.data(withJSONObject: request)) ?? body
+    }
+
+    private func recordSessionRequest(
+        model: String?,
+        path: String,
+        wasStreaming: Bool,
+        startedAt: Date,
+        responseData: Data? = nil,
+        promptTokens: Int? = nil,
+        completionTokens: Int? = nil,
+        config: ProxyConfiguration
+    ) async {
+        guard let sessionStats = config.sessionStats else { return }
+
+        let responseUsage = responseData.flatMap(usageTokens)
+        let trimmedModel = model?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedModel = (trimmedModel?.isEmpty == false)
+            ? trimmedModel!
+            : config.preferredAnthropicUpstreamModel
+
+        await sessionStats.record(RequestRecord(
+            timestamp: startedAt,
+            model: resolvedModel.isEmpty ? "unknown" : resolvedModel,
+            promptTokens: promptTokens ?? responseUsage?.prompt ?? 0,
+            completionTokens: completionTokens ?? responseUsage?.completion ?? 0,
+            durationSeconds: Date().timeIntervalSince(startedAt),
+            path: path,
+            wasStreaming: wasStreaming
+        ))
+    }
+
+    private func modelFromResponse(_ data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json["model"] as? String
+    }
+
+    private func usageTokens(from data: Data) -> (prompt: Int, completion: Int)? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let usage = json["usage"] as? [String: Any] else {
+            return nil
+        }
+
+        let prompt = intValue(usage["prompt_tokens"])
+            ?? intValue(usage["input_tokens"])
+            ?? 0
+        let completion = intValue(usage["completion_tokens"])
+            ?? intValue(usage["output_tokens"])
+            ?? 0
+        return (prompt, completion)
+    }
+
+    private func updateStreamingUsage(
+        from line: String,
+        model: inout String,
+        promptTokens: inout Int,
+        completionTokens: inout Int
+    ) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("data: ") else { return }
+        let payload = String(trimmed.dropFirst("data: ".count))
+        guard payload != "[DONE]",
+              let data = payload.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+
+        if let responseModel = json["model"] as? String,
+           !responseModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            model = responseModel
+        }
+
+        guard let usage = json["usage"] as? [String: Any] else { return }
+        promptTokens = intValue(usage["prompt_tokens"])
+            ?? intValue(usage["input_tokens"])
+            ?? promptTokens
+        completionTokens = intValue(usage["completion_tokens"])
+            ?? intValue(usage["output_tokens"])
+            ?? completionTokens
+    }
+
+    private func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? NSNumber { return value.intValue }
+        return nil
     }
 
     private func upstreamErrorMessage(

@@ -21,6 +21,28 @@ struct DiagnosticsExportContext {
 }
 
 final class DiagnosticsService: Sendable {
+    static let includedFiles = [
+        "builtin_proxy.log",
+        "toolchain.log",
+        "litellm.log",
+        "manifest.json"
+    ]
+
+    static let excludedDataCategories = [
+        "API keys and local proxy passwords",
+        "raw Keychain records",
+        "full prompt or completion bodies beyond existing redacted logs",
+        "unrelated files outside ProxyPilot diagnostics paths"
+    ]
+
+    static var exportPreviewText: String {
+        """
+        Included: \(includedFiles.joined(separator: ", ")).
+        Excluded: \(excludedDataCategories.joined(separator: "; ")).
+        Logs are redacted before archiving.
+        """
+    }
+
     func exportBundle(context: DiagnosticsExportContext) async throws -> URL {
         let fm = FileManager.default
         let ts = Int(Date().timeIntervalSince1970)
@@ -74,6 +96,8 @@ final class DiagnosticsService: Sendable {
         Selected Model: \(manifest.selectedModel)
         Recent Issue Codes: \(issueCodes.joined(separator: ", "))
         Diagnostics Archive: \(archiveText)
+        Diagnostics Included: \(Self.includedFiles.joined(separator: ", "))
+        Diagnostics Excluded: \(Self.excludedDataCategories.joined(separator: "; "))
         """
     }
 

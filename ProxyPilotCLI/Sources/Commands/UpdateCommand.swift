@@ -40,6 +40,7 @@ struct UpdateCommand: AsyncParsableCommand {
             manifest = try await fetchManifest()
         } catch {
             OutputFormatter.error(
+                command: "update",
                 code: "E020",
                 message: "Failed to fetch version manifest: \(error.localizedDescription)",
                 suggestion: "Check your network connection and retry.",
@@ -51,6 +52,7 @@ struct UpdateCommand: AsyncParsableCommand {
         let targetVersion = version ?? manifest.latest
         guard let targetComponents = parseVersion(targetVersion) else {
             OutputFormatter.error(
+                command: "update",
                 code: "E021",
                 message: "Invalid target version '\(targetVersion)'.",
                 suggestion: "Use semantic version format like 1.2.0.",
@@ -61,6 +63,7 @@ struct UpdateCommand: AsyncParsableCommand {
 
         guard let currentComponents = parseVersion(currentVersion) else {
             OutputFormatter.error(
+                command: "update",
                 code: "E021",
                 message: "Current CLI version '\(currentVersion)' is invalid.",
                 suggestion: "Reinstall ProxyPilot CLI.",
@@ -73,10 +76,8 @@ struct UpdateCommand: AsyncParsableCommand {
 
         if comparison == .orderedSame {
             OutputFormatter.success(
-                data: [
-                    "status": "up-to-date",
-                    "version": currentVersion,
-                ],
+                command: "update",
+                data: UpdatePayload(status: "up-to-date", version: currentVersion),
                 humanMessage: "ProxyPilot CLI is already up-to-date (v\(currentVersion)).",
                 json: json
             )
@@ -85,11 +86,8 @@ struct UpdateCommand: AsyncParsableCommand {
 
         if comparison == .orderedAscending && version == nil {
             OutputFormatter.success(
-                data: [
-                    "status": "ahead",
-                    "installed": currentVersion,
-                    "latest": manifest.latest,
-                ],
+                command: "update",
+                data: UpdatePayload(status: "ahead", installed: currentVersion, latest: manifest.latest),
                 humanMessage: "Installed version (v\(currentVersion)) is newer than manifest latest (v\(manifest.latest)).",
                 json: json
             )
@@ -98,11 +96,8 @@ struct UpdateCommand: AsyncParsableCommand {
 
         if check {
             OutputFormatter.success(
-                data: [
-                    "status": "update-available",
-                    "installed": currentVersion,
-                    "latest": targetVersion,
-                ],
+                command: "update",
+                data: UpdatePayload(status: "update-available", installed: currentVersion, latest: targetVersion),
                 humanMessage: "Update available: v\(currentVersion) -> v\(targetVersion).",
                 json: json
             )
@@ -114,6 +109,7 @@ struct UpdateCommand: AsyncParsableCommand {
             installURL = try resolveInstallURL()
         } catch {
             OutputFormatter.error(
+                command: "update",
                 code: "E022",
                 message: "Unable to resolve install path: \(error.localizedDescription)",
                 suggestion: "Pass --install-path explicitly (for example /usr/local/bin/proxypilot).",
@@ -124,6 +120,7 @@ struct UpdateCommand: AsyncParsableCommand {
 
         if installURL.path.contains("/Cellar/") || installURL.path.contains("/Homebrew/") {
             OutputFormatter.error(
+                command: "update",
                 code: "E027",
                 message: "This install appears to be managed by Homebrew (\(installURL.path)).",
                 suggestion: "Use 'brew upgrade proxypilot' instead.",
@@ -138,6 +135,7 @@ struct UpdateCommand: AsyncParsableCommand {
                 try FileManager.default.createDirectory(at: installDir, withIntermediateDirectories: true)
             } catch {
                 OutputFormatter.error(
+                    command: "update",
                     code: "E022",
                     message: "Cannot create install directory \(installDir.path): \(error.localizedDescription)",
                     suggestion: "Choose a writable directory with --install-path.",
@@ -149,6 +147,7 @@ struct UpdateCommand: AsyncParsableCommand {
 
         guard FileManager.default.isWritableFile(atPath: installDir.path) else {
             OutputFormatter.error(
+                command: "update",
                 code: "E022",
                 message: "Install directory is not writable: \(installDir.path)",
                 suggestion: "Run with sudo or choose a writable --install-path.",
@@ -165,6 +164,7 @@ struct UpdateCommand: AsyncParsableCommand {
             try await downloadBinary(from: binaryURL, to: tempURL)
         } catch {
             OutputFormatter.error(
+                command: "update",
                 code: "E023",
                 message: "Failed to download v\(targetVersion): \(error.localizedDescription)",
                 suggestion: "Retry later or verify downloads are reachable.",
@@ -177,6 +177,7 @@ struct UpdateCommand: AsyncParsableCommand {
             try installBinary(from: tempURL, to: installURL)
         } catch {
             OutputFormatter.error(
+                command: "update",
                 code: "E024",
                 message: "Failed to install update to \(installURL.path): \(error.localizedDescription)",
                 suggestion: "Retry with sudo or choose a writable --install-path.",
@@ -191,13 +192,14 @@ struct UpdateCommand: AsyncParsableCommand {
             : "\nRemoved legacy binaries: \(removedLegacy.joined(separator: ", "))"
 
         OutputFormatter.success(
-            data: [
-                "status": "updated",
-                "from": currentVersion,
-                "to": targetVersion,
-                "path": installURL.path,
-                "removed_legacy_binaries": removedLegacy,
-            ],
+            command: "update",
+            data: UpdatePayload(
+                status: "updated",
+                from: currentVersion,
+                to: targetVersion,
+                path: installURL.path,
+                removedLegacyBinaries: removedLegacy
+            ),
             humanMessage: "Updated ProxyPilot CLI v\(currentVersion) -> v\(targetVersion) at \(installURL.path)\(removedSuffix)",
             json: json
         )
@@ -333,6 +335,28 @@ struct UpdateCommand: AsyncParsableCommand {
 
     private struct VersionsManifest: Decodable {
         let latest: String
+    }
+
+    private struct UpdatePayload: Encodable {
+        let status: String
+        var version: String?
+        var installed: String?
+        var latest: String?
+        var from: String?
+        var to: String?
+        var path: String?
+        var removedLegacyBinaries: [String]?
+
+        enum CodingKeys: String, CodingKey {
+            case status
+            case version
+            case installed
+            case latest
+            case from
+            case to
+            case path
+            case removedLegacyBinaries = "removed_legacy_binaries"
+        }
     }
 
     private enum UpdateError: LocalizedError {

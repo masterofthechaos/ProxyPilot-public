@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import ProxyPilotCore
 
 enum PreflightCheckStatus: String, Codable {
     case pass
@@ -30,6 +31,7 @@ struct PreflightContext: Equatable {
     let proxyURLString: String
     let useBuiltInProxy: Bool
     let requireLocalAuth: Bool
+    let upstreamProvider: UpstreamProvider
     let upstreamAPIBaseURLString: String
     let fallbackUpstreamBaseURLString: String
     let hasMasterKey: Bool
@@ -113,11 +115,16 @@ final class PreflightService {
             ))
         }
 
-        if validatedUpstreamBaseURL(context.upstreamAPIBaseURLString) != nil {
+        let upstreamBaseURL = validatedUpstreamBaseURL(context.upstreamAPIBaseURLString)
+        if upstreamBaseURL != nil {
             results.append(.init(
                 id: "upstream_base",
-                title: String(localized: "Upstream API Base URL"),
-                detail: String(localized: "Upstream API base URL is valid."),
+                title: context.upstreamProvider.isLocal
+                    ? String(localized: "Local Provider Base URL")
+                    : String(localized: "Upstream API Base URL"),
+                detail: context.upstreamProvider.isLocal
+                    ? "\(context.upstreamProvider.title) " + String(localized: "base URL is valid.")
+                    : String(localized: "Upstream API base URL is valid."),
                 status: .pass,
                 fixAction: .none
             ))
@@ -168,7 +175,15 @@ final class PreflightService {
             ))
         }
 
-        if context.hasUpstreamKey {
+        if !context.upstreamProvider.requiresAPIKey {
+            results.append(.init(
+                id: "upstream_key",
+                title: String(localized: "Provider API Key"),
+                detail: "\(context.upstreamProvider.title) " + String(localized: "does not require an API key in ProxyPilot."),
+                status: .info,
+                fixAction: .none
+            ))
+        } else if context.hasUpstreamKey {
             results.append(.init(
                 id: "upstream_key",
                 title: String(localized: "Upstream API Key"),
@@ -183,6 +198,20 @@ final class PreflightService {
                 detail: String(localized: "Missing upstream API key in Keychain."),
                 status: .fail,
                 fixAction: .openUpstreamKeyEditor
+            ))
+        }
+
+        if context.upstreamProvider == .ollama || context.upstreamProvider == .lmStudio,
+           let upstreamBaseURL {
+            let reachable = !isLocalProviderPortAvailable(upstreamBaseURL)
+            results.append(.init(
+                id: "local_provider_reachability",
+                title: "\(context.upstreamProvider.title) " + String(localized: "Server Reachability"),
+                detail: reachable
+                    ? "\(context.upstreamProvider.title) " + String(localized: "appears to be listening at") + " \(upstreamBaseURL.absoluteString)."
+                    : localProviderReachabilityHint(for: context.upstreamProvider, baseURL: upstreamBaseURL),
+                status: reachable ? .pass : .warning,
+                fixAction: .none
             ))
         }
 
@@ -276,6 +305,36 @@ final class PreflightService {
             return true
         } catch {
             return false
+        }
+    }
+
+    private func isLocalProviderPortAvailable(_ url: URL) -> Bool {
+        guard let port = url.port ?? defaultPort(for: url),
+              (1...65535).contains(port) else {
+            return false
+        }
+        return isPortAvailable(port)
+    }
+
+    private func defaultPort(for url: URL) -> Int? {
+        switch url.scheme?.lowercased() {
+        case "http":
+            return 80
+        case "https":
+            return 443
+        default:
+            return nil
+        }
+    }
+
+    private func localProviderReachabilityHint(for provider: UpstreamProvider, baseURL: URL) -> String {
+        switch provider {
+        case .ollama:
+            return "Ollama is not listening at \(baseURL.absoluteString). Start it with `ollama serve`, then pull a model such as `ollama pull qwen2.5-coder:0.5b`."
+        case .lmStudio:
+            return "LM Studio is not listening at \(baseURL.absoluteString). Start LM Studio's local server and load an OpenAI-compatible model."
+        default:
+            return "\(provider.title) is not listening at \(baseURL.absoluteString)."
         }
     }
 }

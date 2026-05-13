@@ -11,12 +11,14 @@ final class AppViewModelTests: XCTestCase {
         super.setUp()
         suiteName = "AppViewModelTests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
+        setenv("PROXYPILOT_KEYCHAIN_SERVICE", "proxypilot.tests.\(suiteName!)", 1)
     }
 
     override func tearDown() {
         if let suiteName {
             UserDefaults().removePersistentDomain(forName: suiteName)
         }
+        unsetenv("PROXYPILOT_KEYCHAIN_SERVICE")
         defaults = nil
         suiteName = nil
         super.tearDown()
@@ -46,6 +48,145 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertEqual(vm.activeIssue?.code, .invalidProxyURL)
         XCTAssertTrue(vm.activeIssue?.actions.contains(.resetUpstreamURL) == true)
+    }
+
+    func testLiquidGlassAppearanceDefaultsOn() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(vm.liquidGlassEnabled)
+    }
+
+    func testLiquidGlassAppearancePreferencePersists() {
+        var vm: AppViewModel? = AppViewModel(defaults: defaults)
+        vm?.liquidGlassEnabled = false
+        vm = nil
+
+        let relaunched = AppViewModel(defaults: defaults)
+
+        XCTAssertFalse(relaunched.liquidGlassEnabled)
+    }
+
+    func testCustomizationDefaultsPreserveCurrentExperience() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm.appearancePreference, .system)
+        XCTAssertEqual(vm.proxyPilotAccentHex, ProxyPilotAccentColor.defaultHex)
+        XCTAssertTrue(vm.showMenuBarExtra)
+        XCTAssertEqual(vm.menuBarSectionOrder, MenuBarSection.defaultOrder)
+        XCTAssertEqual(vm.visibleMenuBarSections, Set(MenuBarSection.defaultOrder))
+        XCTAssertEqual(vm.visibleHomeDashboardSections, Set(HomeDashboardSection.allCases))
+        XCTAssertEqual(vm.defaultSettingsSection, .home)
+    }
+
+    func testToolbarStatusHidesPlainStoppedStateOnly() {
+        let vm = AppViewModel(defaults: defaults)
+
+        vm.statusText = AppViewModel.statusText(for: .stopped)
+        XCTAssertFalse(vm.shouldShowToolbarStatus)
+
+        vm.statusText = AppViewModel.statusText(for: .runningExternal)
+        XCTAssertTrue(vm.shouldShowToolbarStatus)
+
+        vm.statusText = AppViewModel.statusText(for: .portOccupied(statusCode: 401))
+        XCTAssertTrue(vm.shouldShowToolbarStatus)
+    }
+
+    func testCustomizationPreferencesPersistAcrossRelaunch() {
+        var vm: AppViewModel? = AppViewModel(defaults: defaults)
+        vm?.appearancePreference = .dark
+        vm?.proxyPilotAccentHex = "#FF2D55"
+        vm?.showMenuBarExtra = false
+        vm?.menuBarSectionOrder = [.quickActions, .statusDetails, .updates, .modelPicker, .sessionStats]
+        vm?.visibleMenuBarSections = [.statusDetails, .quickActions]
+        vm?.visibleHomeDashboardSections = [.sessionSummary, .sessionReportCard]
+        vm?.defaultSettingsSection = .customization
+        vm = nil
+
+        let relaunched = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(relaunched.appearancePreference, .dark)
+        XCTAssertEqual(relaunched.proxyPilotAccentHex, "#FF2D55")
+        XCTAssertFalse(relaunched.showMenuBarExtra)
+        XCTAssertEqual(relaunched.menuBarSectionOrder, [.quickActions, .statusDetails, .updates, .modelPicker, .sessionStats])
+        XCTAssertEqual(relaunched.visibleMenuBarSections, [.statusDetails, .quickActions])
+        XCTAssertEqual(relaunched.visibleHomeDashboardSections, [.sessionSummary, .sessionReportCard])
+        XCTAssertEqual(relaunched.defaultSettingsSection, .customization)
+    }
+
+    func testCustomizationResetRestoresDefaults() async {
+        let vm = AppViewModel(defaults: defaults)
+        vm.appearancePreference = .dark
+        vm.proxyPilotAccentHex = "#FF2D55"
+        vm.showMenuBarExtra = false
+        vm.menuBarSectionOrder = [.quickActions, .statusDetails, .updates, .modelPicker, .sessionStats]
+        vm.visibleMenuBarSections = [.statusDetails, .quickActions]
+        vm.visibleHomeDashboardSections = [.sessionSummary]
+        vm.defaultSettingsSection = .customization
+
+        await vm.resetToFreshInstall()
+
+        XCTAssertEqual(vm.appearancePreference, .system)
+        XCTAssertEqual(vm.proxyPilotAccentHex, ProxyPilotAccentColor.defaultHex)
+        XCTAssertTrue(vm.showMenuBarExtra)
+        XCTAssertEqual(vm.menuBarSectionOrder, MenuBarSection.defaultOrder)
+        XCTAssertEqual(vm.visibleMenuBarSections, Set(MenuBarSection.defaultOrder))
+        XCTAssertEqual(vm.visibleHomeDashboardSections, Set(HomeDashboardSection.allCases))
+        XCTAssertEqual(vm.defaultSettingsSection, .home)
+    }
+
+    func testMenuBarCustomizationNormalizesStoredUnknownMissingAndDuplicateSections() {
+        defaults.set(
+            [
+                MenuBarSection.quickActions.rawValue,
+                "unknown",
+                MenuBarSection.quickActions.rawValue,
+                MenuBarSection.statusDetails.rawValue
+            ],
+            forKey: AppViewModel.menuBarSectionOrderDefaultsKey
+        )
+        defaults.set(
+            [
+                MenuBarSection.quickActions.rawValue,
+                "unknown",
+                MenuBarSection.quickActions.rawValue
+            ],
+            forKey: AppViewModel.visibleMenuBarSectionsDefaultsKey
+        )
+
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm.menuBarSectionOrder, [.quickActions, .statusDetails, .modelPicker, .sessionStats, .updates])
+        XCTAssertEqual(vm.visibleMenuBarSections, [.quickActions])
+    }
+
+    func testLocalProviderFetchFailureDoesNotOfferAPIKeyAction() async {
+        let vm = AppViewModel(defaults: defaults)
+        vm.upstreamProvider = .lmStudio
+        vm.upstreamAPIBaseURLString = "http://127.0.0.1:59999/v1"
+
+        await vm.fetchUpstreamModels()
+
+        XCTAssertEqual(vm.activeIssue?.title, "Upstream Model Fetch Failed")
+        XCTAssertTrue(vm.activeIssue?.message.contains("LM Studio") == true)
+        XCTAssertTrue(vm.activeIssue?.message.contains("http://127.0.0.1:59999/v1/models") == true)
+        XCTAssertFalse(vm.activeIssue?.actions.contains(.openUpstreamKeyEditor) == true)
+        XCTAssertTrue(vm.activeIssue?.actions.contains(.resetUpstreamURL) == true)
+    }
+
+    func testSyncProxyModelsFromLocalSelectionUsesBuiltInRestartPath() async {
+        let vm = AppViewModel(defaults: defaults)
+        vm.proxyURLString = "http://127.0.0.1:41017"
+        vm.upstreamProvider = .ollama
+        vm.upstreamModels = [
+            UpstreamModel(id: "qwen2.5-coder:0.5b", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil)
+        ]
+        vm.selectedUpstreamModels = ["qwen2.5-coder:0.5b"]
+
+        await vm.syncProxyModelsFromSelection()
+
+        XCTAssertNil(vm.activeIssue)
+        XCTAssertTrue(vm.isRunning)
+        await vm.stopProxy()
     }
 
     func testStoredOpenRouterModelIsUsedWithoutLiveFetch() {
@@ -81,12 +222,134 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.selectedXcodeAgentModel, "qwen/qwen-2.5-coder-32b-instruct")
     }
 
+    func testLocalProviderWithoutModelsDoesNotInheritLegacyCloudAgentModel() {
+        defaults.set("glm-5.1", forKey: ProviderManager.xcodeAgentModelLegacyDefaultsKey)
+        let vm = AppViewModel(defaults: defaults)
+
+        vm.upstreamProvider = .lmStudio
+
+        XCTAssertTrue(vm.xcodeAgentModelCandidates.isEmpty)
+        XCTAssertEqual(vm.effectiveXcodeAgentModel, "")
+    }
+
+    func testHomeAgentModelBadgeUsesActiveRunningModelWhenSelectionChanges() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.selectedXcodeAgentModel = "glm-5.1"
+        vm.localProxyState.isRunning = true
+        vm.localProxyState.activeXcodeAgentModel = "glm-4.5"
+
+        XCTAssertTrue(vm.hasPendingXcodeAgentModelChange)
+        XCTAssertEqual(vm.homeAgentModelBadgeTitle, "glm-4.5")
+        XCTAssertTrue(vm.homeAgentModelBadgeHelpText.contains("glm-5.1"))
+        XCTAssertTrue(vm.xcodeAgentRoutingSummaryText.contains("Live route still uses glm-4.5"))
+        XCTAssertEqual(vm.xcodeAgentSelectedModelText, "glm-5.1")
+        XCTAssertEqual(vm.xcodeAgentPendingModelText, "glm-5.1")
+        XCTAssertEqual(vm.xcodeAgentAppliedModelText, "glm-4.5")
+    }
+
+    func testHomeAgentModelBadgeUsesSelectedModelWhenStopped() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.selectedXcodeAgentModel = "glm-5.1"
+        vm.localProxyState.isRunning = false
+        vm.localProxyState.activeXcodeAgentModel = "glm-4.5"
+
+        XCTAssertFalse(vm.hasPendingXcodeAgentModelChange)
+        XCTAssertEqual(vm.homeAgentModelBadgeTitle, "glm-5.1")
+        XCTAssertEqual(vm.xcodeAgentAppliedModelText, "Not applied until proxy start")
+        XCTAssertTrue(vm.xcodeAgentRoutingSummaryText.contains("will apply the next time ProxyPilot starts or restarts"))
+    }
+
+    func testXcodeAgentLiveProofTextShowsLastRequestModelStatusAndTime() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.localProxyState.lastXcodeAgentRequestModel = "qwen2.5-coder:0.5b"
+        vm.localProxyState.lastXcodeAgentRequestStatus = 200
+        vm.localProxyState.lastXcodeAgentRequestAt = Date(timeIntervalSince1970: 1_778_544_228)
+
+        XCTAssertTrue(vm.xcodeAgentLiveProofText.contains("qwen2.5-coder:0.5b"))
+        XCTAssertTrue(vm.xcodeAgentLiveProofText.contains("200 OK"))
+        XCTAssertTrue(vm.xcodeAgentLiveProofText.contains("Last Xcode Agent request"))
+    }
+
+    func testXcodeAgentLiveProofTextHasEmptyState() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm.xcodeAgentLiveProofText, "No Xcode Agent request observed in this ProxyPilot session yet.")
+    }
+
+    func testContextualTerminologyHelpExplainsDenseTerms() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(vm.contextualTerminologyHelpText.contains("Proxy:"))
+        XCTAssertTrue(vm.contextualTerminologyHelpText.contains("Upstream:"))
+        XCTAssertTrue(vm.contextualTerminologyHelpText.contains("OpenAI-compatible:"))
+        XCTAssertTrue(vm.contextualTerminologyHelpText.contains("/v1/models:"))
+        XCTAssertTrue(vm.contextualTerminologyHelpText.contains("Anthropic translator mode:"))
+    }
+
+    func testXcodeVisibleModelsUsesPendingSettingsWhenProxyStopped() async {
+        let vm = AppViewModel(defaults: defaults)
+        vm.selectedUpstreamModels = ["model-b", "model-a"]
+        vm.selectedXcodeAgentModel = "model-c"
+        vm.localProxyState.isRunning = false
+
+        await vm.refreshXcodeVisibleModels()
+
+        XCTAssertEqual(vm.xcodeVisibleModelsSnapshot.source, .pendingSettings)
+        XCTAssertEqual(vm.xcodeVisibleModelsSnapshot.modelIDs, ["model-a", "model-b", "model-c"])
+        XCTAssertFalse(vm.xcodeVisibleModelsSnapshot.reflectsRunningProxy)
+        XCTAssertTrue(vm.xcodeVisibleModelsStatusText.contains("Proxy is not running"))
+    }
+
+    func testProxyRuntimeStatusCopyDistinguishesOnlyExternalCLI() {
+        XCTAssertEqual(AppViewModel.statusText(for: .runningInApp), "Running")
+        XCTAssertEqual(AppViewModel.statusText(for: .runningExternal), "Running (via CLI)")
+        XCTAssertEqual(AppViewModel.statusText(for: .stopped), "Stopped")
+        XCTAssertEqual(AppViewModel.statusText(for: .portOccupied(statusCode: 418)), "Port occupied by another service (HTTP 418)")
+    }
+
+    func testExternalCLIProxyCanBeStoppedFromGUI() {
+        XCTAssertTrue(AppViewModel.canStopProxy(for: .runningExternal))
+        XCTAssertTrue(AppViewModel.canStopProxy(for: .runningInApp))
+        XCTAssertFalse(AppViewModel.canStopProxy(for: .runningExternal, isStoppingCLIProxy: true))
+        XCTAssertFalse(AppViewModel.canStopProxy(for: .stopped))
+    }
+
+    func testStopProxyRunsInstalledCLIWhenExternalProxyIsRunning() async {
+        let cliURL = URL(fileURLWithPath: "/usr/local/bin/proxypilot")
+        var requestedPort: UInt16?
+        var requestedURL: URL?
+        let vm = AppViewModel(
+            defaults: defaults,
+            cliExecutableResolver: { cliURL },
+            cliStopRunner: { executableURL, port in
+                requestedURL = executableURL
+                requestedPort = port
+                return AppViewModel.CLIUpdateExecutionResult(
+                    terminationStatus: 0,
+                    stdout: #"{"ok":true,"data":{"status":"stopped_discovered","pid":1234}}"#,
+                    stderr: ""
+                )
+            }
+        )
+        vm.proxyURLString = "http://127.0.0.1:45123"
+        vm.applyProxyRuntimeStatus(.runningExternal)
+
+        await vm.stopProxy()
+
+        XCTAssertEqual(requestedURL, cliURL)
+        XCTAssertEqual(requestedPort, 45123)
+        XCTAssertEqual(vm.proxyRuntimeStatus, .stopped)
+        XCTAssertEqual(vm.statusText, "Stopped")
+        XCTAssertFalse(vm.isStoppingCLIProxy)
+    }
+
     func testPreflightMasterKeyOptionalWhenBuiltInAuthDisabled() {
         let preflight = PreflightService()
         let context = PreflightContext(
             proxyURLString: "http://127.0.0.1:4000",
             useBuiltInProxy: true,
             requireLocalAuth: false,
+            upstreamProvider: .zAI,
             upstreamAPIBaseURLString: "https://api.z.ai/api/coding/paas/v4",
             fallbackUpstreamBaseURLString: "https://api.z.ai/api/coding/paas/v4",
             hasMasterKey: false,
@@ -99,6 +362,30 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertEqual(masterKeyCheck?.status, .info)
         XCTAssertEqual(masterKeyCheck?.fixAction, PreflightFixAction.none)
+    }
+
+    func testPreflightLocalProviderDoesNotRequireAPIKey() {
+        let preflight = PreflightService()
+        let context = PreflightContext(
+            proxyURLString: "http://127.0.0.1:4000",
+            useBuiltInProxy: true,
+            requireLocalAuth: false,
+            upstreamProvider: .ollama,
+            upstreamAPIBaseURLString: "http://localhost:11434/v1",
+            fallbackUpstreamBaseURLString: "http://localhost:11434/v1",
+            hasMasterKey: false,
+            hasUpstreamKey: false,
+            liteLLMScriptsExist: false
+        )
+
+        let results = preflight.run(context: context)
+        let keyCheck = results.first { $0.id == "upstream_key" }
+        let reachability = results.first { $0.id == "local_provider_reachability" }
+
+        XCTAssertEqual(keyCheck?.status, .info)
+        XCTAssertEqual(keyCheck?.fixAction, PreflightFixAction.none)
+        XCTAssertNotNil(reachability)
+        XCTAssertTrue(reachability?.detail.contains("Ollama") == true)
     }
 
     // MARK: - Saved Default Models
@@ -149,6 +436,94 @@ final class AppViewModelTests: XCTestCase {
 
         vm.clearUpstreamModelSelection()
         XCTAssertTrue(vm.selectedUpstreamModels.isEmpty)
+    }
+
+    func testFetchedModelsKeepSavedDefaultsPinnedAndVisible() {
+        defaults.set(["default-live", "default-missing"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
+        let manager = makeProviderManager()
+
+        manager.applyFetchedUpstreamModels([
+            UpstreamModel(id: "default-live", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "live-extra", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ])
+
+        XCTAssertTrue(manager.isDefaultModel("default-live"))
+        XCTAssertTrue(manager.isDefaultModel("default-missing"))
+        XCTAssertTrue(manager.isModelSelected("default-live"))
+        XCTAssertTrue(manager.isModelSelected("default-missing"))
+        XCTAssertTrue(manager.modelSelectionRows.contains { $0.id == "default-missing" && !$0.isLive && $0.isDefault })
+    }
+
+    func testDefaultRowsCannotBeDeselected() {
+        defaults.set(["pinned-model"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
+        let manager = makeProviderManager()
+        manager.applyFetchedUpstreamModels([
+            UpstreamModel(id: "pinned-model", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ])
+
+        manager.setModelSelected("pinned-model", isSelected: false)
+
+        XCTAssertTrue(manager.isModelSelected("pinned-model"))
+        XCTAssertTrue(manager.selectedUpstreamModels.contains("pinned-model"))
+    }
+
+    func testClearSelectionKeepsDefaultModels() {
+        defaults.set(["pinned-model"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
+        let manager = makeProviderManager()
+        manager.applyFetchedUpstreamModels([
+            UpstreamModel(id: "pinned-model", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "optional-model", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ])
+        manager.setModelSelected("optional-model", isSelected: true)
+
+        manager.clearUpstreamModelSelection()
+
+        XCTAssertTrue(manager.isModelSelected("pinned-model"))
+        XCTAssertFalse(manager.isModelSelected("optional-model"))
+        XCTAssertEqual(manager.selectedUpstreamModels, ["pinned-model"])
+    }
+
+    func testSaveDefaultsPromotesSelectedVisibleModels() {
+        defaults.set(["existing-default"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
+        let manager = makeProviderManager()
+        manager.applyFetchedUpstreamModels([
+            UpstreamModel(id: "existing-default", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "new-default", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ])
+        manager.setModelSelected("new-default", isSelected: true)
+
+        manager.saveSelectedModelsAsDefaults()
+
+        XCTAssertEqual(defaults.stringArray(forKey: ProviderManager.defaultModelsKey(for: .zAI)), ["existing-default", "new-default"])
+        XCTAssertTrue(manager.isDefaultModel("new-default"))
+    }
+
+    func testRemoveDefaultModelExplicitlyUnpinsAndDeselects() {
+        defaults.set(["pinned-model"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
+        let manager = makeProviderManager()
+        manager.applyFetchedUpstreamModels([
+            UpstreamModel(id: "pinned-model", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ])
+
+        manager.removeDefaultModel("pinned-model")
+
+        XCTAssertFalse(manager.isDefaultModel("pinned-model"))
+        XCTAssertFalse(manager.isModelSelected("pinned-model"))
+        XCTAssertEqual(defaults.stringArray(forKey: ProviderManager.defaultModelsKey(for: .zAI)), [])
+    }
+
+    func testDefaultModelPinsAreProviderScoped() {
+        defaults.set(["zai-default"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
+        defaults.set(["openrouter-default"], forKey: ProviderManager.defaultModelsKey(for: .openRouter))
+        let manager = makeProviderManager()
+
+        XCTAssertTrue(manager.isDefaultModel("zai-default"))
+        XCTAssertFalse(manager.isDefaultModel("openrouter-default"))
+
+        manager.upstreamProvider = .openRouter
+
+        XCTAssertFalse(manager.isDefaultModel("zai-default"))
+        XCTAssertTrue(manager.isDefaultModel("openrouter-default"))
     }
 
     func testExactoFilterShowsToolCapableModelsAsExactoVariantsForOpenRouter() {
@@ -301,6 +676,37 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(vm.showAnalyticsPrompt)
     }
 
+    func testOnboardingTelemetryChoiceSuppressesFollowUpAnalyticsPrompt() {
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        var vm: AppViewModel? = AppViewModel(defaults: defaults)
+        XCTAssertTrue(vm?.showOnboardingWizard == true)
+
+        vm?.telemetryOptIn = true
+        vm?.finishOnboarding(force: true)
+        XCTAssertEqual(defaults.string(forKey: "proxypilot.analyticsPromptShownVersion"), currentVersion)
+        vm = nil
+
+        let relaunched = AppViewModel(defaults: defaults)
+        XCTAssertFalse(relaunched.showOnboardingWizard)
+        relaunched.maybeShowAnalyticsPrompt()
+        XCTAssertFalse(relaunched.showAnalyticsPrompt)
+    }
+
+    func testOnboardingTelemetryOptOutAllowsFollowUpAnalyticsPrompt() {
+        var vm: AppViewModel? = AppViewModel(defaults: defaults)
+        XCTAssertTrue(vm?.showOnboardingWizard == true)
+
+        vm?.telemetryOptIn = false
+        vm?.finishOnboarding(force: true)
+        XCTAssertNil(defaults.string(forKey: "proxypilot.analyticsPromptShownVersion"))
+        vm = nil
+
+        let relaunched = AppViewModel(defaults: defaults)
+        XCTAssertFalse(relaunched.showOnboardingWizard)
+        relaunched.maybeShowAnalyticsPrompt()
+        XCTAssertTrue(relaunched.showAnalyticsPrompt)
+    }
+
     func testAnalyticsPromptOptInSetsFlag() {
         let vm = AppViewModel(defaults: defaults)
         XCTAssertFalse(vm.telemetryOptIn)
@@ -328,10 +734,17 @@ final class AppViewModelTests: XCTestCase {
 
     func testAppOpenedHealthHeartbeatIsSentWithoutAnalyticsOptIn() {
         var capturedEvents: [(name: String, properties: [String: String])] = []
+        var attemptedPostHogRequests = 0
         let telemetryService = TelemetryService(
+            defaults: defaults,
             baseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true),
+            postHogDeliveryEnabled: false,
+            protectedInternalMarkerURL: nil,
             remoteCaptureHook: { name, properties in
                 capturedEvents.append((name: name, properties: properties))
+            },
+            postHogRequestHook: { _ in
+                attemptedPostHogRequests += 1
             }
         )
 
@@ -342,6 +755,59 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(Set(capturedEvents[0].properties.keys), ["app_version", "build_number"])
         XCTAssertNotNil(capturedEvents[0].properties["app_version"])
         XCTAssertNotNil(capturedEvents[0].properties["build_number"])
+        XCTAssertEqual(attemptedPostHogRequests, 0)
+    }
+
+    func testAppOpenedHealthHeartbeatMarksMicahInternalInstallWhenConfigured() {
+        defaults.set(true, forKey: "proxypilot.telemetry.isMicah")
+        var capturedEvents: [(name: String, properties: [String: String])] = []
+        var attemptedPostHogRequests = 0
+        let telemetryService = TelemetryService(
+            defaults: defaults,
+            baseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true),
+            postHogDeliveryEnabled: false,
+            protectedInternalMarkerURL: nil,
+            remoteCaptureHook: { name, properties in
+                capturedEvents.append((name: name, properties: properties))
+            },
+            postHogRequestHook: { _ in
+                attemptedPostHogRequests += 1
+            }
+        )
+
+        _ = AppViewModel(defaults: defaults, telemetryService: telemetryService)
+
+        XCTAssertEqual(capturedEvents.count, 1)
+        XCTAssertEqual(capturedEvents[0].name, "app_opened")
+        XCTAssertEqual(capturedEvents[0].properties["is_micah"], "true")
+        XCTAssertNotNil(capturedEvents[0].properties["app_version"])
+        XCTAssertNotNil(capturedEvents[0].properties["build_number"])
+        XCTAssertEqual(attemptedPostHogRequests, 0)
+    }
+
+    func testAppOpenedHealthHeartbeatMarksMicahInternalInstallFromProtectedMarker() throws {
+        let baseDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let markerURL = baseDirectory.appendingPathComponent("internal-telemetry-marker")
+        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+        try "is_micah=true\n".write(to: markerURL, atomically: true, encoding: .utf8)
+
+        var capturedEvents: [(name: String, properties: [String: String])] = []
+        let telemetryService = TelemetryService(
+            defaults: defaults,
+            baseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true),
+            postHogDeliveryEnabled: false,
+            protectedInternalMarkerURL: markerURL,
+            remoteCaptureHook: { name, properties in
+                capturedEvents.append((name: name, properties: properties))
+            }
+        )
+
+        _ = AppViewModel(defaults: defaults, telemetryService: telemetryService)
+
+        XCTAssertEqual(capturedEvents.count, 1)
+        XCTAssertEqual(capturedEvents[0].name, "app_opened")
+        XCTAssertEqual(capturedEvents[0].properties["is_micah"], "true")
     }
 
     // MARK: - Custom Providers (v1.4.18)
@@ -383,6 +849,13 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertNil(UpstreamProvider.lmStudio.apiKeyPageURL)
     }
 
+    func testGitHubCopilotProviderUsesProjectURLWithoutKeychainKey() {
+        XCTAssertEqual(UpstreamProvider.githubCopilot.defaultAPIBaseURL, "http://127.0.0.1:8080/v1")
+        XCTAssertNotNil(UpstreamProvider.githubCopilot.apiKeyPageURL)
+        XCTAssertNil(UpstreamProvider.githubCopilot.keychainKey)
+        XCTAssertFalse(UpstreamProvider.githubCopilot.requiresAPIKey)
+    }
+
     func testAllCloudProvidersHaveKeychainKeys() {
         let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN]
         for provider in cloudProviders {
@@ -416,13 +889,152 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(queryItems["body"]?.contains("A technical support summary has been copied to the clipboard") == true)
     }
 
+    func testPublicSupportLinksUsePublicRepository() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(
+            vm.publicRepositoryURL.absoluteString,
+            "https://github.com/masterofthechaos/ProxyPilot-public"
+        )
+        XCTAssertEqual(
+            vm.readmeURL.absoluteString,
+            "https://github.com/masterofthechaos/ProxyPilot-public/blob/main/README.md"
+        )
+    }
+
     func testLocalProvidersDontRequireKeys() {
-        let localProviders: [UpstreamProvider] = [.ollama, .lmStudio]
+        let localProviders: [UpstreamProvider] = [.ollama, .lmStudio, .githubCopilot]
         for provider in localProviders {
             XCTAssertNil(provider.keychainKey, "\(provider.title) should not have a keychain key")
             XCTAssertFalse(provider.requiresAPIKey, "\(provider.title) should not require API key")
-            XCTAssertNil(provider.apiKeyPageURL, "\(provider.title) should not have API key page URL")
         }
+    }
+
+    // MARK: - Copilot Sidecar Lifecycle
+
+    func testCopilotSidecarMissingExecutableState() async {
+        let service = makeCopilotSidecarService(executable: nil, endpointResponding: false)
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        await vm.refreshCopilotSidecarStatus()
+
+        XCTAssertEqual(vm.copilotSidecarExecutablePath, "")
+        XCTAssertFalse(vm.copilotSidecarSupportsLaunchAgent)
+        XCTAssertFalse(vm.isCopilotSidecarAgentInstalled)
+        XCTAssertFalse(vm.isCopilotSidecarRunning)
+        XCTAssertTrue(vm.copilotSidecarStatusText.contains("Install xcode-copilot-server"))
+    }
+
+    func testCopilotSidecarDetectsLaunchAgentSupport() async {
+        let service = makeCopilotSidecarService(endpointResponding: false)
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        await vm.refreshCopilotSidecarStatus()
+
+        XCTAssertTrue(vm.copilotSidecarSupportsLaunchAgent)
+        XCTAssertFalse(vm.isCopilotSidecarAgentInstalled)
+        XCTAssertTrue(vm.copilotSidecarStatusText.contains("Install the background helper"))
+    }
+
+    func testCopilotSidecarLaunchAgentInstalledButEndpointAsleep() async {
+        let service = makeCopilotSidecarService(
+            endpointResponding: false,
+            fileExists: { $0.hasSuffix("com.xcode-copilot-server.plist") }
+        )
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        await vm.refreshCopilotSidecarStatus()
+
+        XCTAssertTrue(vm.isCopilotSidecarAgentInstalled)
+        XCTAssertFalse(vm.isCopilotSidecarEndpointResponding)
+        XCTAssertTrue(vm.isCopilotSidecarManaged)
+        XCTAssertTrue(vm.isCopilotSidecarRunning)
+        XCTAssertTrue(vm.copilotSidecarStatusText.contains("launchd will wake it"))
+    }
+
+    func testCopilotSidecarEndpointRespondingExternally() async {
+        let service = makeCopilotSidecarService(endpointResponding: true)
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        await vm.refreshCopilotSidecarStatus()
+
+        XCTAssertTrue(vm.isCopilotSidecarEndpointResponding)
+        XCTAssertTrue(vm.isCopilotSidecarExternal)
+        XCTAssertFalse(vm.isCopilotSidecarManaged)
+        XCTAssertTrue(vm.copilotSidecarStatusText.contains("started elsewhere"))
+    }
+
+    func testCopilotSidecarInstallSwitchesProviderAndURL() async {
+        var installed = false
+        let service = makeCopilotSidecarService(
+            endpointResponding: false,
+            fileExists: { path in installed && path.hasSuffix("com.xcode-copilot-server.plist") },
+            commandRunner: { _, arguments in
+                if arguments == ["--help"] {
+                    return .init(terminationStatus: 0, stdout: "install-agent\nuninstall-agent", stderr: "")
+                }
+                if arguments.first == "install-agent" {
+                    installed = true
+                }
+                return .init(terminationStatus: 0, stdout: "", stderr: "")
+            }
+        )
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        await vm.startCopilotSidecar()
+
+        XCTAssertEqual(vm.upstreamProvider, .githubCopilot)
+        XCTAssertEqual(vm.upstreamAPIBaseURLString, UpstreamProvider.githubCopilot.defaultAPIBaseURL)
+        XCTAssertTrue(vm.isCopilotSidecarAgentInstalled)
+        XCTAssertTrue(vm.isCopilotSidecarManaged)
+    }
+
+    func testCopilotSidecarUninstallClearsManagedLaunchAgent() async {
+        var installed = true
+        let service = makeCopilotSidecarService(
+            endpointResponding: false,
+            fileExists: { path in installed && path.hasSuffix("com.xcode-copilot-server.plist") },
+            commandRunner: { _, arguments in
+                if arguments == ["--help"] {
+                    return .init(terminationStatus: 0, stdout: "install-agent\nuninstall-agent", stderr: "")
+                }
+                if arguments.first == "uninstall-agent" {
+                    installed = false
+                }
+                return .init(terminationStatus: 0, stdout: "", stderr: "")
+            }
+        )
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        await vm.refreshCopilotSidecarStatus()
+        XCTAssertTrue(vm.isCopilotSidecarAgentInstalled)
+
+        await vm.stopCopilotSidecar()
+
+        XCTAssertFalse(vm.isCopilotSidecarAgentInstalled)
+        XCTAssertFalse(vm.isCopilotSidecarManaged)
+        XCTAssertEqual(vm.copilotSidecarStatusText, "Copilot helper stopped.")
+    }
+
+    func testCopilotSidecarStopDoesNotTouchExternalHelper() async {
+        var commandArguments: [[String]] = []
+        let service = makeCopilotSidecarService(
+            endpointResponding: true,
+            commandRunner: { _, arguments in
+                commandArguments.append(arguments)
+                if arguments == ["--help"] {
+                    return .init(terminationStatus: 0, stdout: "install-agent\nuninstall-agent", stderr: "")
+                }
+                return .init(terminationStatus: 0, stdout: "", stderr: "")
+            }
+        )
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        await vm.refreshCopilotSidecarStatus()
+        await vm.stopCopilotSidecar()
+
+        XCTAssertTrue(vm.isCopilotSidecarExternal)
+        XCTAssertFalse(commandArguments.contains(["uninstall-agent"]))
     }
 
     // MARK: - Per-Provider Key Management
@@ -443,6 +1055,100 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertNil(vm.providerKeyEditing[.openAI])
     }
 
+    func testSavingProviderKeyVerifiesInstalledCLIVisibility() async {
+        let stdout = #"{"ok":true,"data":{"provider":"zai","status":"stored","stored":true,"backend":"keychain"}}"#
+        let vm = AppViewModel(
+            defaults: defaults,
+            cliExecutableResolver: { URL(fileURLWithPath: "/usr/local/bin/proxypilot") },
+            cliAuthStatusRunner: { executable, provider in
+                XCTAssertEqual(executable.path, "/usr/local/bin/proxypilot")
+                XCTAssertEqual(provider, .zAI)
+                return AppViewModel.CLIUpdateExecutionResult(
+                    terminationStatus: 0,
+                    stdout: stdout,
+                    stderr: ""
+                )
+            }
+        )
+
+        vm.providerKeyDrafts[.zAI] = "test-zai-key-with-valid-length"
+        vm.saveKey(for: .zAI)
+
+        await vm.verifyProviderKeyCLIVisibility(for: .zAI)
+
+        XCTAssertEqual(vm.providerCLIAuthStatuses[.zAI], .visible)
+    }
+
+    func testSavingShortZAIProviderKeyIsRejected() {
+        let vm = AppViewModel(defaults: defaults)
+
+        vm.providerKeyDrafts[.zAI] = "short-zai-key"
+        vm.saveKey(for: .zAI)
+
+        XCTAssertEqual(vm.providerKeyDrafts[.zAI], "short-zai-key")
+        XCTAssertEqual(vm.activeIssue?.code, .missingUpstreamKey)
+        XCTAssertTrue(vm.activeIssue?.message.contains("at least 20 characters") == true)
+    }
+
+    func testSavingProviderKeyRecordsCLIVisibilityMismatch() async {
+        let stdout = #"{"ok":true,"data":{"provider":"zai","status":"not_set","stored":false,"backend":"keychain+file-fallback"}}"#
+        let vm = AppViewModel(
+            defaults: defaults,
+            cliExecutableResolver: { URL(fileURLWithPath: "/usr/local/bin/proxypilot") },
+            cliAuthStatusRunner: { _, _ in
+                AppViewModel.CLIUpdateExecutionResult(
+                    terminationStatus: 0,
+                    stdout: stdout,
+                    stderr: ""
+                )
+            }
+        )
+
+        vm.providerKeyDrafts[.zAI] = "test-zai-key-with-valid-length"
+        vm.saveKey(for: .zAI)
+
+        await vm.verifyProviderKeyCLIVisibility(for: .zAI)
+
+        guard case .notVisible(let message) = vm.providerCLIAuthStatuses[.zAI] else {
+            XCTFail("Expected CLI visibility mismatch")
+            return
+        }
+        XCTAssertTrue(message.contains("not_set"))
+    }
+
+    func testImportsCLISessionReportEventsIntoSessionReportCard() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let reportURL = directory.appendingPathComponent("session-report.jsonl")
+        try SessionReportStore.append(
+            SessionReportEvent(
+                source: "cli",
+                sessionID: "cli-session",
+                record: RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 1_714_000_000),
+                    model: "glm-5",
+                    promptTokens: 80,
+                    completionTokens: 20,
+                    durationSeconds: 0.75,
+                    path: "/v1/messages",
+                    wasStreaming: true
+                )
+            ),
+            to: reportURL
+        )
+
+        let vm = AppViewModel(defaults: defaults, sessionReportURL: reportURL)
+        vm.importExternalSessionReportEvents()
+
+        XCTAssertEqual(vm.sessionReportCard.totalRequests, 1)
+        XCTAssertEqual(vm.sessionReportCard.totalPromptTokens, 80)
+        XCTAssertEqual(vm.sessionReportCard.totalCompletionTokens, 20)
+        XCTAssertEqual(vm.sessionReportCard.requests.first?.model, "glm-5")
+        XCTAssertEqual(vm.sessionReportCard.requests.first?.path, "/v1/messages")
+        XCTAssertEqual(vm.sessionReportCard.requests.first?.wasStreaming, true)
+    }
+
     func testHasKeyForProviderReturnsFalseWhenNoKeyStored() {
         let vm = AppViewModel(defaults: defaults)
         let result = vm.hasKey(for: .openRouter)
@@ -455,6 +1161,7 @@ final class AppViewModelTests: XCTestCase {
             proxyURLString: "http://127.0.0.1:4000",
             useBuiltInProxy: true,
             requireLocalAuth: true,
+            upstreamProvider: .zAI,
             upstreamAPIBaseURLString: "https://api.z.ai/api/coding/paas/v4",
             fallbackUpstreamBaseURLString: "https://api.z.ai/api/coding/paas/v4",
             hasMasterKey: false,
@@ -606,5 +1313,30 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(csv.contains("model-a"))
         XCTAssertTrue(csv.contains("/v1/chat/completions"))
         XCTAssertTrue(csv.contains("0.000300"))
+    }
+
+    private func makeProviderManager() -> ProviderManager {
+        ProviderManager(defaults: defaults, proxyService: ProxyService())
+    }
+
+    private func makeCopilotSidecarService(
+        executable: URL? = URL(fileURLWithPath: "/tmp/xcode-copilot-server"),
+        endpointResponding: Bool,
+        fileExists: @escaping CopilotSidecarService.FileExists = { _ in false },
+        commandRunner: CopilotSidecarService.CommandRunner? = nil
+    ) -> CopilotSidecarService {
+        CopilotSidecarService(
+            executableResolver: { executable },
+            endpointProbe: { endpointResponding },
+            commandRunner: commandRunner ?? { _, arguments in
+                if arguments == ["--help"] {
+                    return .init(terminationStatus: 0, stdout: "install-agent\nuninstall-agent", stderr: "")
+                }
+                return .init(terminationStatus: 0, stdout: "", stderr: "")
+            },
+            shellRunner: { _ in .init(terminationStatus: 1, stdout: "", stderr: "") },
+            fileExists: fileExists,
+            workspaceOpener: { _ in }
+        )
     }
 }

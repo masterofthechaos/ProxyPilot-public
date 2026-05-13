@@ -19,5 +19,14 @@ let package = Package(
             ],
             path: "Sources"
         ),
+        .testTarget(
+            name: "ProxyPilotCLITests",
+            dependencies: [
+                "proxypilot",
+                "ProxyPilotCore",
+                .product(name: "MCP", package: "swift-sdk"),
+            ],
+            path: "UnitTests"
+        ),
     ]
 )

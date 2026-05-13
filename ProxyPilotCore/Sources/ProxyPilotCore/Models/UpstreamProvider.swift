@@ -13,6 +13,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     case mistral    = "mistral"
     case miniMax    = "minimax"
     case miniMaxCN  = "minimax-cn"
+    case githubCopilot = "github-copilot"
     case ollama     = "ollama"
     case lmStudio   = "lmstudio"
 
@@ -31,6 +32,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .mistral:    return "Mistral"
         case .miniMax:    return "MiniMax"
         case .miniMaxCN:  return "MiniMax CN"
+        case .githubCopilot: return "GitHub Copilot"
         case .ollama:     return "Ollama"
         case .lmStudio:   return "LM Studio"
         }
@@ -49,6 +51,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .mistral:    return "https://api.mistral.ai/v1"
         case .miniMax:    return "https://api.minimax.io/v1"
         case .miniMaxCN:  return "https://api.minimaxi.com/v1"
+        case .githubCopilot: return "http://127.0.0.1:8080/v1"
         case .ollama:     return "http://localhost:11434/v1"
         case .lmStudio:   return "http://localhost:1234/v1"
         }
@@ -136,6 +139,12 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
                 "MiniMax-M2.1-highspeed",
                 "MiniMax-M2"
             ]
+        case .githubCopilot:
+            return [
+                "gpt-5.4",
+                "gpt-4o",
+                "copilot-chat"
+            ]
         default: return nil
         }
     }
@@ -155,7 +164,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// Whether this provider runs on the local machine (no cloud API).
     public var isLocal: Bool {
         switch self {
-        case .ollama, .lmStudio: return true
+        case .githubCopilot, .ollama, .lmStudio: return true
         default: return false
         }
     }
@@ -176,7 +185,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .mistral:    return SecretKey.mistralAPIKey
         case .miniMax:    return SecretKey.minimaxAPIKey
         case .miniMaxCN:  return SecretKey.minimaxCNAPIKey
-        case .ollama, .lmStudio:
+        case .githubCopilot, .ollama, .lmStudio:
             return nil
         }
     }
@@ -191,9 +200,10 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     ///
     /// Example: `https://api.minimax.io/v1` → `https://api.minimax.io/anthropic`
     public func anthropicPassthroughBaseURL(from openAIBaseURL: String) -> String? {
-        guard isMiniMax else { return nil }
         var base = openAIBaseURL
         while base.hasSuffix("/") { base.removeLast() }
+
+        guard isMiniMax else { return nil }
         if base.hasSuffix("/v1") {
             return String(base.dropLast(3)) + "/anthropic"
         }

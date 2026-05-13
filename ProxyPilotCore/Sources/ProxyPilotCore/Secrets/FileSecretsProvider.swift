@@ -50,6 +50,10 @@ public final class FileSecretsProvider: SecretsProvider, @unchecked Sendable {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(store)
         try data.write(to: filePath, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: filePath.path
+        )
     }
 
     private static func defaultDirectory() -> URL {

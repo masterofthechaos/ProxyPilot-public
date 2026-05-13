@@ -14,10 +14,10 @@ struct StartCommand: AsyncParsableCommand {
     )
 
     @Option(name: .shortAndLong, help: "Port to listen on.")
-    var port: UInt16 = 4000
+    var port: UInt16 = ProxyPilotDefaults.defaultPort
 
-    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, ollama, lmstudio).")
-    var provider: String = "openai"
+    @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)).")
+    var provider: String = ProxyPilotDefaults.defaultCLIProvider.rawValue
 
     @Option(name: .long, help: "Override the upstream API base URL (e.g. http://localhost:11434/v1).")
     var upstreamUrl: String?
@@ -41,6 +41,7 @@ struct StartCommand: AsyncParsableCommand {
         // Validate provider
         guard let upstreamProvider = UpstreamProvider(rawValue: provider) else {
             OutputFormatter.error(
+                command: "start",
                 code: "E001",
                 message: "Unknown provider: \(provider)",
                 suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
@@ -52,6 +53,7 @@ struct StartCommand: AsyncParsableCommand {
         // Check if already running
         if let existingPid = PidFile.read() {
             OutputFormatter.error(
+                command: "start",
                 code: "E002",
                 message: "ProxyPilot is already running (PID \(existingPid)).",
                 suggestion: "Run 'proxypilot stop' first, or 'proxypilot status' to check.",
@@ -65,6 +67,7 @@ struct StartCommand: AsyncParsableCommand {
             inlineKey = try CLIProxyRuntime.readInlineKey(key: key, keyStdin: keyStdin)
         } catch {
             OutputFormatter.error(
+                command: "start",
                 code: "E042",
                 message: "Failed to read API key input: \(error.localizedDescription)",
                 suggestion: "Use --key <value> or provide a single key line with --key-stdin.",
@@ -87,6 +90,7 @@ struct StartCommand: AsyncParsableCommand {
                 )
             } catch {
                 OutputFormatter.error(
+                    command: "start",
                     code: "E012",
                     message: "Daemon process failed to become ready.",
                     suggestion: "Check /tmp/proxypilot_builtin_proxy.log for details.",
@@ -96,14 +100,16 @@ struct StartCommand: AsyncParsableCommand {
             }
 
             OutputFormatter.success(
-                data: [
-                    "status": "started",
-                    "pid": "\(launchResult.pid)",
-                    "port": "\(port)",
-                    "provider": upstreamProvider.rawValue,
-                    "daemon": "true",
-                    "managed": launchResult.managed,
-                ],
+                command: "start",
+                data: StartPayload(
+                    status: "started",
+                    pid: Int(launchResult.pid),
+                    port: Int(port),
+                    provider: upstreamProvider.rawValue,
+                    model: model,
+                    daemon: true,
+                    managed: launchResult.managed
+                ),
                 humanMessage: "ProxyPilot daemon started (PID \(launchResult.pid), port \(port) -> \(upstreamProvider.title), \(launchResult.managed ? "managed" : "unmanaged"))",
                 json: json
             )
@@ -126,6 +132,7 @@ struct StartCommand: AsyncParsableCommand {
         let effectiveBaseURL = upstreamUrl ?? upstreamProvider.defaultAPIBaseURL
         if apiKey == nil && !upstreamProvider.isLocal && !isLocalhostURL(effectiveBaseURL) {
             OutputFormatter.error(
+                command: "start",
                 code: "E004",
                 message: "No API key found for provider \(upstreamProvider.rawValue).",
                 suggestion: "Run 'proxypilot auth set --provider \(upstreamProvider.rawValue)', pass --key, or set \(secretKey ?? "the provider env var").",
@@ -134,6 +141,8 @@ struct StartCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        let sessionStats = SessionStats(sessionReportURL: SessionReportStore.defaultURL, sessionSource: "cli")
+        await sessionStats.reset(clearReportStore: true)
         let modelList = parsedModelList(for: upstreamProvider)
         let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
         let config = ProxyConfiguration(
@@ -143,6 +152,7 @@ struct StartCommand: AsyncParsableCommand {
             upstreamAPIKey: apiKey,
             allowedModels: allowedModels,
             preferredAnthropicUpstreamModel: modelList.first ?? "",
+            sessionStats: sessionStats,
             googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil
         )
 
@@ -152,9 +162,10 @@ struct StartCommand: AsyncParsableCommand {
             actualPort = try await server.start(config: config)
         } catch {
             OutputFormatter.error(
+                command: "start",
                 code: "E003",
                 message: "Failed to start server: \(error)",
-                suggestion: "Check if port \(port) is already in use.",
+                suggestion: CLIProxyRuntime.bindFailureSuggestion(port: port, error: error),
                 json: json
             )
             throw ExitCode.failure
@@ -167,13 +178,16 @@ struct StartCommand: AsyncParsableCommand {
 
         let modelDisplay = model ?? "(all)"
         OutputFormatter.success(
-            data: [
-                "status": "running",
-                "port": "\(actualPort)",
-                "provider": upstreamProvider.rawValue,
-                "model": modelDisplay,
-                "pid": "\(ProcessInfo.processInfo.processIdentifier)",
-            ],
+            command: "start",
+            data: StartPayload(
+                status: "running",
+                pid: Int(ProcessInfo.processInfo.processIdentifier),
+                port: Int(actualPort),
+                provider: upstreamProvider.rawValue,
+                model: model,
+                daemon: false,
+                managed: true
+            ),
             humanMessage: "ProxyPilot running on port \(actualPort) -> \(upstreamProvider.title) [\(modelDisplay)] (PID \(ProcessInfo.processInfo.processIdentifier))",
             json: json
         )
@@ -200,5 +214,15 @@ struct StartCommand: AsyncParsableCommand {
             return explicitModels
         }
         return provider.fallbackModelIDs ?? []
+    }
+
+    private struct StartPayload: Encodable {
+        let status: String
+        let pid: Int
+        let port: Int
+        let provider: String
+        let model: String?
+        let daemon: Bool
+        let managed: Bool?
     }
 }

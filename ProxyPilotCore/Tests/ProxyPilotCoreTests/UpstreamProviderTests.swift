@@ -6,6 +6,7 @@ import Testing
 struct UpstreamProviderTests {
     @Test func ollamaIsLocal() { #expect(UpstreamProvider.ollama.isLocal == true) }
     @Test func lmStudioIsLocal() { #expect(UpstreamProvider.lmStudio.isLocal == true) }
+    @Test func githubCopilotIsLocal() { #expect(UpstreamProvider.githubCopilot.isLocal == true) }
     @Test func cloudProvidersAreNotLocal() {
         for provider in [UpstreamProvider.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN] {
             #expect(provider.isLocal == false)
@@ -14,6 +15,7 @@ struct UpstreamProviderTests {
     @Test func localProvidersDoNotRequireAPIKey() {
         #expect(UpstreamProvider.ollama.requiresAPIKey == false)
         #expect(UpstreamProvider.lmStudio.requiresAPIKey == false)
+        #expect(UpstreamProvider.githubCopilot.requiresAPIKey == false)
     }
     @Test func cloudProvidersRequireAPIKey() {
         #expect(UpstreamProvider.openAI.requiresAPIKey == true)
@@ -30,10 +32,12 @@ struct UpstreamProviderTests {
     @Test func secretKeyMappingForLocalProvidersIsNil() {
         #expect(UpstreamProvider.ollama.secretKey == nil)
         #expect(UpstreamProvider.lmStudio.secretKey == nil)
+        #expect(UpstreamProvider.githubCopilot.secretKey == nil)
     }
     @Test func ollamaDefaultURL() { #expect(UpstreamProvider.ollama.defaultAPIBaseURL == "http://localhost:11434/v1") }
     @Test func lmStudioDefaultURL() { #expect(UpstreamProvider.lmStudio.defaultAPIBaseURL == "http://localhost:1234/v1") }
     @Test func googleDefaultURL() { #expect(UpstreamProvider.google.defaultAPIBaseURL == "https://generativelanguage.googleapis.com/v1beta/openai") }
+    @Test func githubCopilotDefaultURL() { #expect(UpstreamProvider.githubCopilot.defaultAPIBaseURL == "http://127.0.0.1:8080/v1") }
     @Test func ollamaTitle() { #expect(UpstreamProvider.ollama.title == "Ollama") }
     @Test func lmStudioTitle() { #expect(UpstreamProvider.lmStudio.title == "LM Studio") }
     @Test func googleUsesProviderSpecificChatPath() {
@@ -151,9 +155,14 @@ struct UpstreamProviderTests {
         #expect(UpstreamProvider.miniMax.alternateAPIBaseURLs.contains("https://api.minimaxi.com/v1"))
     }
     @Test func nonMiniMaxProvidersHaveNoFallbackModels() {
-        for provider in UpstreamProvider.allCases where !provider.isMiniMax {
+        for provider in UpstreamProvider.allCases where !provider.isMiniMax && provider != .githubCopilot {
             #expect(provider.fallbackModelIDs == nil, "\(provider.rawValue) should have nil fallbackModelIDs")
         }
+    }
+    @Test func githubCopilotHasFallbackModels() {
+        let fallback = UpstreamProvider.githubCopilot.fallbackModelIDs
+        #expect(fallback?.contains("gpt-5.4") == true)
+        #expect(fallback?.contains("copilot-chat") == true)
     }
     @Test func temperatureClampForMiniMax() {
         var request: [String: Any] = ["model": "MiniMax-M2.5", "temperature": 0.0]
@@ -249,6 +258,10 @@ struct UpstreamProviderTests {
             upstreamProvider: .miniMax,
             miniMaxRoutingMode: .standard
         )
+        #expect(config.isAnthropicPassthroughActive == false)
+    }
+    @Test func isAnthropicPassthroughInactiveForGitHubCopilot() {
+        let config = ProxyConfiguration(upstreamProvider: .githubCopilot)
         #expect(config.isAnthropicPassthroughActive == false)
     }
 }

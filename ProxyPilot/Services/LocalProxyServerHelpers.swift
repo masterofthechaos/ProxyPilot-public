@@ -110,7 +110,8 @@ enum LocalProxyServerHelpers {
     static func sanitizedChatRequestBody(_ body: Data, provider: UpstreamProvider) -> Data {
         guard !provider.unsupportedOpenAIParameters.isEmpty
                 || !provider.parameterRewrites.isEmpty
-                || provider.temperatureRange != nil,
+                || provider.temperatureRange != nil
+                || provider == .openAI,
               var request = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             return body
         }
@@ -181,15 +182,34 @@ enum LocalProxyServerHelpers {
         return String(tokenScrubbed.prefix(limit)) + "..."
     }
 
+    static func sessionStartLogLine(
+        provider: UpstreamProvider,
+        modelIDs: Set<String>,
+        preferredModel: String,
+        upstreamBaseURL: String
+    ) -> String {
+        let models = modelIDs.sorted().joined(separator: ",")
+        let preferred = preferredModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "=== session start === provider=\(provider.rawValue) models=\(models.isEmpty ? "(none)" : models) preferred=\(preferred.isEmpty ? "(none)" : preferred) upstream=\(redact(upstreamBaseURL))"
+    }
+
+    static func modelsResponseLogLine(
+        path: String,
+        provider: UpstreamProvider,
+        modelIDs: Set<String>
+    ) -> String {
+        let models = modelIDs.sorted()
+        let ids = models.isEmpty ? "(none)" : models.joined(separator: ",")
+        return "resp GET \(path) 200 provider=\(provider.rawValue) models=\(models.count) ids=\(redact(ids))"
+    }
+
     /// Replace "Bearer <token>" with "Bearer ***".
     static func scrubBearer(in text: String) -> String {
-        let marker = "Bearer "
-        guard let range = text.range(of: marker) else { return text }
-        let suffix = text[range.upperBound...]
-        let tokenEnd = suffix.firstIndex(where: { $0.isWhitespace || $0 == "," || $0 == ";" }) ?? text.endIndex
-        let token = String(text[range.upperBound..<tokenEnd])
-        if token.isEmpty { return text }
-        return text.replacingOccurrences(of: marker + token, with: marker + "***")
+        guard let regex = try? NSRegularExpression(pattern: #"Bearer\s+[^\s,;]+"#) else {
+            return text
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: "Bearer ***")
     }
 
     /// Scrub key-value patterns like `x-api-key: sk-xxx` and `"api_key": "sk-xxx"`.

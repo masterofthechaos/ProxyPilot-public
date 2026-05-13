@@ -1,69 +1,60 @@
 import AppKit
 import ProxyPilotCore
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var vm: AppViewModel
     @EnvironmentObject private var updateService: SoftwareUpdateService
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var routingVerificationCopied: Bool = false
     @State private var showInstallConfirmation: Bool = false
     @State private var recoveryCommandsCopied: Bool = false
     @State private var diyCommandsCopied: Bool = false
-    @State private var shimmerActive: Bool = false
+    @State private var copilotInstallCommandCopied: Bool = false
     @AppStorage("proxypilot.preflightExpanded") private var preflightExpanded: Bool = true
     @State private var showNuclearResetConfirm: Bool = false
-    @State private var sessionCSVExportStatus: String = ""
-    @State private var expandedSessionRequestIDs: Set<UUID> = []
-    @State private var copiedSessionRequestID: UUID?
+    @State private var selectedSection: SettingsSection = .home
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var proxySectionFocus: ProxySectionFocus?
+    @State private var highlightedProxySection: ProxySectionFocus?
+    @State private var proxyFocusRequestID: Int = 0
+    private let copilotSidecarInstallCommand = "npm install -g xcode-copilot-server"
 
-    private enum SettingsTab: Hashable {
-        case general
-        case keys
-        case advanced
+    private var liquidGlassAppearanceAvailable: Bool {
+        if #available(macOS 26.0, *) {
+            return true
+        }
+        return false
     }
-    @State private var selectedTab: SettingsTab = .general
+
+    private var effectiveLiquidGlassEnabled: Bool {
+        liquidGlassAppearanceAvailable && vm.liquidGlassEnabled
+    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-
-            TabView(selection: $selectedTab) {
-                generalTab
-                    .tabItem { Label("General", systemImage: "gearshape") }
-                    .tag(SettingsTab.general)
-
-                keysTab
-                    .tabItem { Label("Keys", systemImage: "key") }
-                    .tag(SettingsTab.keys)
-
-                advancedTab
-                    .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }
-                    .tag(SettingsTab.advanced)
-            }
-
-            Divider()
-            HStack(spacing: 6) {
-                Text("ProxyPilot v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-
-                Text("Beta")
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.orange.opacity(0.15), in: Capsule())
-                    .foregroundStyle(.orange)
-            }
-            .padding(.bottom, 6)
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            SettingsSidebarView(
+                selection: $selectedSection,
+                versionText: appVersionText,
+                buildText: appBuildText
+            )
+            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 260)
+        } detail: {
+            detailShell
+                .navigationTitle(selectedSection.title)
+                .toolbar {
+                    settingsToolbar
+                }
         }
         .onAppear {
+            if selectedSection == .home {
+                selectedSection = vm.defaultSettingsSection
+            }
             vm.refreshStatus()
+            vm.runPreflightChecks()
             vm.startLogUpdates()
             vm.maybeShowKeychainAccessPrimerOnLaunch()
             vm.maybeShowAnalyticsPrompt()
+            Task { await vm.refreshCopilotSidecarStatus() }
         }
         .onDisappear {
             vm.stopLogUpdates()
@@ -92,34 +83,276 @@ struct ContentView: View {
             )
             .interactiveDismissDisabled(true)
         }
-        .frame(minWidth: 700, minHeight: 620)
+        .alert(
+            String(localized: "ProxyPilot Needs to Make a Reversible System Change"),
+            isPresented: $showInstallConfirmation
+        ) {
+            Button(String(localized: "Cancel"), role: .cancel) { }
+            Button(String(localized: "Proceed")) {
+                vm.installXcodeAgentConfig()
+            }
+        } message: {
+            Text("ProxyPilot is about to modify system files on your behalf. Please note that while these changes are reversible, quitting or uninstalling ProxyPilot will not revert them automatically.")
+        }
+        .frame(minWidth: 820, minHeight: 620)
+        .environment(\.proxypilotLiquidGlassEnabled, effectiveLiquidGlassEnabled)
     }
 
-    // MARK: - General Tab
+    private var isSidebarCollapsed: Bool {
+        if case .detailOnly = columnVisibility {
+            return true
+        }
+        return false
+    }
 
-    private var generalTab: some View {
-        Form {
+    private var detailShell: some View {
+        VStack(spacing: 0) {
+            if isSidebarCollapsed {
+                collapsedSectionTabs
+                Divider()
+            }
+
+            detailContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var collapsedSectionTabs: some View {
+        HStack(spacing: 14) {
+            collapsedTabButton(for: .home, showsIcon: true)
+
+            GlassControlGroup(cornerRadius: 24, padding: 4) {
+                HStack(spacing: 0) {
+                    ForEach(Array(SettingsSection.collapsedTabSections.dropFirst().enumerated()), id: \.element) { index, section in
+                        if index > 0 {
+                            Rectangle()
+                                .fill(Color(nsColor: .separatorColor).opacity(0.45))
+                                .frame(width: 1, height: 24)
+                                .padding(.horizontal, 4)
+                        }
+
+                        collapsedTabButton(for: section, showsIcon: false)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 24)
+        .padding(.top, 18)
+        .padding(.bottom, 16)
+    }
+
+    private func collapsedTabButton(for section: SettingsSection, showsIcon: Bool) -> some View {
+        Button {
+            selectedSection = section
+        } label: {
+            Label {
+                Text(section.compactTitle)
+            } icon: {
+                if showsIcon {
+                    Image(systemName: section.systemImage)
+                }
+            }
+            .labelStyle(.titleAndIcon)
+            .font(.headline.weight(selectedSection == section ? .semibold : .medium))
+            .lineLimit(1)
+            .foregroundStyle(selectedSection == section ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+            .padding(.horizontal, showsIcon ? 20 : 28)
+            .padding(.vertical, 10)
+            .frame(minWidth: showsIcon ? 142 : 178)
+            .background {
+                if selectedSection == section {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color(nsColor: .controlAccentColor).opacity(0.13))
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(section.title)
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
+        switch selectedSection {
+        case .home:
+            HomeDashboardView(
+                showInstallConfirmation: $showInstallConfirmation,
+                onOpenKeys: { selectedSection = .keys },
+                onOpenProxy: { selectedSection = .proxy },
+                onOpenAgentModel: { focusProxySection(.models) },
+                onOpenPreflight: {
+                    selectedSection = .proxy
+                    preflightExpanded = true
+                    vm.runPreflightChecks()
+                }
+            )
+            .environmentObject(vm)
+        case .proxy:
+            proxyTab
+        case .keys:
+            keysTab
+        case .advanced:
+            advancedTab
+        case .customization:
+            CustomizationView()
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var settingsToolbar: some ToolbarContent {
+        if vm.shouldShowToolbarStatus {
+            ToolbarItem(placement: .navigation) {
+                StatusToolbarLabel(isRunning: vm.isRunning, statusText: vm.statusText)
+            }
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                Task { await vm.startProxy() }
+            } label: {
+                Label("Start", systemImage: "play.fill")
+            }
+            .disabled(!vm.canStartProxy)
+            .tint(.green)
+            .help("Start ProxyPilot local proxy")
+
+            Button {
+                Task { await vm.stopProxy() }
+            } label: {
+                Label("Stop", systemImage: "stop.fill")
+            }
+            .disabled(!vm.canStopProxy)
+            .tint(.red)
+            .help("Stop the running ProxyPilot proxy")
+
+            Button {
+                Task { await vm.restartProxy() }
+            } label: {
+                Label("Restart", systemImage: "arrow.clockwise")
+            }
+            .disabled(!vm.canRestartProxy)
+            .help("Restart ProxyPilot local proxy")
+        }
+
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                vm.refreshStatus()
+            } label: {
+                Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .help(AppViewModel.refreshProxyStatusHelpText)
+        }
+
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                updateService.checkForUpdates()
+            } label: {
+                Label("Check for Updates", systemImage: "arrow.down.circle")
+            }
+            .disabled(!updateService.canCheckForUpdates)
+            .help("Check for ProxyPilot updates")
+
+            Menu {
+                Button("README") { vm.openReadme() }
+                Button("Website") { vm.openWebsite() }
+                Button("Send Feedback") { vm.openFeedbackDraft() }
+                Divider()
+                Button("Export Diagnostics") { vm.exportDiagnostics() }
+                Button("Copy Support Summary") { vm.copySupportSummaryToPasteboard() }
+            } label: {
+                Label("Help", systemImage: "questionmark.circle")
+            }
+        }
+    }
+
+    private var appVersionText: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }
+
+    private var appBuildText: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+    }
+
+    private func focusProxySection(_ focus: ProxySectionFocus) {
+        selectedSection = .proxy
+        proxySectionFocus = focus
+        highlightedProxySection = focus
+        proxyFocusRequestID += 1
+
+        let requestID = proxyFocusRequestID
+        let delay = UInt64(focus.highlightDurationSeconds * 1_000_000_000)
+        Task {
+            try? await Task.sleep(nanoseconds: delay)
+            await MainActor.run {
+                guard proxyFocusRequestID == requestID,
+                      highlightedProxySection == focus else { return }
+                withAnimation(.easeOut(duration: 0.35)) {
+                    highlightedProxySection = nil
+                }
+            }
+        }
+    }
+
+    private func applyPendingProxyFocus(with proxy: ScrollViewProxy) {
+        guard selectedSection == .proxy,
+              let focus = proxySectionFocus else { return }
+
+        proxySectionFocus = nil
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.28)) {
+                proxy.scrollTo(focus, anchor: .top)
+            }
+        }
+    }
+
+    // MARK: - Proxy Tab
+
+    private var proxyTab: some View {
+        ScrollViewReader { proxy in
+            Form {
             Section("Proxy") {
-                TextField("Proxy URL", text: Binding(
-                    get: { vm.proxyURLString },
-                    set: { vm.proxyURLString = $0 }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .help("Use http://127.0.0.1:4000 for built-in mode.")
+                HStack(spacing: 8) {
+                    TextField("Proxy URL", text: Binding(
+                        get: { vm.proxyURLString },
+                        set: { vm.proxyURLString = $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .help("Use \(AppViewModel.defaultProxyURLString) for built-in mode.")
+
+                    Button {
+                        vm.resetProxyURLToDefault()
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .controlSize(.small)
+                    .disabled(vm.proxyURLString == AppViewModel.defaultProxyURLString)
+                    .help("Reset proxy URL to default")
+                    .accessibilityLabel("Reset proxy URL")
+                    .accessibilityHint("Sets proxy URL to \(AppViewModel.defaultProxyURLString)")
+                }
 
                 HStack(spacing: 12) {
                     Button("Start") { Task { await vm.startProxy() } }
-                        .disabled(vm.isRunning)
+                        .disabled(!vm.canStartProxy)
                         .accessibilityLabel("Start local proxy server")
                         .accessibilityHint("Starts ProxyPilot local proxy for Xcode.")
 
                     Button("Stop") { Task { await vm.stopProxy() } }
-                        .disabled(!vm.isRunning)
+                        .disabled(!vm.canStopProxy)
                         .accessibilityLabel("Stop local proxy server")
                         .accessibilityHint("Stops the local proxy server.")
 
                     Button("Restart") { Task { await vm.restartProxy() } }
-                        .disabled(!vm.isRunning)
+                        .disabled(!vm.canRestartProxy)
                         .accessibilityLabel("Restart local proxy server")
                         .accessibilityHint("Restarts the local proxy server.")
 
@@ -127,6 +360,7 @@ struct ContentView: View {
 
                     Button("Refresh") { vm.refreshStatus() }
                         .accessibilityLabel("Refresh proxy status")
+                        .help(AppViewModel.refreshProxyStatusHelpText)
                 }
 
                 LabeledContent("Status") {
@@ -155,6 +389,13 @@ struct ContentView: View {
                     Text(verbatim: String(localized: "Anthropic translator mode:") + " " + vm.anthropicTranslatorModeText)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                    DisclosureGroup("Terms") {
+                        Text(vm.contextualTerminologyHelpText)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .font(.caption)
                 } else {
                     Text("LiteLLM mode requires scripts in `~/tools/litellm/`.")
                         .font(.caption)
@@ -162,14 +403,30 @@ struct ContentView: View {
                 }
             }
 
-            Button { selectedTab = .advanced } label: {
+            Button { selectedSection = .advanced } label: {
                 Text("Local auth, startup behavior, and more in **Advanced**.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
 
-            Section {
+            Section("Preflight") {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        preflightExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: preflightExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(preflightExpanded ? "Hide preflight checks" : "Show preflight checks")
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
                 if preflightExpanded {
                     if let lastRun = vm.preflightLastRun {
                         Text(verbatim: String(localized: "Last checked:") + " " + lastRun.formatted(date: .abbreviated, time: .shortened))
@@ -181,224 +438,9 @@ struct ContentView: View {
                         preflightRow(result)
                     }
                 }
-            } header: {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        preflightExpanded.toggle()
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Text("Preflight")
-                        Image(systemName: preflightExpanded ? "chevron.down" : "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
             }
             .onAppear {
                 vm.runPreflightChecks()
-            }
-
-            Section("Session Report Card") {
-                if vm.sessionReportCard.totalRequests == 0 {
-                    Text("Start the proxy and send requests to see session metrics.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            LabeledContent("Requests") {
-                                Text("\(vm.sessionReportCard.totalRequests)")
-                                    .font(.system(.body, design: .monospaced))
-                            }
-                            Spacer()
-                            LabeledContent("Total Tokens") {
-                                Text(vm.sessionReportCard.totalTokensFormatted)
-                                    .font(.system(.body, design: .monospaced))
-                            }
-                        }
-
-                        if vm.sessionReportCard.totalTokens > 0 {
-                            HStack {
-                                LabeledContent("Prompt") {
-                                    Text("\(vm.sessionReportCard.totalPromptTokens)")
-                                        .font(.system(.caption, design: .monospaced))
-                                }
-                                Spacer()
-                                LabeledContent("Completion") {
-                                    Text("\(vm.sessionReportCard.totalCompletionTokens)")
-                                        .font(.system(.caption, design: .monospaced))
-                                }
-                            }
-                            .foregroundStyle(.secondary)
-                        }
-
-                        if let latency = vm.sessionLatencySummary {
-                            HStack {
-                                LabeledContent("Avg") {
-                                    Text(formatLatency(latency.average))
-                                        .font(.system(.caption, design: .monospaced))
-                                }
-                                Spacer()
-                                LabeledContent("P50") {
-                                    Text(formatLatency(latency.p50))
-                                        .font(.system(.caption, design: .monospaced))
-                                }
-                                Spacer()
-                                LabeledContent("P95") {
-                                    Text(formatLatency(latency.p95))
-                                        .font(.system(.caption, design: .monospaced))
-                                }
-                            }
-                            .foregroundStyle(.secondary)
-
-                            LabeledContent("Max Latency") {
-                                Text(formatLatency(latency.max))
-                                    .font(.system(.caption, design: .monospaced))
-                            }
-                            .foregroundStyle(.secondary)
-                        }
-
-                        LabeledContent("Estimated Cost") {
-                            Text(vm.formatUSD(vm.sessionEstimatedCostUSD))
-                                .font(.system(.caption, design: .monospaced))
-                        }
-                        .foregroundStyle(.secondary)
-
-                        if !vm.sessionCostCoverageText.isEmpty {
-                            Text(vm.sessionCostCoverageText)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        if !vm.sessionModelLatencyBreakdown.isEmpty {
-                            Divider()
-                            Text("Per-Model Latency")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            ForEach(vm.sessionModelLatencyBreakdown) { entry in
-                                HStack {
-                                    Text(entry.model)
-                                        .font(.system(.caption, design: .monospaced))
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                    Spacer()
-                                    Text("p95 \(formatLatency(entry.p95))")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                    Text("avg \(formatLatency(entry.average))")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                    Text("\(entry.requestCount) req")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-
-                        if !vm.sessionReportCard.modelDistribution.isEmpty {
-                            Divider()
-                            Text("Model Distribution")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            ForEach(vm.sessionReportCard.modelDistribution, id: \.model) { entry in
-                                HStack {
-                                    Text(entry.model)
-                                        .font(.system(.caption, design: .monospaced))
-                                    Spacer()
-                                    Text("\(entry.count) req")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-
-                        Divider()
-                        HStack {
-                            Text("Recent Requests")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Button("Export CSV") {
-                                exportSessionRequestsCSV()
-                            }
-                            .font(.caption)
-                            Button("Reset") {
-                                vm.resetSessionStats()
-                                sessionCSVExportStatus = ""
-                                expandedSessionRequestIDs.removeAll()
-                                copiedSessionRequestID = nil
-                            }
-                            .font(.caption)
-                        }
-
-                        if !sessionCSVExportStatus.isEmpty {
-                            Text(sessionCSVExportStatus)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                        }
-
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 8) {
-                                ForEach(Array(vm.sessionReportCard.requests.suffix(40).reversed())) { request in
-                                    DisclosureGroup(
-                                        isExpanded: sessionRequestDisclosureBinding(for: request.id)
-                                    ) {
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            requestDetailRow(label: "Path", value: request.path)
-                                            requestDetailRow(label: "Streaming", value: request.wasStreaming ? "Yes" : "No")
-                                            requestDetailRow(label: "Prompt", value: "\(request.promptTokens)")
-                                            requestDetailRow(label: "Completion", value: "\(request.completionTokens)")
-                                            requestDetailRow(label: "Total", value: "\(request.totalTokens)")
-                                            requestDetailRow(label: "Latency", value: formatLatency(request.durationSeconds))
-                                            requestDetailRow(label: "Estimated Cost", value: vm.formatUSD(vm.estimatedCostUSD(for: request)))
-
-                                            HStack {
-                                                Spacer()
-                                                Button(copiedSessionRequestID == request.id ? "Copied JSON" : "Copy JSON") {
-                                                    copySessionRequestJSON(request)
-                                                }
-                                                .font(.caption2)
-                                            }
-                                        }
-                                        .padding(.top, 4)
-                                    } label: {
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            HStack {
-                                                Text(request.timestamp, format: .dateTime.hour().minute().second())
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.secondary)
-                                                Spacer()
-                                                Text(formatLatency(request.durationSeconds))
-                                                    .font(.system(.caption2, design: .monospaced))
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                            HStack {
-                                                Text(request.model.isEmpty ? "(unknown model)" : request.model)
-                                                    .font(.system(.caption, design: .monospaced))
-                                                    .lineLimit(1)
-                                                    .truncationMode(.middle)
-                                                Spacer()
-                                                Text("\(request.totalTokens) tok")
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.secondary)
-                                                Text(vm.formatUSD(vm.estimatedCostUSD(for: request)))
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                        }
-                                    }
-                                    .padding(8)
-                                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                                }
-                            }
-                        }
-                        .frame(maxHeight: 260)
-                    }
-                }
             }
 
             Section("Models (Upstream Provider)") {
@@ -421,14 +463,19 @@ struct ContentView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
                             .font(.caption)
-                        Text("\(vm.upstreamProvider.title) support is in **Preview** and may be unstable. [Report issues on GitHub.](https://github.com/masterofthechaos/ProxyPilot)")
+                        Text("\(vm.upstreamProvider.title) support is in **Preview** and may be unstable. [Report issues on GitHub.](https://github.com/masterofthechaos/ProxyPilot-public/issues)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                Button { selectedTab = .keys } label: {
-                    Text("Manage API keys in the **Keys** tab.")
+                Text(vm.cloudProviderActionDisclosureText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+
+                Button { selectedSection = .keys } label: {
+                    Text("Manage API keys and provider helpers in the **Keys & Providers** tab.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -478,23 +525,18 @@ struct ContentView: View {
                 HStack(spacing: 12) {
                     Button("Fetch Live Models") { Task { await vm.fetchUpstreamModels() } }
                         .accessibilityLabel("Fetch models from upstream provider")
+                        .proxyFocusGlow(isActive: highlightedProxySection == .models, color: vm.proxyPilotAccentColor)
                     Button("Sync To Proxy + Restart") { Task { await vm.syncProxyModelsFromSelection() } }
                         .disabled(!vm.canSyncProxyModels)
                     Button("Save as Defaults") { vm.saveSelectedModelsAsDefaults() }
-                        .disabled(vm.selectedUpstreamModels.isEmpty)
+                        .disabled(!vm.canSaveSelectedModelsAsDefaults)
                     Spacer()
-                    if vm.upstreamModels.isEmpty {
-                        if vm.hasSavedDefaultModels {
-                            Text(verbatim: "\(vm.savedDefaultModels.count) saved defaults")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text("No models configured — fetch to get started")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        }
+                    if vm.modelSelectionRows.isEmpty {
+                        Text("No models configured — fetch to get started")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
                     } else {
-                        Text(verbatim: "\(vm.selectedUpstreamModels.count)/\(vm.filteredUpstreamModels.count) " + String(localized: "selected"))
+                        Text(verbatim: "\(vm.selectedModelRowCount)/\(vm.modelSelectionRows.count) " + String(localized: "selected"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -529,73 +571,106 @@ struct ContentView: View {
                     }
                 }
 
-                if !vm.upstreamModels.isEmpty {
+                if !vm.modelSelectionRows.isEmpty {
                     HStack(spacing: 12) {
                         Button("Select All") { vm.selectAllUpstreamModels() }
                             .font(.caption)
-                            .disabled(vm.selectedUpstreamModels.count == vm.filteredUpstreamModels.count)
+                            .disabled(vm.allVisibleModelsSelected)
                         Button("Clear Selection") { vm.clearUpstreamModelSelection() }
                             .font(.caption)
-                            .disabled(vm.selectedUpstreamModels.isEmpty)
+                            .disabled(!vm.canClearModelSelection)
                         Spacer()
                     }
                 }
 
-                if vm.upstreamModels.isEmpty {
+                if vm.modelSelectionRows.isEmpty {
+                    Text("Fetch models from your provider, select the ones you want, then save as defaults.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
                     if vm.hasSavedDefaultModels {
-                        Text("Live fetch is optional. Sync uses your saved defaults plus Xcode Agent model.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("Fetch models from your provider, select the ones you want, then save as defaults.")
+                        Text("Saved defaults stay selected and protected. Use Remove Default to unpin one.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                } else {
-                    List(vm.filteredUpstreamModels) { model in
-                        Toggle(isOn: Binding(
-                            get: { vm.selectedUpstreamModels.contains(model.id) },
-                            set: { isOn in
-                                if isOn {
-                                    vm.selectedUpstreamModels.insert(model.id)
-                                } else {
-                                    vm.selectedUpstreamModels.remove(model.id)
-                                }
-                                vm.reconcileXcodeAgentModelSelection()
-                            }
-                        )) {
-                            HStack(spacing: 6) {
-                                Text(model.id)
-                                    .font(.system(.body, design: .monospaced))
 
-                                if vm.showModelMetadata {
-                                    modelMetadataView(
-                                        model,
-                                        estimatedCostPerRequest: vm.estimatedRequestCostUSD(for: model)
-                                    )
+                    List(vm.modelSelectionRows) { row in
+                        HStack(spacing: 10) {
+                            Toggle(isOn: Binding(
+                                get: { vm.isModelSelected(row.id) },
+                                set: { vm.setModelSelected(row.id, isSelected: $0) }
+                            )) {
+                                modelSelectionRowLabel(row)
+                            }
+                            .disabled(row.isDefault)
+
+                            if row.isDefault {
+                                Button("Remove Default") {
+                                    vm.removeDefaultModel(row.id)
                                 }
+                                .font(.caption)
                             }
                         }
                     }
                     .frame(minHeight: 120)
                 }
             }
+            .id(ProxySectionFocus.models)
 
             Section("Xcode") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("In Xcode -> Settings -> Intelligence -> Add a Model Provider:")
-                        .font(.subheadline)
-                    Text(verbatim: "URL: " + vm.proxyURLString)
-                    Text(verbatim: "API Key Header: Authorization")
-                    Text(verbatim: "API Key: Bearer <Local Proxy Password>")
+                VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Xcode Chat Provider (Locally Hosted)")
+                            .font(.subheadline)
+                        Text("In Xcode -> Settings -> Intelligence -> Add a Chat Provider -> Locally Hosted:")
+                            .font(.caption)
+                        Text(verbatim: "Port: " + vm.xcodeLocallyHostedPortText)
+                        Text(verbatim: "Description: ProxyPilot")
+                        Text(verbatim: "Model validation: " + vm.proxyModelsEndpointText)
+                            .font(.caption2)
+                    }
+
+                    DisclosureGroup("Internet Hosted / Legacy Fields") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(verbatim: "URL: " + vm.proxyURLString)
+                            Text(verbatim: "API Key Header: Authorization")
+                            Text(verbatim: "API Key: Bearer <Local Proxy Password>")
+                        }
+                        .font(.caption)
+                    }
+                    .font(.caption)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Local Proxy Exposure")
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                    LabeledContent("Bind address") {
+                        Text(vm.localProxyBindAddressText)
+                            .textSelection(.enabled)
+                    }
+                    LabeledContent("Port") {
+                        Text(vm.localProxyPortText)
+                            .textSelection(.enabled)
+                    }
+                    LabeledContent("Auth") {
+                        Text(vm.localProxyAuthStateText)
+                    }
+                    Text(vm.localProxyWhoCanConnectText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                .font(.caption)
             }
 
-            Section("Xcode Agent Mode (Xcode 26.3+)") {
+            Section("Xcode Claude Agent Routing (Xcode 26.3+)") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Route Claude Agent in Xcode through ProxyPilot. Translates Anthropic /v1/messages to OpenAI format for upstream providers.")
+                    Text("Routes Xcode Claude Agent traffic through ProxyPilot. This is separate from Xcode's Chat Provider setup above.")
+                        .font(.subheadline)
+                    Text("Translates Anthropic /v1/messages to OpenAI-compatible upstream providers.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -660,9 +735,40 @@ struct ContentView: View {
                     }
                     .pickerStyle(.menu)
 
-                    Text(verbatim: String(localized: "Effective routed model:") + " " + vm.effectiveXcodeAgentModel)
+                    Text(verbatim: vm.xcodeAgentRoutingSummaryText)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Route State")
+                            .font(.subheadline)
+                        LabeledContent("Selected") {
+                            Text(vm.xcodeAgentSelectedModelText)
+                                .textSelection(.enabled)
+                        }
+                        LabeledContent("Pending") {
+                            Text(vm.xcodeAgentPendingModelText)
+                                .textSelection(.enabled)
+                        }
+                        LabeledContent("Applied") {
+                            Text(vm.xcodeAgentAppliedModelText)
+                                .textSelection(.enabled)
+                        }
+                        LabeledContent("Live") {
+                            Text(vm.xcodeAgentLiveRouteText)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .font(.caption)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Last Xcode Agent Live Proof")
+                            .font(.subheadline)
+                        Text(vm.xcodeAgentLiveProofText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
 
                     // --- DIY Setup ---
                     DisclosureGroup(String(localized: "DIY Setup")) {
@@ -689,6 +795,17 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    DisclosureGroup("Routing Change Preview") {
+                        Text(vm.xcodeAgentConfigPreviewText)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .font(.caption)
+
                     // --- Helper text ---
                     (Text("ProxyPilot works by modifying two system settings non-destructively to re-route LLM traffic. You ")
                      + Text("must").bold()
@@ -700,7 +817,7 @@ struct ContentView: View {
 
                     // --- Install / Remove buttons ---
                     HStack(spacing: 12) {
-                        Button("Install") {
+                        Button(vm.agentConfigInstalled ? "Reinstall" : "Install") {
                             showInstallConfirmation = true
                         }
                         .disabled(!vm.hasCompatibleXcode)
@@ -742,9 +859,44 @@ struct ContentView: View {
 
                     Divider()
 
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Xcode-Visible Models Right Now")
+                                .font(.subheadline)
+                            Spacer()
+                            Button(vm.isRefreshingXcodeVisibleModels ? "Refreshing..." : "Refresh") {
+                                Task { await vm.refreshXcodeVisibleModels() }
+                            }
+                            .disabled(vm.isRefreshingXcodeVisibleModels)
+                        }
+
+                        LabeledContent("Source") {
+                            Text(vm.xcodeVisibleModelsSourceText)
+                        }
+                        LabeledContent("Count") {
+                            Text("\(vm.xcodeVisibleModelsSnapshot.modelIDs.count)")
+                        }
+                        LabeledContent("Checked") {
+                            Text(vm.xcodeVisibleModelsTimestampText)
+                        }
+                        Text(vm.xcodeVisibleModelsStatusText)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(vm.xcodeVisibleModelsListText)
+                            .font(.system(.caption2, design: .monospaced))
+                            .textSelection(.enabled)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .font(.caption)
+
+                    Divider()
+
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Text("Verify GLM Routing (Terminal)")
+                            Text("Verify Xcode Agent Routing (Terminal)")
                                 .font(.subheadline)
                             Spacer()
                             Button("Copy Commands") {
@@ -771,17 +923,6 @@ struct ContentView: View {
                         }
                     }
                 }
-                .alert(
-                    String(localized: "ProxyPilot Needs to Make a Reversible System Change"),
-                    isPresented: $showInstallConfirmation
-                ) {
-                    Button(String(localized: "Cancel"), role: .cancel) { }
-                    Button(String(localized: "Proceed")) {
-                        vm.installXcodeAgentConfig()
-                    }
-                } message: {
-                    Text("ProxyPilot is about to modify system files on your behalf. Please note that while these changes are reversible, quitting or uninstalling ProxyPilot will not revert them automatically.")
-                }
             }
 
             Section("Checklist") {
@@ -792,30 +933,22 @@ struct ContentView: View {
                 checklistRow(String(localized: "Proxy URL looks valid"), isOn: vm.checklistIsProxyURLValid)
                 HStack {
                     checklistRow(String(localized: "Proxy is running"), isOn: vm.isRunning)
-                    if !vm.isRunning {
+                    if vm.canStartProxy {
                         Button("Start Proxy") { Task { await vm.startProxy() } }
                             .font(.caption)
                     }
                 }
-
-                Toggle(isOn: Binding(
-                    get: { vm.xcodeProviderConfirmed },
-                    set: { vm.xcodeProviderConfirmed = $0 }
-                )) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("I added the provider in Xcode")
-                        Text("Xcode -> Settings -> Intelligence -> Add a Model Provider")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .toggleStyle(.checkbox)
 
                 HStack(spacing: 12) {
                     Button("Fetch Proxy Models") { Task { await vm.testModels() } }
                     Button("Test Upstream Response") { Task { await vm.testUpstreamResponse() } }
                     Spacer()
                 }
+
+                Text(vm.cloudProviderActionDisclosureText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
 
                 if !vm.upstreamTestOutput.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
@@ -842,6 +975,10 @@ struct ContentView: View {
                         .accessibilityLabel("Send app feedback")
                     Spacer()
                 }
+                Text(vm.diagnosticsPreviewText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                 if !vm.diagnosticsArchivePath.isEmpty {
                     Text(verbatim: String(localized: "Archive:") + " " + vm.diagnosticsArchivePath)
                         .font(.caption2)
@@ -880,11 +1017,7 @@ struct ContentView: View {
                 HStack(spacing: 8) {
                     Button("README") { vm.openReadme() }
                     Button("Website") { vm.openWebsite() }
-                    Button("GitHub") {
-                        if let url = URL(string: "https://github.com/masterofthechaos/ProxyPilot") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
+                    Button("GitHub") { vm.openPublicRepository() }
                     Spacer()
                 }
 
@@ -906,6 +1039,7 @@ struct ContentView: View {
                             .font(.caption)
                         Button("Refresh") { vm.refreshStatus() }
                             .font(.caption)
+                            .help(AppViewModel.refreshProxyStatusHelpText)
                     }
 
                     TextEditor(text: Binding(get: { vm.logText.isEmpty ? String(localized: "(no log lines yet)") : vm.logText }, set: { _ in }))
@@ -934,8 +1068,15 @@ struct ContentView: View {
                     }
                 }
             }
+            }
+            .formStyle(.grouped)
+            .onAppear {
+                applyPendingProxyFocus(with: proxy)
+            }
+            .onChange(of: proxyFocusRequestID) { _, _ in
+                applyPendingProxyFocus(with: proxy)
+            }
         }
-        .formStyle(.grouped)
     }
 
     // MARK: - Keys Tab
@@ -944,6 +1085,98 @@ struct ContentView: View {
 
     private var keysTab: some View {
         Form {
+            Section("GitHub Copilot (Beta)") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text("Copilot helper")
+                                    .font(.subheadline.bold())
+                                Text("Beta")
+                                    .font(.caption2.weight(.semibold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.orange.opacity(0.16), in: Capsule())
+                                    .foregroundStyle(.orange)
+                            }
+                            Text("Runs xcode-copilot-server locally on port 8080 and routes ProxyPilot through your existing GitHub Copilot account.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Label(copilotSidecarBadgeTitle, systemImage: copilotSidecarBadgeSystemImage)
+                            .font(.caption)
+                            .foregroundStyle(copilotSidecarBadgeColor)
+                    }
+
+                    if !vm.copilotSidecarExecutablePath.isEmpty {
+                        Text(verbatim: "Executable: \(vm.copilotSidecarExecutablePath)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if !vm.copilotSidecarStatusText.isEmpty {
+                        Text(vm.copilotSidecarStatusText)
+                            .font(.caption)
+                            .foregroundStyle(colorForCopilotSidecarStatus())
+                            .textSelection(.enabled)
+                    }
+
+                    HStack(spacing: 12) {
+                        Button(copilotSidecarPrimaryActionTitle) {
+                            performCopilotSidecarPrimaryAction()
+                        }
+                        .disabled(copilotSidecarPrimaryActionDisabled)
+
+                        if !vm.copilotSidecarExecutablePath.isEmpty {
+                            Button(copilotSidecarSecondaryActionTitle) {
+                                Task { await vm.stopCopilotSidecar() }
+                            }
+                            .disabled(copilotSidecarSecondaryActionDisabled)
+                        }
+
+                        Button("Refresh") {
+                            Task { await vm.refreshCopilotSidecarStatus() }
+                        }
+
+                        Button("Open Log") {
+                            vm.openCopilotSidecarLog()
+                        }
+
+                        Spacer()
+                    }
+
+                    if copilotInstallCommandCopied && vm.copilotSidecarExecutablePath.isEmpty {
+                        Text("Copied install command: \(copilotSidecarInstallCommand)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Requires your own GitHub Copilot access plus `xcode-copilot-server`.")
+                        Text("Requests may consume GitHub AI Credits. GitHub controls billing, budgets, model access, authentication, and limits.")
+                    }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+
+                    HStack(spacing: 4) {
+                        Text("Thanks to")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Button("theblixguy/xcode-copilot-server") {
+                            vm.openCopilotSidecarProject()
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption2)
+                        Text("which powers the Copilot sidecar.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             Section {
                 Text("API keys are stored in macOS Keychain under the \"proxypilot\" service.")
                     .font(.caption)
@@ -954,6 +1187,16 @@ struct ContentView: View {
                 }
             } header: {
                 Text("Supported Providers")
+            }
+
+            Section("Local Providers") {
+                Text("Local providers do not require API keys in ProxyPilot. They must be running locally before Fetch Live Models or Test Upstream Response can prove a route.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ForEach(UpstreamProvider.allCases.filter { $0.isLocal }, id: \.self) { provider in
+                    localProviderSetupRow(provider)
+                }
             }
 
             Section {
@@ -1032,9 +1275,9 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                 } else {
-                    Text("No key")
+                    Text("Not configured")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -1046,6 +1289,39 @@ struct ContentView: View {
                 Spacer()
             }
         }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func localProviderSetupRow(_ provider: UpstreamProvider) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(provider.title)
+                    .font(.subheadline.bold())
+                Spacer()
+                Text("No API key required")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            LabeledContent("Default URL") {
+                Text(provider.defaultAPIBaseURL)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+
+            LabeledContent("Server status") {
+                Text(vm.localProviderStatusText(for: provider))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+
+            Text(vm.localProviderSetupHint(for: provider))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+        .font(.caption)
         .padding(.vertical, 4)
     }
 
@@ -1064,14 +1340,15 @@ struct ContentView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
-                        Text("Key for \(provider.title) is stored safely in Keychain")
+                        Text("Key for \(provider.title) is stored in Keychain")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 } else {
-                    Text("No key")
+                    let isSelectedProvider = vm.upstreamProvider == provider
+                    Text(isSelectedProvider ? "Missing key" : "Not configured")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(isSelectedProvider ? .orange : .secondary)
                 }
             }
 
@@ -1112,7 +1389,19 @@ struct ContentView: View {
                     Spacer()
                 }
                 if hasKey {
+                    if let cliStatusText = vm.providerCLIAuthStatusText(for: provider) {
+                        Text(cliStatusText)
+                            .font(.caption2)
+                            .foregroundStyle(vm.providerCLIAuthStatusIsWarning(for: provider) ? .orange : .secondary)
+                            .textSelection(.enabled)
+                    }
                     providerKeyTestStatusView(testState)
+                    if vm.upstreamProvider == provider {
+                        Text(vm.cloudProviderActionDisclosureText)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
                 }
             }
         }
@@ -1189,15 +1478,11 @@ struct ContentView: View {
                 ))
                 .toggleStyle(.switch)
                 .help("Optional analytics are off by default. Minimal app-open and version health reporting stays on.")
-            }
 
-            Section("Startup") {
-                Toggle("Launch at Login", isOn: Binding(
-                    get: { vm.launchAtLogin },
-                    set: { _ in vm.toggleLaunchAtLogin() }
-                ))
-                .toggleStyle(.switch)
-                .help("Automatically start ProxyPilot when you log in.")
+                Text(vm.alwaysOnTelemetryDisclosureText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
 
             Section("Danger Zone") {
@@ -1272,6 +1557,92 @@ struct ContentView: View {
         }
     }
 
+    private func colorForCopilotSidecarStatus() -> Color {
+        if vm.isCopilotSidecarRunning || vm.isCopilotSidecarAgentInstalled { return .secondary }
+
+        let status = vm.copilotSidecarStatusText.lowercased()
+        if status.contains("not installed")
+            || status.contains("did not stay running")
+            || status.contains("failed")
+            || status.contains("already responding") {
+            return .orange
+        }
+        return .secondary
+    }
+
+    private var copilotSidecarBadgeTitle: String {
+        if vm.copilotSidecarExecutablePath.isEmpty { return "Not Installed" }
+        if vm.isCopilotSidecarExternal { return "External" }
+        if vm.isCopilotSidecarAgentInstalled && vm.isCopilotSidecarEndpointResponding { return "Running" }
+        if vm.isCopilotSidecarAgentInstalled { return "Background" }
+        if vm.isCopilotSidecarDirectProcessRunning { return "Running" }
+        return "Stopped"
+    }
+
+    private var copilotSidecarBadgeSystemImage: String {
+        if vm.copilotSidecarExecutablePath.isEmpty { return "exclamationmark.circle" }
+        if vm.isCopilotSidecarAgentInstalled || vm.isCopilotSidecarEndpointResponding || vm.isCopilotSidecarDirectProcessRunning {
+            return "checkmark.circle.fill"
+        }
+        return "circle"
+    }
+
+    private var copilotSidecarBadgeColor: Color {
+        if vm.copilotSidecarExecutablePath.isEmpty { return .orange }
+        if vm.isCopilotSidecarAgentInstalled || vm.isCopilotSidecarEndpointResponding || vm.isCopilotSidecarDirectProcessRunning {
+            return .green
+        }
+        return .secondary
+    }
+
+    private var copilotSidecarPrimaryActionTitle: String {
+        if vm.isStartingCopilotSidecar { return "Installing..." }
+        if vm.copilotSidecarExecutablePath.isEmpty {
+            return copilotInstallCommandCopied ? "Copied Install Command" : "Copy Install Command"
+        }
+        return (vm.copilotSidecarSupportsLaunchAgent || vm.isCopilotSidecarAgentInstalled)
+            ? "Install Background Helper"
+            : "Start Helper"
+    }
+
+    private var copilotSidecarPrimaryActionDisabled: Bool {
+        if vm.copilotSidecarExecutablePath.isEmpty {
+            return false
+        }
+        return vm.isStartingCopilotSidecar
+            || vm.isCopilotSidecarAgentInstalled
+            || vm.isCopilotSidecarEndpointResponding
+    }
+
+    private var copilotSidecarSecondaryActionTitle: String {
+        (vm.copilotSidecarSupportsLaunchAgent || vm.isCopilotSidecarAgentInstalled)
+            ? "Remove Background Helper"
+            : "Stop Helper"
+    }
+
+    private var copilotSidecarSecondaryActionDisabled: Bool {
+        if vm.isStartingCopilotSidecar { return true }
+        if vm.copilotSidecarSupportsLaunchAgent || vm.isCopilotSidecarAgentInstalled {
+            return !vm.isCopilotSidecarAgentInstalled || vm.copilotSidecarExecutablePath.isEmpty
+        }
+        return !vm.isCopilotSidecarDirectProcessRunning
+    }
+
+    private func performCopilotSidecarPrimaryAction() {
+        if vm.copilotSidecarExecutablePath.isEmpty {
+            copyCopilotSidecarInstallCommand()
+            return
+        }
+
+        Task { await vm.startCopilotSidecar() }
+    }
+
+    private func copyCopilotSidecarInstallCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(copilotSidecarInstallCommand, forType: .string)
+        copilotInstallCommandCopied = true
+    }
+
     private func checklistRow(_ title: String, isOn: Bool) -> some View {
         HStack {
             Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
@@ -1285,83 +1656,49 @@ struct ContentView: View {
     private func handlePreflightFixAction(_ action: PreflightFixAction) {
         switch action {
         case .openUpstreamKeyEditor:
-            selectedTab = .keys
+            selectedSection = .keys
             if vm.upstreamProvider.requiresAPIKey {
                 vm.providerKeyEditing[vm.upstreamProvider] = true
                 vm.providerKeyDrafts[vm.upstreamProvider] = nil
             }
         case .openMasterKeyEditor:
-            selectedTab = .keys
+            selectedSection = .keys
             vm.showingMasterKeyField = true
         default:
             vm.applyPreflightFixAction(action)
         }
     }
 
-    private func formatLatency(_ seconds: TimeInterval) -> String {
-        if seconds < 1 {
-            return "\(Int((seconds * 1000).rounded()))ms"
-        }
-        return String(format: "%.2fs", seconds)
-    }
+    @ViewBuilder
+    private func modelSelectionRowLabel(_ row: ProviderManager.ModelSelectionRow) -> some View {
+        HStack(spacing: 6) {
+            Text(row.id)
+                .font(.system(.body, design: .monospaced))
 
-    private func requestDetailRow(label: String, value: String) -> some View {
-        HStack {
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-                .font(.system(.caption2, design: .monospaced))
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-    }
-
-    private func sessionRequestDisclosureBinding(for id: UUID) -> Binding<Bool> {
-        Binding(
-            get: { expandedSessionRequestIDs.contains(id) },
-            set: { isExpanded in
-                if isExpanded {
-                    expandedSessionRequestIDs.insert(id)
-                } else {
-                    expandedSessionRequestIDs.remove(id)
-                }
+            if row.isDefault {
+                Text("Default")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.16)))
+                    .foregroundStyle(Color.accentColor)
             }
-        )
-    }
 
-    private func copySessionRequestJSON(_ request: SessionReportCard.RequestRecord) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(vm.sessionRequestJSON(request), forType: .string)
-        copiedSessionRequestID = request.id
-    }
+            if !row.isLive {
+                Text("Saved only")
+                    .font(.caption2)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.14)))
+                    .foregroundStyle(.secondary)
+            }
 
-    private func exportSessionRequestsCSV() {
-        let csv = vm.sessionRequestsCSV()
-        guard !csv.isEmpty else {
-            sessionCSVExportStatus = "No session requests to export."
-            return
-        }
-
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let suggestedName = "proxypilot-session-requests-\(formatter.string(from: Date())).csv"
-
-        let panel = NSSavePanel()
-        panel.title = "Export Session Requests CSV"
-        panel.nameFieldStringValue = suggestedName
-        panel.allowedContentTypes = [.commaSeparatedText]
-        panel.canCreateDirectories = true
-        panel.isExtensionHidden = false
-
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        do {
-            try csv.write(to: url, atomically: true, encoding: .utf8)
-            sessionCSVExportStatus = "Exported \(vm.sessionReportCard.totalRequests) requests to \(url.path)"
-        } catch {
-            sessionCSVExportStatus = "CSV export failed: \(error.localizedDescription)"
+            if vm.showModelMetadata, let model = row.model {
+                modelMetadataView(
+                    model,
+                    estimatedCostPerRequest: vm.estimatedRequestCostUSD(for: model)
+                )
+            }
         }
     }
 
@@ -1409,71 +1746,6 @@ struct ContentView: View {
                 .background(Capsule().fill(Color.teal.opacity(0.15)))
                 .foregroundStyle(.teal)
         }
-    }
-
-    private func shimmerOpacity(for active: Bool) -> Double {
-        active ? (shimmerActive ? 1.0 : 0.4) : 1.0
-    }
-
-    private var headerProxyControls: some View {
-        HStack(spacing: 8) {
-            Button {
-                Task { await vm.startProxy() }
-            } label: {
-                Image(systemName: "play.fill")
-                    .foregroundStyle(vm.isRunning ? .green : .secondary)
-                    .opacity(shimmerOpacity(for: vm.isRunning))
-                    .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: shimmerActive)
-            }
-            .buttonStyle(.borderless)
-            .disabled(vm.isRunning)
-            .accessibilityLabel("Start proxy")
-
-            Button {
-                Task { await vm.stopProxy() }
-            } label: {
-                Image(systemName: "stop.fill")
-                    .foregroundStyle(!vm.isRunning ? .red : .secondary)
-                    .opacity(shimmerOpacity(for: !vm.isRunning))
-                    .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: shimmerActive)
-            }
-            .buttonStyle(.borderless)
-            .disabled(!vm.isRunning)
-            .accessibilityLabel("Stop proxy")
-
-            Button {
-                Task { await vm.restartProxy() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.borderless)
-            .disabled(!vm.isRunning)
-            .accessibilityLabel("Restart proxy")
-        }
-    }
-
-    private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("ProxyPilot")
-                    .font(.headline)
-                Text("Local OpenAI-compatible proxy for Xcode Intelligence. Supports streaming and Anthropic API translation.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            headerProxyControls
-        }
-        .padding(12)
-        .background {
-            if reduceTransparency {
-                Color(nsColor: .windowBackgroundColor)
-            } else {
-                Rectangle().fill(.ultraThinMaterial)
-            }
-        }
-        .onAppear { shimmerActive = true }
     }
 
     private var routingVerificationCommands: String {
@@ -1536,6 +1808,53 @@ struct ContentView: View {
     }
 }
 
+private extension View {
+    func proxyFocusGlow(isActive: Bool, color: Color) -> some View {
+        modifier(ProxyFocusGlowModifier(isActive: isActive, glowColor: color))
+    }
+}
+
+private struct ProxyFocusGlowModifier: ViewModifier {
+    let isActive: Bool
+    let glowColor: Color
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(glowColor.opacity(isActive ? 0.9 : 0), lineWidth: isActive ? 2 : 0)
+                    .padding(-3)
+            }
+            .shadow(color: glowColor.opacity(isActive ? 0.75 : 0), radius: isActive ? 10 : 0)
+            .animation(.easeInOut(duration: 0.22), value: isActive)
+    }
+}
+
+private struct StatusToolbarLabel: View {
+    let isRunning: Bool
+    let statusText: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(isRunning ? Color.green : Color.secondary)
+                .frame(width: 7, height: 7)
+
+            Text(statusText)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .frame(minWidth: 92, maxWidth: 190, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Proxy status \(statusText)")
+        .help("Proxy status: \(statusText)")
+    }
+}
+
 private struct KeychainAccessPrimerView: View {
     @EnvironmentObject private var vm: AppViewModel
 
@@ -1583,7 +1902,7 @@ private struct AnalyticsOptInView: View {
             Text("Please consider sharing basic, anonymous analytics.")
                 .font(.title3.bold())
 
-            Text("ProxyPilot is an open-source project that benefits from anonymous debugging data. By default, ProxyPilot only reports app opens and app version so update adoption can be tracked. If you opt in, anonymous analytics also include successful proxy engagement and crash reporting. Prompts, endpoint IDs, and system info are never collected, and you can change this any time under the Advanced tab.")
+            Text("ProxyPilot uses anonymous analytics to spot crashes and confirm that updates work. By default, it only reports app opens and app version; opting in also includes successful proxy engagement and crash reporting. Prompts, endpoint IDs, and system info are never collected, and you can change this any time in Customization.")
                 .foregroundStyle(.secondary)
 
             HStack {
@@ -1610,7 +1929,7 @@ private struct OnboardingWizardView: View {
             Text("Welcome to ProxyPilot")
                 .font(.title2.bold())
 
-            Text("ProxyPilot routes upstream LLM providers through Xcode Intelligence and Agent Mode. Set your API key, start the proxy, and install the Xcode Agent config from the General tab.")
+            Text("ProxyPilot routes upstream LLM providers through Xcode Intelligence and Agent Mode. Set your API key, start the proxy, and install the Xcode Agent config from the Proxy tab.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 

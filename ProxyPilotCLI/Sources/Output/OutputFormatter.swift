@@ -1,11 +1,17 @@
 import Foundation
+import ProxyPilotCore
 
 enum OutputFormatter {
-    static func success(data: [String: Any], humanMessage: String, json: Bool) {
+    static func success<T: Encodable>(
+        command: String,
+        data: T,
+        humanMessage: String,
+        json: Bool,
+        nextActions: [NextAction] = []
+    ) {
         if json {
-            let output: [String: Any] = ["ok": true, "data": data]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: output),
-               let str = String(data: jsonData, encoding: .utf8) {
+            let output = AgentEnvelope(command: command, data: data, nextActions: nextActions)
+            if let str = try? AgentJSON.encode(output) {
                 print(str)
             }
         } else {
@@ -13,13 +19,22 @@ enum OutputFormatter {
         }
     }
 
-    static func error(code: String, message: String, suggestion: String? = nil, json: Bool) {
+    static func error(
+        command: String,
+        code: String,
+        message: String,
+        suggestion: String? = nil,
+        recoverable: Bool = true,
+        json: Bool,
+        nextActions: [NextAction] = []
+    ) {
         if json {
-            var err: [String: Any] = ["code": code, "message": message]
-            if let suggestion { err["suggestion"] = suggestion }
-            let output: [String: Any] = ["ok": false, "error": err]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: output),
-               let str = String(data: jsonData, encoding: .utf8) {
+            let output = AgentErrorEnvelope(
+                command: command,
+                error: AgentError(code: code, message: message, suggestion: suggestion, recoverable: recoverable),
+                nextActions: nextActions
+            )
+            if let str = try? AgentJSON.encode(output) {
                 print(str)
             }
         } else {

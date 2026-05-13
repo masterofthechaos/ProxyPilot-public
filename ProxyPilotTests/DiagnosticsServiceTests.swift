@@ -11,4 +11,13 @@ final class DiagnosticsServiceTests: XCTestCase {
         XCTAssertFalse(redacted.contains("\"xyz\""))
         XCTAssertTrue(redacted.contains("Bearer ***"))
     }
+
+    func testRedactSecretsMasksMultipleBearerTokens() {
+        let input = "Authorization: Bearer first-token\nAuthorization: Bearer second-token"
+        let redacted = DiagnosticsService.redactSecrets(in: input)
+
+        XCTAssertEqual(redacted, "Authorization: Bearer ***\nAuthorization: Bearer ***")
+        XCTAssertFalse(redacted.contains("first-token"))
+        XCTAssertFalse(redacted.contains("second-token"))
+    }
 }

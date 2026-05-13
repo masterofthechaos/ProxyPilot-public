@@ -11,6 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BINARY="$PROJECT_DIR/.build/debug/proxypilot"
 SMOKE_PORT=$((15000 + RANDOM % 20000))
+MCP_SMOKE_PORT=$((35000 + RANDOM % 20000))
+DISCOVERY_SMOKE_PORT=$((35000 + RANDOM % 20000))
 PROXY_PID=""
 AUTH_SECRETS_DIR=""
 
@@ -80,12 +82,20 @@ rm -f "$HOME/.config/proxypilot/proxypilot.pid"
 while lsof -iTCP:"$SMOKE_PORT" -sTCP:LISTEN >/dev/null 2>&1; do
     SMOKE_PORT=$((15000 + RANDOM % 20000))
 done
+while lsof -iTCP:"$MCP_SMOKE_PORT" -sTCP:LISTEN >/dev/null 2>&1; do
+    MCP_SMOKE_PORT=$((35000 + RANDOM % 20000))
+done
+while lsof -iTCP:"$DISCOVERY_SMOKE_PORT" -sTCP:LISTEN >/dev/null 2>&1; do
+    DISCOVERY_SMOKE_PORT=$((35000 + RANDOM % 20000))
+done
 
 echo ""
 echo -e "${BOLD}==========================================${RESET}"
 echo -e "${BOLD}  ProxyPilot CLI Smoke Tests${RESET}"
 echo -e "${BOLD}  Binary: $BINARY${RESET}"
 echo -e "${BOLD}  Port:   $SMOKE_PORT${RESET}"
+echo -e "${BOLD}  MCP:    $MCP_SMOKE_PORT${RESET}"
+echo -e "${BOLD}  Disc:   $DISCOVERY_SMOKE_PORT${RESET}"
 echo -e "${BOLD}==========================================${RESET}"
 
 # ===========================================================================
@@ -145,19 +155,47 @@ done
 run_test "status --json reports stopped before start"
 
 STATUS_JSON="$("$BINARY" status --port "$SMOKE_PORT" --json 2>&1)"
-STOPPED_STATUS="$(python3 -c "
+STOPPED_STATUS="$(python3 - "$STATUS_JSON" <<'PY'
 import sys, json
 try:
-    d = json.loads('$STATUS_JSON')
-    print(d.get('data', {}).get('status', 'MISSING'))
+    d = json.loads(sys.argv[1])
+    assert d.get("schema_version") == 1
+    assert d.get("command") == "status"
+    assert isinstance(d["data"]["http"]["port"], int)
+    print(d.get("data", {}).get("effective_status", "MISSING"))
 except Exception as e:
-    print('PARSE_ERROR: ' + str(e))
-")"
+    print("PARSE_ERROR: " + str(e))
+PY
+)"
 
 if [[ "$STOPPED_STATUS" == "stopped" ]]; then
     pass "status reports stopped: $STATUS_JSON"
 else
     fail "status reports stopped" "Got status='$STOPPED_STATUS' from: $STATUS_JSON"
+fi
+
+run_test "status --require-running exits 3 when stopped"
+
+set +e
+REQUIRE_JSON="$("$BINARY" status --port "$SMOKE_PORT" --json --require-running 2>&1)"
+REQUIRE_CODE=$?
+set -e
+REQUIRE_CHECK="$(python3 - "$REQUIRE_JSON" <<'PY'
+import sys, json
+try:
+    d = json.loads(sys.argv[1])
+    assert d.get("schema_version") == 1
+    assert d.get("ok") is False
+    assert d.get("error", {}).get("code") == "E020_PROXY_STOPPED"
+    print("PASS")
+except Exception as e:
+    print("PARSE_ERROR:" + str(e))
+PY
+)"
+if [[ "$REQUIRE_CODE" -eq 3 && "$REQUIRE_CHECK" == "PASS" ]]; then
+    pass "status --require-running exits 3 with structured error"
+else
+    fail "status --require-running stopped gate" "code=$REQUIRE_CODE check=$REQUIRE_CHECK json=$REQUIRE_JSON"
 fi
 
 # ===========================================================================
@@ -220,14 +258,17 @@ fi
 run_test "status --port $SMOKE_PORT --json reports running"
 
 STATUS2_JSON="$("$BINARY" status --port "$SMOKE_PORT" --json 2>&1)"
-RUNNING_STATUS="$(python3 -c "
+RUNNING_STATUS="$(python3 - "$STATUS2_JSON" <<'PY'
 import sys, json
 try:
-    d = json.loads('$STATUS2_JSON')
-    print(d.get('data', {}).get('status', 'MISSING'))
+    d = json.loads(sys.argv[1])
+    assert d.get("schema_version") == 1
+    assert isinstance(d["data"]["http"]["models_count"], int)
+    print(d.get("data", {}).get("effective_status", "MISSING"))
 except Exception as e:
-    print('PARSE_ERROR: ' + str(e))
-")"
+    print("PARSE_ERROR: " + str(e))
+PY
+)"
 
 if [[ "$RUNNING_STATUS" == "running" ]]; then
     pass "status reports running: $STATUS2_JSON"
@@ -236,26 +277,33 @@ else
 fi
 
 # ===========================================================================
-# TEST 8 — status reports running_unmanaged when PID file is missing
+# TEST 8 — status discovers CLI-owned process when PID file is missing
 # ===========================================================================
-run_test "status --port $SMOKE_PORT --json reports running_unmanaged without PID file"
+run_test "status --port $SMOKE_PORT --json discovers CLI process without PID file"
 
 rm -f "$HOME/.config/proxypilot/proxypilot.pid"
 
 STATUS_UNMANAGED_JSON="$("$BINARY" status --port "$SMOKE_PORT" --json 2>&1)"
-UNMANAGED_STATUS="$(python3 -c "
+UNMANAGED_STATUS="$(python3 - "$STATUS_UNMANAGED_JSON" <<'PY'
 import sys, json
 try:
-    d = json.loads('$STATUS_UNMANAGED_JSON')
-    print(d.get('data', {}).get('status', 'MISSING'))
+    d = json.loads(sys.argv[1])
+    assert d.get("schema_version") == 1
+    data = d.get("data", {})
+    process = data.get("process", {})
+    if data.get("effective_status") == "running_discovered" and process.get("owner") == "cli_discovered":
+        print("PASS")
+    else:
+        print(f"FAIL:{d}")
 except Exception as e:
-    print('PARSE_ERROR: ' + str(e))
-")"
+    print("PARSE_ERROR: " + str(e))
+PY
+)"
 
-if [[ "$UNMANAGED_STATUS" == "running_unmanaged" ]]; then
-    pass "status reports running_unmanaged: $STATUS_UNMANAGED_JSON"
+if [[ "$UNMANAGED_STATUS" == "PASS" ]]; then
+    pass "status discovers CLI process without PID file: $STATUS_UNMANAGED_JSON"
 else
-    fail "status reports running_unmanaged" "Got status='$UNMANAGED_STATUS' from: $STATUS_UNMANAGED_JSON"
+    fail "status discovers CLI process without PID file" "$UNMANAGED_STATUS :: $STATUS_UNMANAGED_JSON"
 fi
 
 # ===========================================================================
@@ -341,14 +389,16 @@ run_test "status --json reports stopped after proxy is killed"
 sleep 0.5
 
 STATUS3_JSON="$("$BINARY" status --port "$SMOKE_PORT" --json 2>&1)"
-FINAL_STATUS="$(python3 -c "
+FINAL_STATUS="$(python3 - "$STATUS3_JSON" <<'PY'
 import sys, json
 try:
-    d = json.loads('$STATUS3_JSON')
-    print(d.get('data', {}).get('status', 'MISSING'))
+    d = json.loads(sys.argv[1])
+    assert d.get("schema_version") == 1
+    print(d.get("data", {}).get("effective_status", "MISSING"))
 except Exception as e:
-    print('PARSE_ERROR: ' + str(e))
-")"
+    print("PARSE_ERROR: " + str(e))
+PY
+)"
 
 if [[ "$FINAL_STATUS" == "stopped" ]]; then
     pass "status reports stopped after proxy kill: $STATUS3_JSON"
@@ -357,7 +407,77 @@ else
 fi
 
 # ===========================================================================
-# TEST 13 — auth status --json (all providers)
+# TEST 13 — stop discovers CLI-started process when PID file is missing
+# ===========================================================================
+run_test "stop --port discovers CLI-started process when PID file is missing"
+
+DISCOVERY_START_JSON="$("$BINARY" start --provider ollama --port "$DISCOVERY_SMOKE_PORT" --model discovery-smoke --json --daemon 2>&1)"
+DISCOVERY_START_CHECK="$(python3 - "$DISCOVERY_START_JSON" <<'PY'
+import json
+import sys
+try:
+    d = json.loads(sys.argv[1])
+    if d.get("ok") is True and d.get("data", {}).get("status") == "started":
+        print("PASS")
+    else:
+        print(f"FAIL:{d}")
+except Exception as e:
+    print(f"PARSE_ERROR:{e}")
+PY
+)"
+if [[ "$DISCOVERY_START_CHECK" == "PASS" ]]; then
+    pass "daemon start for discovery smoke succeeds"
+else
+    fail "daemon start for discovery smoke" "$DISCOVERY_START_CHECK :: $DISCOVERY_START_JSON"
+fi
+
+rm -f "$HOME/.config/proxypilot/proxypilot.pid"
+sleep 0.5
+
+DISCOVERY_STATUS_JSON="$("$BINARY" status --port "$DISCOVERY_SMOKE_PORT" --json 2>&1)"
+DISCOVERY_STATUS_CHECK="$(python3 - "$DISCOVERY_STATUS_JSON" <<'PY'
+import json
+import sys
+try:
+    d = json.loads(sys.argv[1])
+    data = d.get("data", {})
+    process = data.get("process", {})
+    if data.get("effective_status") in ("running_discovered", "running_unhealthy_discovered") and process.get("owner") == "cli_discovered":
+        print("PASS")
+    else:
+        print(f"FAIL:{d}")
+except Exception as e:
+    print(f"PARSE_ERROR:{e}")
+PY
+)"
+if [[ "$DISCOVERY_STATUS_CHECK" == "PASS" ]]; then
+    pass "status discovers CLI process without PID file"
+else
+    fail "status discovers CLI process without PID file" "$DISCOVERY_STATUS_CHECK :: $DISCOVERY_STATUS_JSON"
+fi
+
+DISCOVERY_STOP_JSON="$("$BINARY" stop --port "$DISCOVERY_SMOKE_PORT" --json 2>&1)"
+DISCOVERY_STOP_CHECK="$(python3 - "$DISCOVERY_STOP_JSON" <<'PY'
+import json
+import sys
+try:
+    d = json.loads(sys.argv[1])
+    if d.get("ok") is True and d.get("data", {}).get("status") == "stopped_discovered":
+        print("PASS")
+    else:
+        print(f"FAIL:{d}")
+except Exception as e:
+    print(f"PARSE_ERROR:{e}")
+PY
+)"
+if [[ "$DISCOVERY_STOP_CHECK" == "PASS" ]]; then
+    pass "stop --port stops discovered CLI process"
+else
+    fail "stop --port stops discovered CLI process" "$DISCOVERY_STOP_CHECK :: $DISCOVERY_STOP_JSON"
+fi
+
+# ===========================================================================
+# TEST 14 — auth status --json (all providers)
 # ===========================================================================
 run_test "auth status --json lists all providers and local not_required"
 
@@ -374,8 +494,8 @@ try:
         raise SystemExit(0)
     providers = d.get("data", {}).get("providers", [])
     status = {p.get("provider"): p.get("status") for p in providers}
-    expected = {"openai", "groq", "zai", "openrouter", "xai", "chutes", "google", "ollama", "lmstudio"}
-    if expected.issubset(set(status.keys())) and status.get("ollama") == "not_required" and status.get("lmstudio") == "not_required":
+    expected = {"openai", "groq", "zai", "openrouter", "xai", "chutes", "google", "deepseek", "mistral", "minimax", "minimax-cn", "github-copilot", "ollama", "lmstudio"}
+    if expected.issubset(set(status.keys())) and status.get("github-copilot") == "not_required" and status.get("ollama") == "not_required" and status.get("lmstudio") == "not_required":
         print("PASS")
     else:
         print(f"FAIL:providers={status}")
@@ -390,7 +510,7 @@ else
 fi
 
 # ===========================================================================
-# TEST 14 — auth set --provider openai --key <value>
+# TEST 15 — auth set --provider openai --key <value>
 # ===========================================================================
 run_test "auth set stores key for openai"
 
@@ -417,8 +537,17 @@ else
     fail "auth set openai" "$AUTH_SET_CHECK :: $AUTH_SET_JSON"
 fi
 
+run_test "auth set help prefers stdin and warns about shell history"
+
+AUTH_SET_HELP="$("$BINARY" auth set --help 2>&1)"
+if echo "$AUTH_SET_HELP" | grep -qi -- "--stdin" && echo "$AUTH_SET_HELP" | grep -qi "shell history"; then
+    pass "auth set --help warns that --key can be retained in shell history"
+else
+    fail "auth set help shell-history warning" "$AUTH_SET_HELP"
+fi
+
 # ===========================================================================
-# TEST 15 — auth status --provider openai shows stored:true
+# TEST 16 — auth status --provider openai shows stored:true
 # ===========================================================================
 run_test "auth status --provider openai reports stored true"
 
@@ -446,7 +575,7 @@ else
 fi
 
 # ===========================================================================
-# TEST 16 — auth remove --provider openai --yes
+# TEST 17 — auth remove --provider openai --yes
 # ===========================================================================
 run_test "auth remove removes key for openai"
 
@@ -474,7 +603,7 @@ else
 fi
 
 # ===========================================================================
-# TEST 17 — auth status --provider openai shows stored:false
+# TEST 18 — auth status --provider openai shows stored:false
 # ===========================================================================
 run_test "auth status --provider openai reports stored false after remove"
 
@@ -502,7 +631,7 @@ else
 fi
 
 # ===========================================================================
-# TEST 18 — auth set rejects local providers (E041)
+# TEST 19 — auth set rejects local providers (E041)
 # ===========================================================================
 run_test "auth set rejects local provider ollama (E041)"
 
@@ -527,8 +656,31 @@ else
     fail "auth set ollama rejects local provider" "$AUTH_SET_OLLAMA_CHECK :: $AUTH_SET_OLLAMA_JSON"
 fi
 
+run_test "auth set rejects helper provider github-copilot (E041)"
+
+AUTH_SET_COPILOT_JSON="$(PROXYPILOT_SECRETS_DIR="$AUTH_SECRETS_DIR" "$BINARY" auth set --provider github-copilot --json 2>&1 || true)"
+AUTH_SET_COPILOT_CHECK="$(python3 - "$AUTH_SET_COPILOT_JSON" <<'PY'
+import json
+import sys
+raw = sys.argv[1]
+try:
+    d = json.loads(raw)
+    if d.get("ok") is False and d.get("error", {}).get("code") == "E041":
+        print("PASS")
+    else:
+        print(f"FAIL:{d}")
+except Exception as e:
+    print(f"PARSE_ERROR:{e}")
+PY
+)"
+if [[ "$AUTH_SET_COPILOT_CHECK" == "PASS" ]]; then
+    pass "auth set --provider github-copilot --json returns E041"
+else
+    fail "auth set github-copilot rejects helper provider" "$AUTH_SET_COPILOT_CHECK :: $AUTH_SET_COPILOT_JSON"
+fi
+
 # ===========================================================================
-# TEST 19 — auth set rejects empty keys (E040)
+# TEST 20 — auth set rejects empty keys (E040)
 # ===========================================================================
 run_test "auth set rejects whitespace key (E040)"
 
@@ -551,6 +703,195 @@ if [[ "$AUTH_SET_EMPTY_CHECK" == "PASS" ]]; then
     pass "auth set --provider openai --key '  ' --json returns E040"
 else
     fail "auth set rejects empty key" "$AUTH_SET_EMPTY_CHECK :: $AUTH_SET_EMPTY_JSON"
+fi
+
+run_test "auth set rejects short z.ai key (E046)"
+
+AUTH_SET_SHORT_ZAI_JSON="$(PROXYPILOT_SECRETS_DIR="$AUTH_SECRETS_DIR" "$BINARY" auth set --provider zai --key short-zai-key --json 2>&1 || true)"
+AUTH_SET_SHORT_ZAI_CHECK="$(python3 - "$AUTH_SET_SHORT_ZAI_JSON" <<'PY'
+import json
+import sys
+raw = sys.argv[1]
+try:
+    d = json.loads(raw)
+    if d.get("ok") is False and d.get("error", {}).get("code") == "E046":
+        print("PASS")
+    else:
+        print(f"FAIL:{d}")
+except Exception as e:
+    print(f"PARSE_ERROR:{e}")
+PY
+)"
+if [[ "$AUTH_SET_SHORT_ZAI_CHECK" == "PASS" ]]; then
+    pass "auth set --provider zai --key short-zai-key --json returns E046"
+else
+    fail "auth set rejects short z.ai key" "$AUTH_SET_SHORT_ZAI_CHECK :: $AUTH_SET_SHORT_ZAI_JSON"
+fi
+
+# ===========================================================================
+# TEST 21 — models command exposes metadata/filter contract
+# ===========================================================================
+run_test "models command exposes metadata and tool-calling filter"
+
+MODELS_HELP="$("$BINARY" models --help 2>&1)"
+if echo "$MODELS_HELP" | grep -q -- "--metadata" && echo "$MODELS_HELP" | grep -q "tool-calling"; then
+    pass "models --help documents --metadata and tool-calling filter"
+else
+    fail "models metadata/filter help" "$MODELS_HELP"
+fi
+
+if grep -q "model_summaries" "$PROJECT_DIR/Sources/Commands/ModelsCommand.swift"; then
+    pass "models command emits model_summaries in metadata mode"
+else
+    fail "models command emits model_summaries" "Expected model_summaries coding key"
+fi
+
+# ===========================================================================
+# TEST 22 — MCP agent-first tools are registered
+# ===========================================================================
+run_test "MCP registers agent-first recovery tools"
+
+for tool in preflight auth_status auth_set verify_routing; do
+    if grep -q "name: \"$tool\"" "$PROJECT_DIR/Sources/MCP/MCPServerSetup.swift"; then
+        pass "MCP registers tool: $tool"
+    else
+        fail "MCP registers tool: $tool"
+    fi
+done
+
+if grep -q "allow_secret_write" "$PROJECT_DIR/Sources/MCP/MCPServerSetup.swift"; then
+    pass "MCP auth_set documents allow_secret_write"
+else
+    fail "MCP auth_set documents allow_secret_write"
+fi
+
+# ===========================================================================
+# TEST 23 — MCP validates agent inputs and returns structured stats
+# ===========================================================================
+run_test "MCP validates malformed agent calls and keeps stats structured"
+
+MCP_CONTRACT_OUTPUT="$(python3 - "$BINARY" "$MCP_SMOKE_PORT" <<'PY'
+import json
+import select
+import subprocess
+import sys
+
+binary = sys.argv[1]
+port = int(sys.argv[2])
+
+process = subprocess.Popen(
+    [binary, "serve", "--mcp"],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+
+def send(message):
+    process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+    process.stdin.flush()
+
+def read_response(timeout=5):
+    ready, _, _ = select.select([process.stdout], [], [], timeout)
+    if not ready:
+        return None
+    line = process.stdout.readline().strip()
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as exc:
+        print(f"FAIL:non_json:{exc}:{line}")
+        process.kill()
+        raise SystemExit(0)
+
+def content_text(response):
+    return "\n".join(part.get("text", "") for part in response.get("result", {}).get("content", []))
+
+def envelope(response):
+    text = content_text(response)
+    first = text.splitlines()[0] if text else ""
+    try:
+        return json.loads(first)
+    except json.JSONDecodeError:
+        return None
+
+try:
+    send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"proxypilot-smoke","version":"1"}}})
+    read_response()
+    send({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})
+    requests = [
+        {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"preflight","arguments":{"provider":"not-a-provider","port":port}}},
+        {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"proxy_start","arguments":{"provider":"ollama","port":str(port),"url":"http://127.0.0.1:11434/v1","model":"string-port"}}},
+        {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_session_stats","arguments":{}}},
+        {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"proxy_status","arguments":{"port":port}}},
+        {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"proxy_stop","arguments":{}}},
+        {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"list_upstream_models","arguments":{"provider":"ollama","url":"http://127.0.0.1:9/v1","filter":"not-a-filter","metadata":True}}},
+        {"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"preflight","arguments":{"provider":123,"port":port}}},
+        {"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"list_upstream_models","arguments":{"provider":"ollama","url":"http://127.0.0.1:9/v1","filter":123}}},
+        {"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"list_upstream_models","arguments":{"provider":"ollama","url":"http://127.0.0.1:9/v1","metadata":"true"}}},
+        {"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"auth_set","arguments":{"provider":"zai","key":"short-zai-key","allow_secret_write":True}}},
+    ]
+    responses = {}
+    for request in requests:
+        send(request)
+        response = read_response()
+        if response is None:
+            print(f"FAIL:timeout:{request['id']}")
+            raise SystemExit(0)
+        responses[response.get("id")] = response
+
+    preflight = envelope(responses.get(2, {}))
+    string_port = envelope(responses.get(3, {}))
+    stats = envelope(responses.get(4, {}))
+    status = envelope(responses.get(5, {}))
+    stop = envelope(responses.get(6, {}))
+    bad_filter = envelope(responses.get(7, {}))
+    numeric_provider = envelope(responses.get(8, {}))
+    numeric_filter = envelope(responses.get(9, {}))
+    string_metadata = envelope(responses.get(10, {}))
+    short_zai_key = envelope(responses.get(11, {}))
+
+    checks = []
+    checks.append(preflight and preflight.get("ok") is False and preflight.get("error", {}).get("code") == "E001")
+    checks.append(string_port and string_port.get("ok") is False and string_port.get("error", {}).get("code") == "E030")
+    checks.append(stats and stats.get("ok") is True and stats.get("data", {}).get("requests") == 0 and isinstance(stats.get("data", {}).get("models"), dict))
+    checks.append(status and status.get("ok") is True and status.get("data", {}).get("http", {}).get("port") == port)
+    checks.append(stop and stop.get("ok") is False and stop.get("error", {}).get("code") == "E010")
+    checks.append(bad_filter and bad_filter.get("ok") is False and bad_filter.get("error", {}).get("code") == "E034")
+    checks.append(numeric_provider and numeric_provider.get("ok") is False and numeric_provider.get("error", {}).get("code") == "E001")
+    checks.append(numeric_filter and numeric_filter.get("ok") is False and numeric_filter.get("error", {}).get("code") == "E034")
+    checks.append(string_metadata and string_metadata.get("ok") is False and string_metadata.get("error", {}).get("code") == "E035")
+    checks.append(short_zai_key and short_zai_key.get("ok") is False and short_zai_key.get("error", {}).get("code") == "E046")
+
+    if all(checks):
+        print("PASS")
+    else:
+        print("FAIL:" + json.dumps({
+            "preflight": preflight,
+            "string_port": string_port,
+            "stats": stats,
+            "status": status,
+            "stop": stop,
+            "bad_filter": bad_filter,
+            "numeric_provider": numeric_provider,
+            "numeric_filter": numeric_filter,
+            "string_metadata": string_metadata,
+            "short_zai_key": short_zai_key,
+            "port": port,
+        }, sort_keys=True))
+finally:
+    process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2)
+PY
+)"
+if [[ "$MCP_CONTRACT_OUTPUT" == "PASS" ]]; then
+    pass "MCP rejects bad provider/string port/filter/type inputs, short z.ai keys, and returns structured stats"
+else
+    fail "MCP validates malformed agent calls" "$MCP_CONTRACT_OUTPUT"
 fi
 
 # ===========================================================================

@@ -41,16 +41,21 @@ public struct KeychainSecretsProvider: SecretsProvider {
             throw SecretsError.encodingFailed
         }
         try? delete(key: key)
-        let query: [String: Any] = [
-            kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-            kSecValueData as String:   data,
-        ]
+        let query = makeSetQuery(key: key, valueData: data)
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else {
             throw SecretsError.keychainError(status)
         }
+    }
+
+    func makeSetQuery(key: String, valueData data: Data) -> [String: Any] {
+        [
+            kSecClass as String:           kSecClassGenericPassword,
+            kSecAttrService as String:     service,
+            kSecAttrAccount as String:     key,
+            kSecValueData as String:       data,
+            kSecAttrAccessible as String:  kSecAttrAccessibleWhenUnlocked,
+        ]
     }
 
     public func exists(key: String) throws -> Bool {

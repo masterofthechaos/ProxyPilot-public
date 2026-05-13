@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import ProxyPilotCore
 
 struct ConfigInstallCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -8,7 +9,7 @@ struct ConfigInstallCommand: AsyncParsableCommand {
     )
 
     @Option(name: .shortAndLong, help: "Proxy port for ANTHROPIC_BASE_URL.")
-    var port: UInt16 = 4000
+    var port: UInt16 = ProxyPilotDefaults.defaultPort
 
     @Flag(name: .long, help: "Emit JSON output.")
     var json: Bool = false
@@ -17,6 +18,7 @@ struct ConfigInstallCommand: AsyncParsableCommand {
         #if os(macOS)
         guard (1024...65535).contains(Int(port)) else {
             OutputFormatter.error(
+                command: "config install",
                 code: "E030",
                 message: "Invalid port \(port) for Xcode config.",
                 suggestion: "Use a port in the range 1024-65535.",
@@ -33,20 +35,31 @@ struct ConfigInstallCommand: AsyncParsableCommand {
                 : "\nWARNING: No proxy responded on 127.0.0.1:\(port). Start one with 'proxypilot start --port \(port)'."
 
             OutputFormatter.success(
-                data: [
-                    "status": "installed",
-                    "installed": status.isInstalled,
-                    "port": "\(port)",
-                    "settings_path": XcodeConfigManager.settingsFileURL.path,
-                    "settings_file_present": status.settingsExists,
-                    "defaults_override_present": status.defaultsOverrideExists,
-                    "proxy_reachable": proxyReachable,
-                ],
+                command: "config install",
+                data: ConfigInstallPayload(
+                    status: "installed",
+                    installed: status.isInstalled,
+                    port: Int(port),
+                    settingsPath: XcodeConfigManager.settingsFileURL.path,
+                    settingsFilePresent: status.settingsExists,
+                    defaultsOverridePresent: status.defaultsOverrideExists,
+                    proxyReachable: proxyReachable
+                ),
                 humanMessage: "Xcode config installed. Routing to 127.0.0.1:\(port).\(warningSuffix)\nIf Xcode is open, quit and relaunch Xcode for changes to take effect.",
-                json: json
+                json: json,
+                nextActions: proxyReachable ? [] : [
+                    NextAction(
+                        id: "start_proxy",
+                        kind: .cli,
+                        command: "proxypilot start --port \(port)",
+                        message: "Xcode config points at a port where no proxy responded.",
+                        destructive: false
+                    ),
+                ]
             )
         } catch {
             OutputFormatter.error(
+                command: "config install",
                 code: "E031",
                 message: "Failed to install Xcode config: \(error.localizedDescription)",
                 suggestion: "Check that ~/Library/Developer/Xcode/CodingAssistant is writable.",
@@ -56,6 +69,7 @@ struct ConfigInstallCommand: AsyncParsableCommand {
         }
         #else
         OutputFormatter.error(
+            command: "config install",
             code: "E034",
             message: "'proxypilot config install' is only supported on macOS.",
             suggestion: nil,
@@ -81,4 +95,24 @@ struct ConfigInstallCommand: AsyncParsableCommand {
         }
     }
     #endif
+
+    private struct ConfigInstallPayload: Encodable {
+        let status: String
+        let installed: Bool
+        let port: Int
+        let settingsPath: String
+        let settingsFilePresent: Bool
+        let defaultsOverridePresent: Bool
+        let proxyReachable: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case status
+            case installed
+            case port
+            case settingsPath = "settings_path"
+            case settingsFilePresent = "settings_file_present"
+            case defaultsOverridePresent = "defaults_override_present"
+            case proxyReachable = "proxy_reachable"
+        }
+    }
 }

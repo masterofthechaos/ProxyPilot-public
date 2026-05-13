@@ -44,4 +44,16 @@ final class ModelDiscoveryTests: XCTestCase {
         let filtered = ModelDiscovery.filterVerified(models, verified: verified)
         XCTAssertEqual(filtered, ["claude-3-opus"])
     }
+
+    func testModelSummaryBuilderInfersToolCallingSupport() {
+        let summaries = ModelSummaryBuilder.summaries(ids: ["gpt-5.1"], verified: VerifiedModels(entries: []))
+        XCTAssertEqual(summaries.first?.toolCalling.supported, true)
+        XCTAssertEqual(summaries.first?.toolCalling.confidence, "inferred")
+        XCTAssertEqual(summaries.first?.recommendedForXcodeAgent, true)
+    }
+
+    func testModelSummaryBuilderExcludesLegacyInstructFromXcodeRecommendation() {
+        let summaries = ModelSummaryBuilder.summaries(ids: ["gpt-3.5-turbo-instruct"], verified: VerifiedModels(entries: []))
+        XCTAssertEqual(summaries.first?.recommendedForXcodeAgent, false)
+    }
 }

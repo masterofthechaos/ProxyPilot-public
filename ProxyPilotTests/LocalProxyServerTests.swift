@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 import ProxyPilotCore
 @testable import ProxyPilot
 
@@ -10,6 +11,80 @@ final class LocalProxyServerTests: XCTestCase {
 
     private func jsonBody(_ dict: [String: Any]) -> Data {
         try! JSONSerialization.data(withJSONObject: dict)
+    }
+
+    private func unusedLoopbackPort() throws -> UInt16 {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(descriptor, 0)
+        defer { close(descriptor) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        address.sin_port = 0
+
+        let bindResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                Darwin.bind(descriptor, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(bindResult, 0)
+
+        var boundAddress = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                getsockname(descriptor, sockaddrPointer, &length)
+            }
+        }
+        XCTAssertEqual(nameResult, 0)
+
+        return UInt16(bigEndian: boundAddress.sin_port)
+    }
+
+    private func waitForLocalProxyToRun(_ server: LocalProxyServer) async {
+        for _ in 0..<30 {
+            let isRunning = await MainActor.run { server.state.isRunning }
+            if isRunning { return }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    private func nonLoopbackIPv4Address() -> String? {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0 else { return nil }
+        defer { freeifaddrs(interfaces) }
+
+        var cursor = interfaces
+        while let current = cursor {
+            defer { cursor = current.pointee.ifa_next }
+
+            let flags = Int32(current.pointee.ifa_flags)
+            let isUp = (flags & IFF_UP) != 0
+            let isLoopback = (flags & IFF_LOOPBACK) != 0
+            guard isUp, !isLoopback,
+                  let address = current.pointee.ifa_addr,
+                  address.pointee.sa_family == UInt8(AF_INET) else {
+                continue
+            }
+
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                address,
+                socklen_t(address.pointee.sa_len),
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+            if result == 0 {
+                return String(cString: host)
+            }
+        }
+
+        return nil
     }
 
     // MARK: - Request-Line Parsing
@@ -207,19 +282,48 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertNotNil(parsed["messages"])
     }
 
-    func testSanitizeBodyPreservesAllForNonGoogleProvider() throws {
+    func testSanitizeBodyPreservesLegacyOpenAIParameters() throws {
         let input: [String: Any] = [
             "model": "gpt-4o",
             "logprobs": true,
-            "seed": 42
+            "seed": 42,
+            "max_tokens": 1024
         ]
         let body = try JSONSerialization.data(withJSONObject: input)
         let result = H.sanitizedChatRequestBody(body, provider: .openAI)
 
-        // Should be byte-identical (no stripping)
         let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: result) as? [String: Any])
         XCTAssertNotNil(parsed["logprobs"])
         XCTAssertNotNil(parsed["seed"])
+        XCTAssertEqual(parsed["max_tokens"] as? Int, 1024)
+        XCTAssertNil(parsed["max_completion_tokens"])
+    }
+
+    func testSanitizeBodyRenamesMaxTokensForDirectOpenAIGPT5() throws {
+        let input: [String: Any] = [
+            "model": "gpt-5.4",
+            "messages": [["role": "user", "content": "hi"]],
+            "max_tokens": 4096
+        ]
+        let body = try JSONSerialization.data(withJSONObject: input)
+        let result = H.sanitizedChatRequestBody(body, provider: .openAI)
+        let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: result) as? [String: Any])
+
+        XCTAssertNil(parsed["max_tokens"])
+        XCTAssertEqual(parsed["max_completion_tokens"] as? Int, 4096)
+    }
+
+    func testSanitizeBodyLeavesOpenRouterGPT5MaxTokensUnchanged() throws {
+        let input: [String: Any] = [
+            "model": "openai/gpt-5.4",
+            "max_tokens": 4096
+        ]
+        let body = try JSONSerialization.data(withJSONObject: input)
+        let result = H.sanitizedChatRequestBody(body, provider: .openRouter)
+        let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: result) as? [String: Any])
+
+        XCTAssertEqual(parsed["max_tokens"] as? Int, 4096)
+        XCTAssertNil(parsed["max_completion_tokens"])
     }
 
     func testSanitizeBodyReturnsOriginalForInvalidJSON() {
@@ -321,6 +425,14 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertFalse(result.contains("sk-test-secret-key"))
     }
 
+    func testScrubBearerReplacesMultipleDistinctTokens() {
+        let input = "Authorization: Bearer sk-first-secret, retry Authorization: Bearer sk-second-secret"
+        let result = H.scrubBearer(in: input)
+        XCTAssertEqual(result, "Authorization: Bearer ***, retry Authorization: Bearer ***")
+        XCTAssertFalse(result.contains("sk-first-secret"))
+        XCTAssertFalse(result.contains("sk-second-secret"))
+    }
+
     func testScrubBearerNoTokenUnchanged() {
         let input = "No bearer here"
         XCTAssertEqual(H.scrubBearer(in: input), input)
@@ -365,6 +477,31 @@ final class LocalProxyServerTests: XCTestCase {
         let result = H.redact(input, max: 50)
         XCTAssertFalse(result.contains("sk-long-secret"))
         XCTAssertTrue(result.hasSuffix("..."))
+    }
+
+    func testSessionStartLogLineIncludesSeparatorProviderAndModels() {
+        let line = H.sessionStartLogLine(
+            provider: .ollama,
+            modelIDs: ["zeta", "alpha"],
+            preferredModel: "alpha",
+            upstreamBaseURL: "http://localhost:11434/v1"
+        )
+
+        XCTAssertTrue(line.contains("=== session start ==="))
+        XCTAssertTrue(line.contains("provider=ollama"))
+        XCTAssertTrue(line.contains("models=alpha,zeta"))
+        XCTAssertTrue(line.contains("preferred=alpha"))
+        XCTAssertTrue(line.contains("upstream=http://localhost:11434/v1"))
+    }
+
+    func testModelsResponseLogLineIncludesProviderAndModelIDs() {
+        let line = H.modelsResponseLogLine(
+            path: "/v1/models",
+            provider: .zAI,
+            modelIDs: ["glm-5.1", "glm-4.5"]
+        )
+
+        XCTAssertEqual(line, "resp GET /v1/models 200 provider=zai models=2 ids=glm-4.5,glm-5.1")
     }
 
     // MARK: - Models Payload Builder
@@ -457,6 +594,51 @@ final class LocalProxyServerTests: XCTestCase {
     }
 
     // MARK: - Config.isLocalhostUpstream (via the struct)
+
+    func testBuiltInProxyRejectsNonLoopbackClients() async throws {
+        guard let nonLoopbackHost = nonLoopbackIPv4Address() else {
+            throw XCTSkip("No non-loopback IPv4 address available for LAN exposure regression test.")
+        }
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "test",
+            upstreamProvider: .ollama,
+            upstreamAPIBase: URL(string: "http://localhost:11434/v1")!,
+            upstreamAPIKey: nil,
+            allowedModels: [],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        let url = URL(string: "http://\(nonLoopbackHost):\(port)/v1/models")!
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 1
+        configuration.timeoutIntervalForResource = 1
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        do {
+            let (_, response) = try await session.data(from: url)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode
+            XCTAssertNotEqual(
+                statusCode,
+                200,
+                "Built-in proxy must not serve /v1/models on non-loopback address \(nonLoopbackHost)."
+            )
+        } catch {
+            XCTAssertTrue(true)
+        }
+    }
 
     func testConfigIsLocalhostUpstreamTrue() {
         let config = LocalProxyServer.Config(

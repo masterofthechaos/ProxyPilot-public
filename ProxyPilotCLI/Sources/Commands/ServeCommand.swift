@@ -9,10 +9,10 @@ struct ServeCommand: AsyncParsableCommand {
     )
 
     @Option(name: .shortAndLong, help: "Port to listen on.")
-    var port: UInt16 = 4000
+    var port: UInt16 = ProxyPilotDefaults.defaultPort
 
-    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, ollama, lmstudio).")
-    var provider: String = "openai"
+    @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)).")
+    var provider: String = ProxyPilotDefaults.defaultCLIProvider.rawValue
 
     @Option(name: .long, help: "Override the upstream API base URL (e.g. http://localhost:11434/v1).")
     var upstreamUrl: String?
@@ -39,6 +39,7 @@ struct ServeCommand: AsyncParsableCommand {
     private func startProxyMode() async throws {
         guard let upstreamProvider = UpstreamProvider(rawValue: provider) else {
             OutputFormatter.error(
+                command: "serve",
                 code: "E001",
                 message: "Unknown provider: \(provider)",
                 suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
@@ -62,6 +63,7 @@ struct ServeCommand: AsyncParsableCommand {
         let effectiveBaseURL = upstreamUrl ?? upstreamProvider.defaultAPIBaseURL
         if apiKey == nil && !upstreamProvider.isLocal && !isLocalhostURL(effectiveBaseURL) {
             OutputFormatter.error(
+                command: "serve",
                 code: "E004",
                 message: "No API key found for provider \(upstreamProvider.rawValue).",
                 suggestion: "Run 'proxypilot auth set --provider \(upstreamProvider.rawValue)', pass --key, or set \(secretKey ?? "the provider env var").",
@@ -70,11 +72,14 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        let sessionStats = SessionStats(sessionReportURL: SessionReportStore.defaultURL, sessionSource: "cli")
+        await sessionStats.reset(clearReportStore: true)
         let config = ProxyConfiguration(
             port: port,
             upstreamProvider: upstreamProvider,
             upstreamAPIBaseURL: upstreamUrl,
             upstreamAPIKey: apiKey,
+            sessionStats: sessionStats,
             googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil
         )
 
@@ -84,9 +89,10 @@ struct ServeCommand: AsyncParsableCommand {
             actualPort = try await server.start(config: config)
         } catch {
             OutputFormatter.error(
+                command: "serve",
                 code: "E003",
                 message: "Failed to start server: \(error)",
-                suggestion: "Check if port \(port) is already in use.",
+                suggestion: CLIProxyRuntime.bindFailureSuggestion(port: port, error: error),
                 json: json
             )
             throw ExitCode.failure
@@ -95,11 +101,12 @@ struct ServeCommand: AsyncParsableCommand {
         PidFile.write(pid: ProcessInfo.processInfo.processIdentifier)
 
         OutputFormatter.success(
-            data: [
-                "status": "running",
-                "port": "\(actualPort)",
-                "provider": upstreamProvider.rawValue,
-            ],
+            command: "serve",
+            data: ServePayload(
+                status: "running",
+                port: Int(actualPort),
+                provider: upstreamProvider.rawValue
+            ),
             humanMessage: "ProxyPilot serving on port \(actualPort) -> \(upstreamProvider.title)",
             json: json
         )
@@ -124,5 +131,11 @@ struct ServeCommand: AsyncParsableCommand {
 
     private func startMCPMode() async throws {
         try await MCPServerSetup.run(port: port, provider: provider, key: key, upstreamURL: upstreamUrl)
+    }
+
+    private struct ServePayload: Encodable {
+        let status: String
+        let port: Int
+        let provider: String
     }
 }

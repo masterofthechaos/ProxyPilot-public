@@ -13,13 +13,13 @@ struct AuthSetCommand: AsyncParsableCommand {
         abstract: "Store an upstream API key."
     )
 
-    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn).")
+    @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)).")
     var provider: String
 
-    @Option(name: .long, help: "API key value (non-interactive).")
+    @Option(name: .long, help: "API key value (non-interactive). Prefer --stdin because --key can be retained in shell history.")
     var key: String?
 
-    @Flag(name: .long, help: "Read a single API key line from stdin.")
+    @Flag(name: .long, help: "Read a single API key line from stdin. Recommended for secrets in scripts.")
     var stdin: Bool = false
 
     @Flag(name: .long, help: "Emit JSON output.")
@@ -28,6 +28,7 @@ struct AuthSetCommand: AsyncParsableCommand {
     mutating func run() async throws {
         guard let upstreamProvider = UpstreamProvider(rawValue: provider) else {
             OutputFormatter.error(
+                command: "auth set",
                 code: "E001",
                 message: "Unknown provider: \(provider)",
                 suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
@@ -38,9 +39,10 @@ struct AuthSetCommand: AsyncParsableCommand {
 
         guard upstreamProvider.requiresAPIKey else {
             OutputFormatter.error(
+                command: "auth set",
                 code: "E041",
                 message: "Provider \(upstreamProvider.rawValue) does not require an API key.",
-                suggestion: "Local providers (ollama, lmstudio) do not need auth setup.",
+                suggestion: "Local/helper providers (github-copilot, ollama, lmstudio) do not need auth setup.",
                 json: json
             )
             throw ExitCode.failure
@@ -48,6 +50,7 @@ struct AuthSetCommand: AsyncParsableCommand {
 
         guard let secretKeyName = upstreamProvider.secretKey else {
             OutputFormatter.error(
+                command: "auth set",
                 code: "E041",
                 message: "Provider \(upstreamProvider.rawValue) does not require an API key.",
                 suggestion: "Choose a cloud provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn).",
@@ -66,18 +69,20 @@ struct AuthSetCommand: AsyncParsableCommand {
                 resolvedInput = try promptForKey(provider: upstreamProvider.rawValue)
             } catch {
                 OutputFormatter.error(
+                    command: "auth set",
                     code: "E042",
                     message: "Failed to read API key from terminal prompt: \(error.localizedDescription)",
-                    suggestion: "Use --key or --stdin for non-interactive input.",
+                    suggestion: "Use --stdin for non-interactive secrets, or --key only when shell history retention is acceptable.",
                     json: json
                 )
                 throw ExitCode.failure
             }
         } else {
             OutputFormatter.error(
+                command: "auth set",
                 code: "E042",
                 message: "No API key input provided and stdin is not a TTY.",
-                suggestion: "Use --key <value> or --stdin.",
+                suggestion: "Use --stdin for non-interactive secrets, or --key only when shell history retention is acceptable.",
                 json: json
             )
             throw ExitCode.failure
@@ -86,9 +91,21 @@ struct AuthSetCommand: AsyncParsableCommand {
         let trimmed = resolvedInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             OutputFormatter.error(
+                command: "auth set",
                 code: "E040",
                 message: "API key is empty or whitespace-only.",
-                suggestion: "Pass a valid key with --key or re-enter it.",
+                suggestion: "Pass a valid key with --stdin, or re-enter it interactively.",
+                json: json
+            )
+            throw ExitCode.failure
+        }
+
+        if case let .failure(code, message) = APIKeyValidator.validate(trimmed, for: upstreamProvider) {
+            OutputFormatter.error(
+                command: "auth set",
+                code: code,
+                message: message,
+                suggestion: "Re-enter the full Z.ai API key.",
                 json: json
             )
             throw ExitCode.failure
@@ -100,6 +117,7 @@ struct AuthSetCommand: AsyncParsableCommand {
             try secrets.set(key: secretKeyName, value: trimmed)
         } catch {
             OutputFormatter.error(
+                command: "auth set",
                 code: "E043",
                 message: "Failed to write API key for provider \(upstreamProvider.rawValue): \(error.localizedDescription)",
                 suggestion: "Verify secrets store permissions and retry.",
@@ -110,25 +128,16 @@ struct AuthSetCommand: AsyncParsableCommand {
 
         let backend = authBackendInfo(for: secrets)
 
-        var data: [String: Any] = [
-            "status": "stored",
-            "provider": upstreamProvider.rawValue,
-            "backend": backend.label,
-        ]
-        if let filePath = backend.filePath {
-            data["path"] = filePath
-            OutputFormatter.success(
-                data: data,
-                humanMessage: "Stored API key for \(upstreamProvider.rawValue) in file backend at \(filePath).",
-                json: json
-            )
-        } else {
-            OutputFormatter.success(
-                data: data,
-                humanMessage: "Stored API key for \(upstreamProvider.rawValue) in \(backend.label) backend.",
-                json: json
-            )
-        }
+        let payload = AuthMutationPayload(
+            status: "stored",
+            provider: upstreamProvider.rawValue,
+            backend: backend.label,
+            path: backend.filePath
+        )
+        let humanMessage = backend.filePath.map {
+            "Stored API key for \(upstreamProvider.rawValue) in file backend at \($0)."
+        } ?? "Stored API key for \(upstreamProvider.rawValue) in \(backend.label) backend."
+        OutputFormatter.success(command: "auth set", data: payload, humanMessage: humanMessage, json: json)
     }
 
     private func promptForKey(provider: String) throws -> String {
@@ -162,6 +171,13 @@ struct AuthSetCommand: AsyncParsableCommand {
         throw AuthPromptError.promptUnsupported
         #endif
     }
+}
+
+private struct AuthMutationPayload: Encodable {
+    let status: String
+    let provider: String
+    let backend: String
+    let path: String?
 }
 
 private enum AuthPromptError: LocalizedError {

@@ -9,10 +9,10 @@ struct SetupXcodeCommand: AsyncParsableCommand {
     )
 
     @Option(name: .shortAndLong, help: "Proxy port for the local listener.")
-    var port: UInt16 = 4000
+    var port: UInt16 = ProxyPilotDefaults.defaultPort
 
-    @Option(name: .long, help: "Upstream provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, ollama, lmstudio).")
-    var provider: String = "zai"
+    @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)). Defaults to \(ProxyPilotDefaults.defaultXcodeProvider.rawValue) for Xcode setup.")
+    var provider: String = ProxyPilotDefaults.defaultXcodeProvider.rawValue
 
     @Option(name: .long, help: "Override the upstream API base URL.")
     var upstreamUrl: String?
@@ -33,6 +33,7 @@ struct SetupXcodeCommand: AsyncParsableCommand {
         #if os(macOS)
         guard let upstreamProvider = UpstreamProvider(rawValue: provider) else {
             OutputFormatter.error(
+                command: "setup xcode",
                 code: "E001",
                 message: "Unknown provider: \(provider)",
                 suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
@@ -46,6 +47,7 @@ struct SetupXcodeCommand: AsyncParsableCommand {
             inlineKey = try CLIProxyRuntime.readInlineKey(key: key, keyStdin: keyStdin)
         } catch {
             OutputFormatter.error(
+                command: "setup xcode",
                 code: "E042",
                 message: "Failed to read API key input: \(error.localizedDescription)",
                 suggestion: "Use --key <value> or provide a single key line with --key-stdin.",
@@ -66,6 +68,7 @@ struct SetupXcodeCommand: AsyncParsableCommand {
                 authBackend = authBackendInfo(for: secrets)
             } catch {
                 OutputFormatter.error(
+                    command: "setup xcode",
                     code: "E043",
                     message: "Failed to store API key for provider \(upstreamProvider.rawValue): \(error.localizedDescription)",
                     suggestion: "Verify secrets store permissions and retry.",
@@ -88,6 +91,7 @@ struct SetupXcodeCommand: AsyncParsableCommand {
 
         if resolvedAPIKey == nil && !upstreamProvider.isLocal && !isLocalhostURL(effectiveBaseURL) {
             OutputFormatter.error(
+                command: "setup xcode",
                 code: "E004",
                 message: "No API key found for provider \(upstreamProvider.rawValue).",
                 suggestion: "Pass --key, use --key-stdin, or run 'proxypilot auth set --provider \(upstreamProvider.rawValue)'.",
@@ -116,6 +120,7 @@ struct SetupXcodeCommand: AsyncParsableCommand {
                 )
             } catch {
                 OutputFormatter.error(
+                    command: "setup xcode",
                     code: "E012",
                     message: "Failed to start ProxyPilot daemon: \(error.localizedDescription)",
                     suggestion: "Check /tmp/proxypilot_builtin_proxy.log for details.",
@@ -132,6 +137,7 @@ struct SetupXcodeCommand: AsyncParsableCommand {
             configStatus = try XcodeConfigManager.install(port: port)
         } catch {
             OutputFormatter.error(
+                command: "setup xcode",
                 code: "E031",
                 message: "Failed to install Xcode config: \(error.localizedDescription)",
                 suggestion: "Check that ~/Library/Developer/Xcode/CodingAssistant is writable.",
@@ -143,6 +149,7 @@ struct SetupXcodeCommand: AsyncParsableCommand {
         let finalProbe = await CLIProxyRuntime.probeProxy(on: port)
         guard finalProbe.reachable else {
             OutputFormatter.error(
+                command: "setup xcode",
                 code: "E012",
                 message: "ProxyPilot did not respond on 127.0.0.1:\(port) after setup.",
                 suggestion: "Check /tmp/proxypilot_builtin_proxy.log for details.",
@@ -151,27 +158,14 @@ struct SetupXcodeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        var data: [String: Any] = [
-            "status": "configured",
-            "proxy_status": proxyStatus,
-            "managed": managed,
-            "port": "\(port)",
-            "provider": upstreamProvider.rawValue,
-            "model": chosenModel.isEmpty ? "(all)" : chosenModel,
-            "settings_path": XcodeConfigManager.settingsFileURL.path,
-            "settings_file_present": configStatus.settingsExists,
-            "defaults_override_present": configStatus.defaultsOverrideExists,
-        ]
-
-        if let modelCount = finalProbe.modelCount {
-            data["models"] = modelCount
-        }
-
+        let authBackendPayload: String?
+        let authPathPayload: String?
         if inlineKey != nil && upstreamProvider.requiresAPIKey {
-            data["auth_backend"] = authBackend.label
-            if let filePath = authBackend.filePath {
-                data["auth_path"] = filePath
-            }
+            authBackendPayload = authBackend.label
+            authPathPayload = authBackend.filePath
+        } else {
+            authBackendPayload = nil
+            authPathPayload = nil
         }
 
         let backendSuffix: String
@@ -187,7 +181,22 @@ struct SetupXcodeCommand: AsyncParsableCommand {
         let modelsText = finalProbe.modelCount.map { " (\($0) model\($0 == 1 ? "" : "s"))" } ?? ""
 
         OutputFormatter.success(
-            data: data,
+            command: "setup xcode",
+            data: SetupXcodePayload(
+                status: "configured",
+                proxyStatus: proxyStatus,
+                managed: managed,
+                port: Int(port),
+                provider: upstreamProvider.rawValue,
+                model: chosenModel.isEmpty ? nil : chosenModel,
+                settingsPath: XcodeConfigManager.settingsFileURL.path,
+                settingsFilePresent: configStatus.settingsExists,
+                defaultsOverridePresent: configStatus.defaultsOverrideExists,
+                modelsCount: finalProbe.modelCount,
+                authBackend: authBackendPayload,
+                authPath: authPathPayload,
+                defaultProviderDivergesFromCLI: upstreamProvider == ProxyPilotDefaults.defaultXcodeProvider && ProxyPilotDefaults.defaultCLIProvider != ProxyPilotDefaults.defaultXcodeProvider
+            ),
             humanMessage: """
             Xcode setup complete.
             Proxy: \(proxyStatus) on 127.0.0.1:\(port) (\(managed ? "managed" : "unmanaged"))
@@ -200,6 +209,7 @@ struct SetupXcodeCommand: AsyncParsableCommand {
         )
         #else
         OutputFormatter.error(
+            command: "setup xcode",
             code: "E034",
             message: "'proxypilot setup xcode' is only supported on macOS.",
             suggestion: nil,
@@ -215,14 +225,38 @@ struct SetupXcodeCommand: AsyncParsableCommand {
             return trimmed
         }
 
-        if provider == .zAI {
-            return "glm-4.7"
-        }
+        return provider.defaultAgentModel ?? ""
+    }
 
-        if let fallback = provider.fallbackModelIDs?.first {
-            return fallback
-        }
+    private struct SetupXcodePayload: Encodable {
+        let status: String
+        let proxyStatus: String
+        let managed: Bool
+        let port: Int
+        let provider: String
+        let model: String?
+        let settingsPath: String
+        let settingsFilePresent: Bool
+        let defaultsOverridePresent: Bool
+        let modelsCount: Int?
+        let authBackend: String?
+        let authPath: String?
+        let defaultProviderDivergesFromCLI: Bool
 
-        return ""
+        enum CodingKeys: String, CodingKey {
+            case status
+            case proxyStatus = "proxy_status"
+            case managed
+            case port
+            case provider
+            case model
+            case settingsPath = "settings_path"
+            case settingsFilePresent = "settings_file_present"
+            case defaultsOverridePresent = "defaults_override_present"
+            case modelsCount = "models_count"
+            case authBackend = "auth_backend"
+            case authPath = "auth_path"
+            case defaultProviderDivergesFromCLI = "default_provider_diverges_from_cli"
+        }
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 
 /// A single proxy request record for session tracking.
-public struct RequestRecord: Sendable {
+public struct RequestRecord: Sendable, Codable, Equatable {
     public let timestamp: Date
     public let model: String
     public let promptTokens: Int

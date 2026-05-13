@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import ProxyPilotCore
 
 struct ConfigStatusCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -13,17 +14,6 @@ struct ConfigStatusCommand: AsyncParsableCommand {
     mutating func run() async throws {
         #if os(macOS)
         let status = XcodeConfigManager.status()
-        var data: [String: Any] = [
-            "status": status.isInstalled ? "installed" : "not-installed",
-            "installed": status.isInstalled,
-            "settings_path": XcodeConfigManager.settingsFileURL.path,
-            "settings_file_present": status.settingsExists,
-            "defaults_override_present": status.defaultsOverrideExists,
-        ]
-        if let baseURL = status.configuredBaseURL {
-            data["base_url"] = baseURL
-        }
-
         let message: String
         if status.isInstalled {
             let baseURL = status.configuredBaseURL ?? "(unknown)"
@@ -33,12 +23,21 @@ struct ConfigStatusCommand: AsyncParsableCommand {
         }
 
         OutputFormatter.success(
-            data: data,
+            command: "config status",
+            data: ConfigStatusPayload(
+                status: status.isInstalled ? "installed" : "not-installed",
+                installed: status.isInstalled,
+                settingsPath: XcodeConfigManager.settingsFileURL.path,
+                settingsFilePresent: status.settingsExists,
+                defaultsOverridePresent: status.defaultsOverrideExists,
+                baseURL: status.configuredBaseURL
+            ),
             humanMessage: message,
             json: json
         )
         #else
         OutputFormatter.error(
+            command: "config status",
             code: "E034",
             message: "'proxypilot config status' is only supported on macOS.",
             suggestion: nil,
@@ -46,5 +45,23 @@ struct ConfigStatusCommand: AsyncParsableCommand {
         )
         throw ExitCode.failure
         #endif
+    }
+
+    private struct ConfigStatusPayload: Encodable {
+        let status: String
+        let installed: Bool
+        let settingsPath: String
+        let settingsFilePresent: Bool
+        let defaultsOverridePresent: Bool
+        let baseURL: String?
+
+        enum CodingKeys: String, CodingKey {
+            case status
+            case installed
+            case settingsPath = "settings_path"
+            case settingsFilePresent = "settings_file_present"
+            case defaultsOverridePresent = "defaults_override_present"
+            case baseURL = "base_url"
+        }
     }
 }

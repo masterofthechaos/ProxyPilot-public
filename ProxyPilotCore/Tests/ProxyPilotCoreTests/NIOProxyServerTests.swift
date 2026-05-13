@@ -192,6 +192,59 @@ struct NIOProxyServerTests {
         try await stub.stop()
     }
 
+    @Test func chatCompletionsWritesSharedSessionReportEvent() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let reportURL = directory.appendingPathComponent("session-report.jsonl")
+        let stats = SessionStats(
+            sessionReportURL: reportURL,
+            sessionSource: "cli",
+            sessionID: "nio-test"
+        )
+
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(
+            statusCode: 200,
+            body: """
+            {"id":"chatcmpl-test","model":"glm-5","choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}}
+            """
+        )
+
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)",
+            requiresAuth: false,
+            sessionStats: stats
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "requested-model",
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+        let events = try SessionReportStore.readEvents(from: reportURL)
+        #expect(events.count == 1)
+        #expect(events[0].source == "cli")
+        #expect(events[0].sessionID == "nio-test")
+        #expect(events[0].record.model == "glm-5")
+        #expect(events[0].record.promptTokens == 12)
+        #expect(events[0].record.completionTokens == 7)
+        #expect(events[0].record.path == "/v1/chat/completions")
+        #expect(events[0].record.wasStreaming == false)
+
+        try await server.stop()
+        try await stub.stop()
+    }
+
     @Test func chatCompletionsReturns502WhenUpstreamErrors() async throws {
         // Start a stub upstream that returns 500
         let stub = StubUpstream()

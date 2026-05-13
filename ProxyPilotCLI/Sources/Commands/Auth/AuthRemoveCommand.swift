@@ -13,7 +13,7 @@ struct AuthRemoveCommand: AsyncParsableCommand {
         abstract: "Delete a stored upstream API key."
     )
 
-    @Option(name: .long, help: "Upstream provider to remove key for.")
+    @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)).")
     var provider: String
 
     @Flag(name: .long, help: "Skip confirmation prompt.")
@@ -25,6 +25,7 @@ struct AuthRemoveCommand: AsyncParsableCommand {
     mutating func run() async throws {
         guard let upstreamProvider = UpstreamProvider(rawValue: provider) else {
             OutputFormatter.error(
+                command: "auth remove",
                 code: "E001",
                 message: "Unknown provider: \(provider)",
                 suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
@@ -35,9 +36,10 @@ struct AuthRemoveCommand: AsyncParsableCommand {
 
         guard upstreamProvider.requiresAPIKey else {
             OutputFormatter.error(
+                command: "auth remove",
                 code: "E041",
                 message: "Provider \(upstreamProvider.rawValue) does not require an API key.",
-                suggestion: "Local providers (ollama, lmstudio) do not need auth setup.",
+                suggestion: "Local/helper providers (github-copilot, ollama, lmstudio) do not need auth setup.",
                 json: json
             )
             throw ExitCode.failure
@@ -45,6 +47,7 @@ struct AuthRemoveCommand: AsyncParsableCommand {
 
         guard let secretKeyName = upstreamProvider.secretKey else {
             OutputFormatter.error(
+                command: "auth remove",
                 code: "E041",
                 message: "Provider \(upstreamProvider.rawValue) does not require an API key.",
                 suggestion: "Choose a cloud provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn).",
@@ -56,6 +59,7 @@ struct AuthRemoveCommand: AsyncParsableCommand {
         if !yes && !json {
             if isatty(STDIN_FILENO) != 1 {
                 OutputFormatter.error(
+                    command: "auth remove",
                     code: "E042",
                     message: "Confirmation prompt requires a TTY.",
                     suggestion: "Re-run with --yes for non-interactive usage.",
@@ -69,7 +73,8 @@ struct AuthRemoveCommand: AsyncParsableCommand {
             let response = (readLine() ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if response != "y" && response != "yes" {
                 OutputFormatter.success(
-                    data: ["status": "cancelled", "provider": upstreamProvider.rawValue],
+                    command: "auth remove",
+                    data: AuthRemovePayload(status: "cancelled", provider: upstreamProvider.rawValue, backend: nil, path: nil),
                     humanMessage: "Cancelled key removal for \(upstreamProvider.rawValue).",
                     json: json
                 )
@@ -83,6 +88,7 @@ struct AuthRemoveCommand: AsyncParsableCommand {
             try secrets.delete(key: secretKeyName)
         } catch {
             OutputFormatter.error(
+                command: "auth remove",
                 code: "E045",
                 message: "Failed to delete API key for provider \(upstreamProvider.rawValue): \(error.localizedDescription)",
                 suggestion: "Verify secrets store permissions and retry.",
@@ -93,24 +99,22 @@ struct AuthRemoveCommand: AsyncParsableCommand {
 
         let backend = authBackendInfo(for: secrets)
 
-        var data: [String: Any] = [
-            "status": "removed",
-            "provider": upstreamProvider.rawValue,
-            "backend": backend.label,
-        ]
-        if let filePath = backend.filePath {
-            data["path"] = filePath
-            OutputFormatter.success(
-                data: data,
-                humanMessage: "Removed API key for \(upstreamProvider.rawValue) from file backend at \(filePath).",
-                json: json
-            )
-        } else {
-            OutputFormatter.success(
-                data: data,
-                humanMessage: "Removed API key for \(upstreamProvider.rawValue) from \(backend.label) backend.",
-                json: json
-            )
-        }
+        let payload = AuthRemovePayload(
+            status: "removed",
+            provider: upstreamProvider.rawValue,
+            backend: backend.label,
+            path: backend.filePath
+        )
+        let humanMessage = backend.filePath.map {
+            "Removed API key for \(upstreamProvider.rawValue) from file backend at \($0)."
+        } ?? "Removed API key for \(upstreamProvider.rawValue) from \(backend.label) backend."
+        OutputFormatter.success(command: "auth remove", data: payload, humanMessage: humanMessage, json: json)
     }
+}
+
+private struct AuthRemovePayload: Encodable {
+    let status: String
+    let provider: String
+    let backend: String?
+    let path: String?
 }

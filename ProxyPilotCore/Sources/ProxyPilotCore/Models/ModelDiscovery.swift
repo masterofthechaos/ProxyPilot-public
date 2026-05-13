@@ -38,6 +38,9 @@ public enum ModelDiscovery {
         guard let url = components.url else { throw Error.invalidJSON }
 
         var request = URLRequest(url: url, timeoutInterval: 15)
+        if provider == .githubCopilot {
+            request.setValue("Xcode/24577 CFNetwork/3860.300.31 Darwin/25.2.0", forHTTPHeaderField: "User-Agent")
+        }
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }

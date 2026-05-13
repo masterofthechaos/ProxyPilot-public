@@ -8,12 +8,18 @@ import Foundation
 struct LocalProxyProbeResult {
     let reachable: Bool
     let modelCount: Int?
+    let errorMessage: String?
 }
 
 struct DaemonLaunchResult {
     let pid: Int32
     let managed: Bool
     let modelCount: Int?
+}
+
+struct DiscoveredProxyProcess {
+    let pid: Int32
+    let command: String
 }
 
 enum CLIProxyRuntime {
@@ -53,17 +59,26 @@ enum CLIProxyRuntime {
 
     static func probeProxy(on port: UInt16, timeout: TimeInterval = 1.5) async -> LocalProxyProbeResult {
         guard let url = URL(string: "http://127.0.0.1:\(port)/v1/models") else {
-            return LocalProxyProbeResult(reachable: false, modelCount: nil)
+            return LocalProxyProbeResult(reachable: false, modelCount: nil, errorMessage: "Invalid local proxy probe URL.")
         }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
 
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse,
                   httpResponse.statusCode == 200 else {
-                return LocalProxyProbeResult(reachable: false, modelCount: nil)
+                let status = (response as? HTTPURLResponse)?.statusCode
+                let message = status.map { "HTTP \($0) from /v1/models." } ?? "No HTTP response from /v1/models."
+                return LocalProxyProbeResult(reachable: false, modelCount: nil, errorMessage: message)
             }
 
             let modelCount: Int?
@@ -74,10 +89,88 @@ enum CLIProxyRuntime {
                 modelCount = nil
             }
 
-            return LocalProxyProbeResult(reachable: true, modelCount: modelCount)
+            return LocalProxyProbeResult(reachable: true, modelCount: modelCount, errorMessage: nil)
         } catch {
-            return LocalProxyProbeResult(reachable: false, modelCount: nil)
+            return LocalProxyProbeResult(reachable: false, modelCount: nil, errorMessage: error.localizedDescription)
         }
+    }
+
+    static func bindFailureSuggestion(port: UInt16, error: Error) -> String {
+        let detail = "\(error) \(error.localizedDescription)".lowercased()
+        if port == 0 {
+            return "ProxyPilot asked macOS for any free port, so this is not a fixed-port collision. Check local listener permissions or sandbox restrictions, then retry outside the restricted host."
+        }
+        if detail.contains("operation not permitted") || detail.contains("permission") || detail.contains("not permitted") {
+            return "macOS refused the local listener. Check local network permissions or sandbox restrictions for this host, then retry."
+        }
+        return "Check if port \(port) is already in use. If the port is free, inspect the error detail above for local network or sandbox restrictions."
+    }
+
+    static func discoverStartProcesses(on port: UInt16) -> [DiscoveredProxyProcess] {
+        let pgrepPath: String
+        if FileManager.default.isExecutableFile(atPath: "/usr/bin/pgrep") {
+            pgrepPath = "/usr/bin/pgrep"
+        } else {
+            pgrepPath = "/bin/pgrep"
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: pgrepPath)
+        process.arguments = ["-alf", "proxypilot"]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return []
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else {
+            return []
+        }
+
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        return output.split(separator: "\n").compactMap { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let firstSpace = trimmed.firstIndex(where: { $0 == " " || $0 == "\t" }) else {
+                return nil
+            }
+
+            let pidText = String(trimmed[..<firstSpace])
+            let command = trimmed[firstSpace...].trimmingCharacters(in: .whitespaces)
+            guard let pid = Int32(pidText), pid != currentPID else {
+                return nil
+            }
+
+            guard command.contains("proxypilot"),
+                  command.contains(" start "),
+                  commandIncludesPort(command, port: port) else {
+                return nil
+            }
+
+            return DiscoveredProxyProcess(pid: pid, command: command)
+        }
+    }
+
+    static func commandIncludesPort(_ command: String, port: UInt16) -> Bool {
+        let portText = "\(port)"
+        if command.contains("--port=\(portText)") || command.contains("-p=\(portText)") {
+            return true
+        }
+
+        let tokens = command.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        for (index, token) in tokens.enumerated() {
+            guard token == "--port" || token == "-p" else { continue }
+            if tokens.indices.contains(index + 1), tokens[index + 1] == portText {
+                return true
+            }
+        }
+        return false
     }
 
     static func launchDaemon(
@@ -134,7 +227,7 @@ enum CLIProxyRuntime {
         }
 
         var childRegistered = false
-        var probeAfter = LocalProxyProbeResult(reachable: false, modelCount: nil)
+        var probeAfter = LocalProxyProbeResult(reachable: false, modelCount: nil, errorMessage: nil)
         var sawReachableWithoutPID = false
         for _ in 0..<20 {
             if let runningPid = PidFile.read(), runningPid == childPid {

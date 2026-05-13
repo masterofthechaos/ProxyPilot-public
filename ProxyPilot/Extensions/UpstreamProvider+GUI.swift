@@ -17,6 +17,7 @@ extension UpstreamProvider {
         case .mistral: return URL(string: "https://console.mistral.ai/api-keys")
         case .miniMax: return URL(string: "https://platform.minimax.io")
         case .miniMaxCN: return URL(string: "https://platform.minimaxi.com")
+        case .githubCopilot: return URL(string: "https://github.com/features/copilot")
         case .ollama, .lmStudio: return nil
         }
     }
@@ -34,7 +35,7 @@ extension UpstreamProvider {
         case .mistral: return .mistralAPIKey
         case .miniMax: return .minimaxAPIKey
         case .miniMaxCN: return .minimaxCNAPIKey
-        case .ollama, .lmStudio: return nil
+        case .githubCopilot, .ollama, .lmStudio: return nil
         }
     }
 }

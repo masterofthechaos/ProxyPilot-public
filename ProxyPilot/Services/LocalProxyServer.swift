@@ -15,6 +15,10 @@ final class LocalProxyState: ObservableObject {
     @Published var sessionRequestCount: Int = 0
     @Published var lastModelSeen: String = ""
     @Published var lastUpstreamModelUsed: String = ""
+    @Published var activeXcodeAgentModel: String = ""
+    @Published var lastXcodeAgentRequestModel: String = ""
+    @Published var lastXcodeAgentRequestStatus: Int?
+    @Published var lastXcodeAgentRequestAt: Date?
 }
 
 final class LocalProxyServer: @unchecked Sendable {
@@ -89,6 +93,10 @@ final class LocalProxyServer: @unchecked Sendable {
             state.sessionRequestCount = 0
             state.lastModelSeen = ""
             state.lastUpstreamModelUsed = ""
+            state.activeXcodeAgentModel = config.preferredAnthropicUpstreamModel
+            state.lastXcodeAgentRequestModel = ""
+            state.lastXcodeAgentRequestStatus = nil
+            state.lastXcodeAgentRequestAt = nil
             reportCard.reset()
         }
 
@@ -101,6 +109,12 @@ final class LocalProxyServer: @unchecked Sendable {
             let newListener = try NWListener(using: params, on: port)
             newListener.newConnectionHandler = { [weak self] connection in
                 guard let self else {
+                    connection.cancel()
+                    return
+                }
+
+                guard Self.isLoopbackClientEndpoint(connection.endpoint) else {
+                    self.appendLog("reject connection: non_loopback endpoint=\(connection.endpoint)")
                     connection.cancel()
                     return
                 }
@@ -133,29 +147,37 @@ final class LocalProxyServer: @unchecked Sendable {
             newListener.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready:
-                    self?.appendLog("ready on :\(config.port)")
+                    self?.appendLog("ready on \(config.host):\(config.port) loopback_only=true")
                     Task { @MainActor [weak self] in
                         self?.state.isRunning = true
-                        self?.state.lastStatus = "Ready on 127.0.0.1:\(config.port)"
+                        self?.state.lastStatus = "Ready on \(config.host):\(config.port)"
                     }
                 case .failed(let err):
                     self?.appendLog("failed: \(err)")
                     Task { @MainActor [weak self] in
                         self?.state.isRunning = false
                         self?.state.lastStatus = "Failed: \(err)"
+                        self?.state.activeXcodeAgentModel = ""
                     }
                 case .cancelled:
                     self?.appendLog("cancelled")
                     Task { @MainActor [weak self] in
                         self?.state.isRunning = false
                         self?.state.lastStatus = "Stopped"
+                        self?.state.activeXcodeAgentModel = ""
                     }
                 default:
                     break
                 }
             }
             self.listener = newListener
-            appendLog("starting on :\(config.port)")
+            appendLog(LocalProxyServerHelpers.sessionStartLogLine(
+                provider: config.upstreamProvider,
+                modelIDs: config.allowedModels,
+                preferredModel: config.preferredAnthropicUpstreamModel,
+                upstreamBaseURL: config.upstreamAPIBaseURL
+            ))
+            appendLog("starting on \(config.host):\(config.port) loopback_only=true")
             newListener.start(queue: queue)
         } catch {
             throw ServerError.bindFailed(error.localizedDescription)
@@ -169,6 +191,10 @@ final class LocalProxyServer: @unchecked Sendable {
         Task { @MainActor in
             state.isRunning = false
             state.lastStatus = "Stopped"
+            state.activeXcodeAgentModel = ""
+            state.lastXcodeAgentRequestModel = ""
+            state.lastXcodeAgentRequestStatus = nil
+            state.lastXcodeAgentRequestAt = nil
         }
         appendLog("stopped")
     }
@@ -177,6 +203,12 @@ final class LocalProxyServer: @unchecked Sendable {
 
     private func handle(connection: NWConnection, config: Config) {
         receiveUntilHeaderEnd(connection: connection, accumulated: Data(), config: config)
+    }
+
+    private static func isLoopbackClientEndpoint(_ endpoint: NWEndpoint) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else { return false }
+        let value = String(describing: host).lowercased()
+        return value == "localhost" || value == "::1" || value == "0:0:0:0:0:0:0:1" || value.hasPrefix("127.")
     }
 
     private func receiveUntilHeaderEnd(connection: NWConnection, accumulated: Data, config: Config) {
@@ -382,7 +414,11 @@ final class LocalProxyServer: @unchecked Sendable {
 
         if let jsonData = try? JSONSerialization.data(withJSONObject: payload, options: []),
            let jsonText = String(data: jsonData, encoding: .utf8) {
-            appendLog("resp GET \(path) 200 models=\(models.count)")
+            appendLog(LocalProxyServerHelpers.modelsResponseLogLine(
+                path: path,
+                provider: config.upstreamProvider,
+                modelIDs: config.allowedModels
+            ))
             respond(connection: connection, status: 200, body: jsonText, contentType: "application/json")
         } else {
             appendLog("resp GET \(path) 500 json_encode_failed")
@@ -434,6 +470,7 @@ final class LocalProxyServer: @unchecked Sendable {
         request.httpBody = outboundBody
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
         applyUpstreamAuth(config: config, request: &request)
         request.timeoutInterval = 60
 
@@ -514,6 +551,7 @@ final class LocalProxyServer: @unchecked Sendable {
         request.httpBody = outboundBody
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
         applyUpstreamAuth(config: config, request: &request)
         request.timeoutInterval = 120
 
@@ -674,6 +712,7 @@ final class LocalProxyServer: @unchecked Sendable {
             request.httpMethod = "POST"
             request.httpBody = passthroughData
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            applyProviderCompatibilityHeaders(config: config, path: "/v1/messages", request: &request)
             applyUpstreamAuth(config: config, request: &request)
             request.timeoutInterval = 120
 
@@ -731,6 +770,7 @@ final class LocalProxyServer: @unchecked Sendable {
         request.httpMethod = "POST"
         request.httpBody = openAIData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
         applyUpstreamAuth(config: config, request: &request)
         request.timeoutInterval = 120
 
@@ -787,6 +827,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
             if httpStatus != 200 {
                 let errorText = String(decoding: data, as: UTF8.self)
+                recordXcodeAgentRequest(model: reportModel, status: httpStatus)
                 respond(
                     connection: connection,
                     status: httpStatus,
@@ -809,6 +850,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: AnthropicTranslator.errorJSON(message: "Failed to parse upstream response"),
                     contentType: "application/json"
                 )
+                recordXcodeAgentRequest(model: reportModel, status: 502)
                 return
             }
             logUpstreamResponse(openAIResponse, requestID: requestID, mode: mode, streaming: false)
@@ -835,6 +877,7 @@ final class LocalProxyServer: @unchecked Sendable {
             if let jsonData = try? JSONSerialization.data(withJSONObject: anthropicResponse),
                let jsonText = String(data: jsonData, encoding: .utf8) {
                 respond(connection: connection, status: 200, body: jsonText, contentType: "application/json")
+                recordXcodeAgentRequest(model: reportModel, status: 200)
             } else {
                 respond(
                     connection: connection,
@@ -842,6 +885,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: AnthropicTranslator.errorJSON(message: "Failed to encode Anthropic response"),
                     contentType: "application/json"
                 )
+                recordXcodeAgentRequest(model: reportModel, status: 500)
             }
         } catch {
             respond(
@@ -850,6 +894,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 body: AnthropicTranslator.errorJSON(message: "Upstream request failed"),
                 contentType: "application/json"
             )
+            recordXcodeAgentRequest(model: reportModel, status: 502)
         }
     }
 
@@ -869,6 +914,7 @@ final class LocalProxyServer: @unchecked Sendable {
             if httpStatus != 200 {
                 var errorBody = ""
                 for try await line in bytes.lines { errorBody += line }
+                recordXcodeAgentRequest(model: reportModel, status: httpStatus)
                 respond(
                     connection: connection,
                     status: httpStatus,
@@ -903,6 +949,7 @@ final class LocalProxyServer: @unchecked Sendable {
                         path: "/v1/messages", wasStreaming: true
                     )
                     Task { @MainActor [weak self] in self?.reportCard.record(record) }
+                    recordXcodeAgentRequest(model: reportModel, status: 200)
                     connection.cancel()
                     return
                 }
@@ -953,6 +1000,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 path: "/v1/messages", wasStreaming: true
             )
             Task { @MainActor [weak self] in self?.reportCard.record(record) }
+            recordXcodeAgentRequest(model: reportModel, status: 200)
             connection.cancel()
         } catch {
             respond(
@@ -961,6 +1009,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 body: AnthropicTranslator.errorJSON(message: "Upstream streaming failed"),
                 contentType: "application/json"
             )
+            recordXcodeAgentRequest(model: reportModel, status: 502)
         }
     }
 
@@ -981,6 +1030,7 @@ final class LocalProxyServer: @unchecked Sendable {
             if httpStatus != 200 {
                 var errorBody = ""
                 for try await line in bytes.lines { errorBody += line }
+                recordXcodeAgentRequest(model: reportModel, status: httpStatus)
                 respond(
                     connection: connection,
                     status: httpStatus,
@@ -1043,6 +1093,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 path: "/v1/messages", wasStreaming: true
             )
             Task { @MainActor [weak self] in self?.reportCard.record(record) }
+            recordXcodeAgentRequest(model: reportModel, status: 200)
             connection.cancel()
         } catch {
             respond(
@@ -1051,6 +1102,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 body: AnthropicTranslator.errorJSON(message: "Upstream streaming failed"),
                 contentType: "application/json"
             )
+            recordXcodeAgentRequest(model: reportModel, status: 502)
         }
     }
 
@@ -1076,6 +1128,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
             let text = String(decoding: validated.data, as: UTF8.self)
             respond(connection: connection, status: validated.statusCode, body: text, contentType: "application/json")
+            recordXcodeAgentRequest(model: reportModel, status: validated.statusCode)
 
             appendLog("passthrough buffered response: status=\(validated.statusCode) model=\(reportModel)")
         } catch {
@@ -1086,6 +1139,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 body: AnthropicTranslator.errorJSON(message: "Passthrough upstream error: \(error.localizedDescription)"),
                 contentType: "application/json"
             )
+            recordXcodeAgentRequest(model: reportModel, status: 502)
         }
     }
 
@@ -1106,6 +1160,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 for try await byte in bytes { errorData.append(byte) }
                 let text = String(decoding: errorData, as: UTF8.self)
                 respond(connection: connection, status: statusCode, body: text, contentType: "application/json")
+                recordXcodeAgentRequest(model: reportModel, status: statusCode)
                 return
             }
 
@@ -1133,6 +1188,7 @@ final class LocalProxyServer: @unchecked Sendable {
             await sendData(Data("\n".utf8), on: connection)
             connection.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
             appendLog("passthrough streaming complete: model=\(reportModel)")
+            recordXcodeAgentRequest(model: reportModel, status: 200)
         } catch {
             appendLog("passthrough streaming error: \(error.localizedDescription)")
             respond(
@@ -1141,6 +1197,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 body: AnthropicTranslator.errorJSON(message: "Passthrough streaming error: \(error.localizedDescription)"),
                 contentType: "application/json"
             )
+            recordXcodeAgentRequest(model: reportModel, status: 502)
         }
     }
 
@@ -1152,6 +1209,16 @@ final class LocalProxyServer: @unchecked Sendable {
                 continuation.resume()
             })
         }
+    }
+
+    private func recordXcodeAgentRequest(model: String, status: Int) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.state.lastXcodeAgentRequestModel = model
+            self.state.lastXcodeAgentRequestStatus = status
+            self.state.lastXcodeAgentRequestAt = Date()
+        }
+        appendLog("xcode agent proof: model=\(redact(model)) status=\(status)")
     }
 
     private func sendAnthropicSSEHeaders(on connection: NWConnection) async {
@@ -1366,6 +1433,19 @@ final class LocalProxyServer: @unchecked Sendable {
     private func applyUpstreamAuth(config: Config, request: inout URLRequest) {
         guard let apiKey = config.upstreamAPIKey, !apiKey.isEmpty else { return }
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+    }
+
+    private func applyProviderCompatibilityHeaders(config: Config, path: String, request: inout URLRequest) {
+        guard config.upstreamProvider == .githubCopilot else { return }
+
+        let userAgent = request.value(forHTTPHeaderField: "User-Agent") ?? ""
+        if path.contains("/messages") {
+            if !userAgent.hasPrefix("claude-cli/") {
+                request.setValue("claude-cli/2.1.14 (external, sdk-cli)", forHTTPHeaderField: "User-Agent")
+            }
+        } else if !userAgent.hasPrefix("Xcode/") {
+            request.setValue("Xcode/24577 CFNetwork/3860.300.31 Darwin/25.2.0", forHTTPHeaderField: "User-Agent")
+        }
     }
 
     private func upstreamErrorMessage(

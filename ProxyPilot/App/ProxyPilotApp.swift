@@ -2,7 +2,13 @@ import AppKit
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let tooltipDelayMilliseconds = 1_000
     var viewModel: AppViewModel?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // AppKit reads this app-domain default for native tooltips created by SwiftUI `.help`.
+        UserDefaults.standard.set(Self.tooltipDelayMilliseconds, forKey: "NSInitialToolTipDelay")
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let viewModel, viewModel.shouldPromptBeforeQuit() else {
@@ -45,6 +51,7 @@ struct ProxyPilotApp: App {
             ContentView()
                 .environmentObject(viewModel)
                 .environmentObject(softwareUpdateService)
+                .preferredColorScheme(viewModel.appearancePreference.colorScheme)
                 .onAppear {
                     appDelegate.viewModel = viewModel
                     viewModel.refreshAgentConfigInstallationState()
@@ -52,16 +59,6 @@ struct ProxyPilotApp: App {
                 }
         }
         .windowStyle(.automatic)
-
-        MenuBarExtra {
-            MenuBarView()
-                .environmentObject(viewModel)
-                .environmentObject(softwareUpdateService)
-        } label: {
-            Image(systemName: viewModel.isRunning ? "network" : "network.slash")
-                .accessibilityLabel(viewModel.isRunning ? "ProxyPilot status running" : "ProxyPilot status stopped")
-        }
-        .menuBarExtraStyle(.menu)
         .commands {
             CommandGroup(replacing: .help) {
                 Button("ProxyPilot README") {
@@ -72,5 +69,22 @@ struct ProxyPilotApp: App {
                 }
             }
         }
+
+        MenuBarExtra(isInserted: Binding(
+            get: { viewModel.showMenuBarExtra },
+            set: { isInserted in
+                guard viewModel.showMenuBarExtra != isInserted else { return }
+                viewModel.showMenuBarExtra = isInserted
+            }
+        )) {
+            MenuBarView()
+                .environmentObject(viewModel)
+                .environmentObject(softwareUpdateService)
+                .preferredColorScheme(viewModel.appearancePreference.colorScheme)
+        } label: {
+            Image(systemName: viewModel.isRunning ? "network" : "network.slash")
+                .accessibilityLabel(viewModel.isRunning ? "ProxyPilot status running" : "ProxyPilot status stopped")
+        }
+        .menuBarExtraStyle(.menu)
     }
 }

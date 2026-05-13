@@ -39,13 +39,13 @@ public final class NIOProxyServer: Sendable {
         do {
             channel = try await bootstrap.bind(host: config.host, port: Int(config.port)).get()
         } catch {
-            throw ProxyEngineError.bindFailed
+            throw ProxyEngineError.bindFailed(error.localizedDescription)
         }
 
         serverChannel.withLockedValue { $0 = channel }
 
         guard let localAddress = channel.localAddress, let port = localAddress.port else {
-            throw ProxyEngineError.bindFailed
+            throw ProxyEngineError.bindFailed("server started but did not report a bound local port")
         }
 
         return UInt16(port)

@@ -5,6 +5,13 @@ import ProxyPilotCore
 @MainActor
 final class ProviderManager: ObservableObject {
 
+    struct ModelSelectionRow: Identifiable, Equatable {
+        let id: String
+        let model: UpstreamModel?
+        let isDefault: Bool
+        let isLive: Bool
+    }
+
     // MARK: - UserDefaults Keys
 
     static let upstreamProviderDefaultsKey = "proxypilot.upstreamProvider"
@@ -157,6 +164,10 @@ final class ProviderManager: ObservableObject {
 
     var hasSavedDefaultModels: Bool { !savedDefaultModels.isEmpty }
 
+    private var savedDefaultModelSet: Set<String> {
+        Set(savedDefaultModels)
+    }
+
     var xcodeAgentModelCandidates: [String] {
         let ids = upstreamModels.map(\.id)
         let selected = selectedUpstreamModels.isEmpty ? [] : selectedUpstreamModels.sorted()
@@ -189,7 +200,9 @@ final class ProviderManager: ObservableObject {
 
     var proxySyncModelCandidates: [String] {
         if !upstreamModels.isEmpty {
-            return upstreamModels.map(\.id).filter { selectedUpstreamModels.contains($0) }
+            var candidates = Set(upstreamModels.map(\.id).filter { isModelSelected($0) })
+            candidates.formUnion(savedDefaultModelSet)
+            return candidates.sorted()
         }
 
         var fallbackModels = Set(savedDefaultModels)
@@ -226,6 +239,48 @@ final class ProviderManager: ObservableObject {
         return models
     }
 
+    var modelSelectionRows: [ModelSelectionRow] {
+        let liveRows = filteredUpstreamModels.map { model in
+            ModelSelectionRow(
+                id: model.id,
+                model: model,
+                isDefault: isDefaultModel(model.id),
+                isLive: true
+            )
+        }
+        let liveIDs = Set(liveRows.map(\.id))
+        let missingDefaultRows = savedDefaultModels
+            .filter { !liveIDs.contains($0) }
+            .map {
+                ModelSelectionRow(
+                    id: $0,
+                    model: upstreamModel(for: $0),
+                    isDefault: true,
+                    isLive: false
+                )
+            }
+        return missingDefaultRows + liveRows
+    }
+
+    var selectedModelRowCount: Int {
+        modelSelectionRows.filter { isModelSelected($0.id) }.count
+    }
+
+    var allVisibleModelsSelected: Bool {
+        let rows = modelSelectionRows
+        return !rows.isEmpty && rows.allSatisfy { isModelSelected($0.id) }
+    }
+
+    var canClearModelSelection: Bool {
+        selectedUpstreamModels.contains(where: { !isDefaultModel($0) })
+    }
+
+    var canSaveSelectedModelsAsDefaults: Bool {
+        modelSelectionRows.contains { row in
+            !row.isDefault && isModelSelected(row.id)
+        }
+    }
+
     // MARK: - Key Management
 
     func hasKey(for provider: UpstreamProvider) -> Bool {
@@ -233,16 +288,27 @@ final class ProviderManager: ObservableObject {
         return KeychainService.exists(key: key)
     }
 
-    func saveKey(for provider: UpstreamProvider) {
-        guard let keychainKey = provider.keychainKey else { return }
+    @discardableResult
+    func saveKey(for provider: UpstreamProvider) -> Bool {
+        guard let keychainKey = provider.keychainKey else { return false }
         let draft = (providerKeyDrafts[provider] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !draft.isEmpty else { return }
+        guard !draft.isEmpty else { return false }
+        if case let .failure(_, message) = APIKeyValidator.validate(draft, for: provider) {
+            onApplyIssue?(AppIssue(
+                code: .missingUpstreamKey,
+                title: String(localized: "Invalid API Key"),
+                message: message,
+                actions: [.openUpstreamKeyEditor]
+            ))
+            return false
+        }
         do {
             try KeychainService.set(draft, forKey: keychainKey)
             providerKeyDrafts[provider] = nil
             providerKeyEditing[provider] = nil
             providerKeyTestStates[provider] = .idle
             objectWillChange.send()
+            return true
         } catch {
             onApplyIssue?(AppIssue(
                 code: .missingUpstreamKey,
@@ -250,6 +316,7 @@ final class ProviderManager: ObservableObject {
                 message: String(localized: "Could not save API key for") + " \(provider.title): " + error.localizedDescription,
                 actions: [.openUpstreamKeyEditor]
             ))
+            return false
         }
     }
 
@@ -294,18 +361,59 @@ final class ProviderManager: ObservableObject {
     // MARK: - Model Management
 
     func selectAllUpstreamModels() {
-        selectedUpstreamModels = Set(filteredUpstreamModels.map(\.id))
+        selectedUpstreamModels = Set(modelSelectionRows.map(\.id))
         reconcileXcodeAgentModelSelection()
     }
 
     func clearUpstreamModelSelection() {
-        selectedUpstreamModels = []
+        selectedUpstreamModels = savedDefaultModelSet
         reconcileXcodeAgentModelSelection()
     }
 
     func saveSelectedModelsAsDefaults() {
-        let models = Array(selectedUpstreamModels).sorted()
+        let selectedVisibleModels = Set(modelSelectionRows.map(\.id).filter { id in
+            !isDefaultModel(id) && isModelSelected(id)
+        })
+        let models = Array(savedDefaultModelSet.union(selectedVisibleModels)).sorted()
         defaults.set(models, forKey: Self.defaultModelsKey(for: upstreamProvider))
+        selectedUpstreamModels.formUnion(models)
+        objectWillChange.send()
+    }
+
+    func applyFetchedUpstreamModels(_ models: [UpstreamModel]) {
+        upstreamModels = models
+        selectedUpstreamModels.formUnion(savedDefaultModelSet)
+        reconcileXcodeAgentModelSelection()
+    }
+
+    func isDefaultModel(_ id: String) -> Bool {
+        savedDefaultModelSet.contains(id)
+    }
+
+    func isModelSelected(_ id: String) -> Bool {
+        isDefaultModel(id) || selectedUpstreamModels.contains(id)
+    }
+
+    func setModelSelected(_ id: String, isSelected: Bool) {
+        if isDefaultModel(id) {
+            selectedUpstreamModels.insert(id)
+            reconcileXcodeAgentModelSelection()
+            return
+        }
+
+        if isSelected {
+            selectedUpstreamModels.insert(id)
+        } else {
+            selectedUpstreamModels.remove(id)
+        }
+        reconcileXcodeAgentModelSelection()
+    }
+
+    func removeDefaultModel(_ id: String) {
+        let models = savedDefaultModels.filter { $0 != id }
+        defaults.set(models, forKey: Self.defaultModelsKey(for: upstreamProvider))
+        selectedUpstreamModels.remove(id)
+        reconcileXcodeAgentModelSelection()
         objectWillChange.send()
     }
 
@@ -358,7 +466,8 @@ final class ProviderManager: ObservableObject {
             return providerStored
         }
 
-        if let legacyStored = defaults.string(forKey: Self.xcodeAgentModelLegacyDefaultsKey),
+        if provider == .zAI,
+           let legacyStored = defaults.string(forKey: Self.xcodeAgentModelLegacyDefaultsKey),
            !legacyStored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return legacyStored
         }
@@ -403,6 +512,8 @@ final class ProviderManager: ObservableObject {
 
     private func persistSelectedXcodeAgentModel() {
         defaults.set(selectedXcodeAgentModel, forKey: Self.xcodeAgentModelDefaultsKey(for: upstreamProvider))
-        defaults.set(selectedXcodeAgentModel, forKey: Self.xcodeAgentModelLegacyDefaultsKey)
+        if upstreamProvider == .zAI {
+            defaults.set(selectedXcodeAgentModel, forKey: Self.xcodeAgentModelLegacyDefaultsKey)
+        }
     }
 }

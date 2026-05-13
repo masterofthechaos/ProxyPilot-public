@@ -16,7 +16,7 @@ enum UpstreamClient {
         body: Data?,
         config: ProxyConfiguration
     ) async throws -> (Data, Int, [(String, String)]) {
-        let request = buildRequest(
+        let request = try buildRequest(
             path: path,
             method: method,
             headers: headers,
@@ -48,16 +48,16 @@ enum UpstreamClient {
         config: ProxyConfiguration
     ) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
-            let request = buildRequest(
-                path: path,
-                method: method,
-                headers: headers,
-                body: body,
-                config: config
-            )
-
             Task {
                 do {
+                    let request = try buildRequest(
+                        path: path,
+                        method: method,
+                        headers: headers,
+                        body: body,
+                        config: config
+                    )
+
                     let (bytes, response) = try await session.bytes(for: request)
                     guard let httpResponse = response as? HTTPURLResponse else {
                         continuation.finish(throwing: UpstreamError.invalidResponse)
@@ -108,8 +108,8 @@ enum UpstreamClient {
         headers: [(String, String)],
         body: Data?,
         config: ProxyConfiguration
-    ) -> URLRequest {
-        let upstreamURL = buildUpstreamURL(
+    ) throws -> URLRequest {
+        let upstreamURL = try buildUpstreamURL(
             path: path,
             config: config
         )
@@ -127,6 +127,8 @@ enum UpstreamClient {
             request.setValue(value, forHTTPHeaderField: name)
         }
 
+        applyProviderCompatibilityHeaders(path: path, config: config, request: &request)
+
         // Set upstream auth
         if let apiKey = config.upstreamAPIKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -138,7 +140,7 @@ enum UpstreamClient {
     static func buildUpstreamURL(
         path: String,
         config: ProxyConfiguration
-    ) -> URL {
+    ) throws -> URL {
         var base = config.upstreamAPIBaseURL
         while base.hasSuffix("/") {
             base.removeLast()
@@ -149,8 +151,30 @@ enum UpstreamClient {
         }
 
         let urlString = base + effectivePath
-        // swiftlint:disable:next force_unwrapping
-        return URL(string: urlString)!
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              url.host != nil else {
+            throw ProxyEngineError.invalidUpstreamURL
+        }
+        return url
+    }
+
+    private static func applyProviderCompatibilityHeaders(
+        path: String,
+        config: ProxyConfiguration,
+        request: inout URLRequest
+    ) {
+        guard config.upstreamProvider == .githubCopilot else { return }
+
+        let userAgent = request.value(forHTTPHeaderField: "User-Agent") ?? ""
+        if path.contains("/messages") {
+            if !userAgent.hasPrefix("claude-cli/") {
+                request.setValue("claude-cli/2.1.14 (external, sdk-cli)", forHTTPHeaderField: "User-Agent")
+            }
+        } else if !userAgent.hasPrefix("Xcode/") {
+            request.setValue("Xcode/24577 CFNetwork/3860.300.31 Darwin/25.2.0", forHTTPHeaderField: "User-Agent")
+        }
     }
 
     // MARK: - Errors

@@ -18,7 +18,9 @@ enum KeychainService {
         case litellmMasterKey = "LITELLM_MASTER_KEY"
     }
 
-    private static let service = "proxypilot"
+    private static var service: String {
+        ProcessInfo.processInfo.environment["PROXYPILOT_KEYCHAIN_SERVICE"] ?? "proxypilot"
+    }
     private static let legacyService = "litellm-zai"
 
     /// Migrates keys from the legacy "litellm-zai" service to "proxypilot".

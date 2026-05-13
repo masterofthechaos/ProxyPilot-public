@@ -30,7 +30,8 @@ struct LogsCommand: AsyncParsableCommand {
 
         if json {
             OutputFormatter.success(
-                data: ["lines": result, "count": result.count],
+                command: "logs",
+                data: LogsPayload(lines: result, count: result.count),
                 humanMessage: "",
                 json: true
             )
@@ -76,5 +77,10 @@ struct LogsCommand: AsyncParsableCommand {
             }
             try await Task.sleep(nanoseconds: 250_000_000) // 250ms
         }
+    }
+
+    private struct LogsPayload: Encodable {
+        let lines: [String]
+        let count: Int
     }
 }

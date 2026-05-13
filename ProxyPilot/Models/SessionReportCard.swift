@@ -1,4 +1,5 @@
 import Foundation
+import ProxyPilotCore
 
 @MainActor
 final class SessionReportCard: ObservableObject {
@@ -138,6 +139,18 @@ final class SessionReportCard: ObservableObject {
         if overflow > 0 {
             requests.removeFirst(overflow)
         }
+    }
+
+    func record(_ entry: ProxyPilotCore.RequestRecord) {
+        record(RequestRecord(
+            timestamp: entry.timestamp,
+            model: entry.model,
+            promptTokens: entry.promptTokens,
+            completionTokens: entry.completionTokens,
+            durationSeconds: entry.durationSeconds,
+            path: entry.path,
+            wasStreaming: entry.wasStreaming
+        ))
     }
 
     func reset() {

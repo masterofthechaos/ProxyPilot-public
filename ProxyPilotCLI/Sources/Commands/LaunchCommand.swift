@@ -18,15 +18,14 @@ struct LaunchCommand: AsyncParsableCommand {
         do {
             try launchXcode(specifier: xcode)
             OutputFormatter.success(
-                data: [
-                    "status": "launched",
-                    "target": xcode,
-                ],
+                command: "launch",
+                data: LaunchPayload(status: "launched", target: xcode),
                 humanMessage: "Requested launch for Xcode (\(xcode)).",
                 json: json
             )
         } catch {
             OutputFormatter.error(
+                command: "launch",
                 code: "E033",
                 message: "Failed to launch Xcode: \(error.localizedDescription)",
                 suggestion: "Verify the path/app name and that Launch Services can open it.",
@@ -36,6 +35,7 @@ struct LaunchCommand: AsyncParsableCommand {
         }
         #else
         OutputFormatter.error(
+            command: "launch",
             code: "E034",
             message: "'proxypilot launch' is only supported on macOS.",
             suggestion: nil,
@@ -43,6 +43,11 @@ struct LaunchCommand: AsyncParsableCommand {
         )
         throw ExitCode.failure
         #endif
+    }
+
+    private struct LaunchPayload: Encodable {
+        let status: String
+        let target: String
     }
 
     #if os(macOS)

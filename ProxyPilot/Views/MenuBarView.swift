@@ -52,6 +52,45 @@ struct MenuBarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(visibleOrderedSections.enumerated()), id: \.element) { index, section in
+                if index > 0 {
+                    Divider()
+                }
+                menuBarSection(section)
+            }
+
+            if !visibleOrderedSections.isEmpty {
+                Divider()
+            }
+
+            Button("Open Settings...") {
+                openWindow(id: "settings")
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            .keyboardShortcut(",", modifiers: .command)
+            .accessibilityLabel("Open ProxyPilot settings")
+
+            Divider()
+
+            Button("Quit ProxyPilot") {
+                NSApp.terminate(nil)
+            }
+            .keyboardShortcut("q", modifiers: .command)
+            .accessibilityLabel("Quit ProxyPilot")
+        }
+        .onAppear {
+            vm.importExternalSessionReportEvents()
+        }
+    }
+
+    private var visibleOrderedSections: [MenuBarSection] {
+        vm.menuBarSectionOrder.filter { vm.visibleMenuBarSections.contains($0) }
+    }
+
+    @ViewBuilder
+    private func menuBarSection(_ section: MenuBarSection) -> some View {
+        switch section {
+        case .statusDetails:
             HStack(spacing: 6) {
                 Circle()
                     .fill(vm.isRunning ? Color.green : Color.secondary)
@@ -65,13 +104,7 @@ struct MenuBarView: View {
                     .foregroundStyle(.orange)
             }
             .accessibilityLabel(vm.isRunning ? "Proxy running" : "Proxy stopped")
-
-            if vm.isRunning {
-                SessionStatsView(state: vm.localProxyState, reportCard: vm.sessionReportCard, upstreamProviderTitle: vm.upstreamProvider.title)
-            }
-
-            Divider()
-
+        case .modelPicker:
             Picker("Model", selection: Binding(
                 get: { vm.selectedXcodeAgentModel },
                 set: { vm.selectedXcodeAgentModel = $0 }
@@ -80,10 +113,16 @@ struct MenuBarView: View {
                     Text(model).tag(model)
                 }
             }
-
-            Divider()
-
-            if vm.isRunning {
+        case .sessionStats:
+            if vm.isRunning || vm.localProxyState.sessionRequestCount > 0 {
+                SessionStatsView(state: vm.localProxyState, reportCard: vm.sessionReportCard, upstreamProviderTitle: vm.upstreamProvider.title)
+            } else {
+                Text("No session activity")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .quickActions:
+            if vm.canStopProxy {
                 Button("Stop Proxy") {
                     Task { await vm.stopProxy() }
                 }
@@ -95,36 +134,22 @@ struct MenuBarView: View {
                 }
                 .accessibilityLabel("Restart proxy")
                 .accessibilityHint("Restarts the local proxy server")
-            } else {
+            } else if vm.canStartProxy {
                 Button("Start Proxy") {
                     Task { await vm.startProxy() }
                 }
                 .accessibilityLabel("Start proxy")
                 .accessibilityHint("Starts the local proxy server")
+            } else {
+                Text(vm.statusText)
+                    .foregroundStyle(.secondary)
             }
-
-            Divider()
-
-            Button("Open Settings...") {
-                openWindow(id: "settings")
-                NSApp.activate(ignoringOtherApps: true)
-            }
-            .keyboardShortcut(",", modifiers: .command)
-            .accessibilityLabel("Open ProxyPilot settings")
-
+        case .updates:
             Button("Check for Updates...") {
                 updateService.checkForUpdates()
             }
             .disabled(!updateService.canCheckForUpdates)
             .accessibilityLabel("Check for software updates")
-
-            Divider()
-
-            Button("Quit ProxyPilot") {
-                NSApp.terminate(nil)
-            }
-            .keyboardShortcut("q", modifiers: .command)
-            .accessibilityLabel("Quit ProxyPilot")
         }
     }
 }

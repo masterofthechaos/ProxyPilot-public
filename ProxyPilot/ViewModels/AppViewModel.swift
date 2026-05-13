@@ -3,15 +3,57 @@ import Combine
 import Foundation
 import ProxyPilotCore
 import ServiceManagement
+import SwiftUI
 
 @MainActor
 final class AppViewModel: ObservableObject {
 
     private typealias IssueError = AppIssueError
 
+    enum ProxyRuntimeStatus: Equatable {
+        case stopped
+        case runningInApp
+        case runningExternal
+        case portOccupied(statusCode: Int)
+    }
+
+    enum XcodeVisibleModelsSource: String, Equatable {
+        case notChecked
+        case runningProxy
+        case pendingSettings
+    }
+
+    enum ProviderCLIAuthStatus: Equatable {
+        case notChecked
+        case checking
+        case visible
+        case notVisible(String)
+        case cliMissing
+        case failed(String)
+    }
+
+    struct XcodeVisibleModelsSnapshot: Equatable {
+        var modelIDs: [String] = []
+        var checkedAt: Date?
+        var source: XcodeVisibleModelsSource = .notChecked
+        var errorMessage: String?
+
+        var reflectsRunningProxy: Bool {
+            source == .runningProxy && errorMessage == nil
+        }
+    }
+
     private static let anthropicFallbackDefaultsKey = "proxypilot.anthropicTranslatorFallbackEnabled"
     private static let didCompleteOnboardingDefaultsKey = "proxypilot.didCompleteOnboarding"
     private static let telemetryOptInDefaultsKey = "proxypilot.telemetryOptIn"
+    private static let liquidGlassEnabledDefaultsKey = "proxypilot.liquidGlassEnabled"
+    static let appearancePreferenceDefaultsKey = "proxypilot.customization.appearance"
+    static let proxyPilotAccentHexDefaultsKey = "proxypilot.customization.accentHex"
+    static let showMenuBarExtraDefaultsKey = "proxypilot.customization.showMenuBarExtra"
+    static let menuBarSectionOrderDefaultsKey = "proxypilot.customization.menuBarSectionOrder"
+    static let visibleMenuBarSectionsDefaultsKey = "proxypilot.customization.visibleMenuBarSections"
+    static let visibleHomeDashboardSectionsDefaultsKey = "proxypilot.customization.visibleHomeDashboardSections"
+    static let defaultSettingsSectionDefaultsKey = "proxypilot.customization.defaultSettingsSection"
     // autoRestartEnabled defaults key: kept here for resetToFreshInstall cleanup
     private static let autoRestartEnabledDefaultsKey = "proxypilot.autoRestartEnabled"
     private static let requireLocalAuthDefaultsKey = "proxypilot.requireLocalAuth"
@@ -42,13 +84,18 @@ final class AppViewModel: ObservableObject {
     private let diagnosticsService: DiagnosticsService
     private let telemetryService: TelemetryService
     private let healthMonitor: HealthMonitor
+    private let copilotSidecarService: CopilotSidecarService
     private let xcodeAgentConfigStateProvider: (() -> Bool)?
     private let xcodeDetectionService = XcodeDetectionService()
     private let cliExecutableResolver: CLIExecutableResolver?
     private let cliUpdateRunner: CLIUpdateRunner?
+    private let cliAuthStatusRunner: CLIAuthStatusRunner?
+    private let cliStopRunner: CLIStopRunner?
 
     typealias CLIExecutableResolver = () -> URL?
     typealias CLIUpdateRunner = (URL) async throws -> CLIUpdateExecutionResult
+    typealias CLIAuthStatusRunner = (URL, UpstreamProvider) async throws -> CLIUpdateExecutionResult
+    typealias CLIStopRunner = (URL, UInt16) async throws -> CLIUpdateExecutionResult
 
     struct CLIUpdateExecutionResult: Sendable {
         let terminationStatus: Int32
@@ -78,16 +125,37 @@ final class AppViewModel: ObservableObject {
         let suggestion: String?
     }
 
+    private struct CLIAuthStatusEnvelope: Decodable {
+        let ok: Bool
+        let data: CLIAuthStatusData?
+        let error: CLIUpdateErrorPayload?
+    }
+
+    private struct CLIAuthStatusData: Decodable {
+        let provider: String
+        let status: String
+        let stored: Bool
+        let backend: String?
+    }
+
     private var providerManagerCancellable: AnyCancellable?
     private var lifecycleManagerCancellable: AnyCancellable?
     private var logRefreshTimer: Timer?
+    private var statusAutoRefreshTimer: Timer?
+    private var statusRefreshSequence = 0
+    private let sessionReportURL: URL
+    private var importedExternalSessionEventIDs: Set<UUID> = []
     private var hasTrackedFirstSuccessfulRequest = false
     private var hasEvaluatedKeychainPrimerThisLaunch = false
     private static let preflightExpandedDefaultsKey = "proxypilot.preflightExpanded"
     private static let appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
     private static let buildNumber: String = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
+    private static let publicRepositoryURLString = "https://github.com/masterofthechaos/ProxyPilot-public"
+    private static let readmeURLString = "https://github.com/masterofthechaos/ProxyPilot-public/blob/main/README.md"
+    static let defaultProxyURLString = "http://127.0.0.1:4000"
+    static let refreshProxyStatusHelpText = "Refresh proxy status now. ProxyPilot also checks this automatically every 10 seconds while this window is open."
 
-    @Published var proxyURLString: String = "http://127.0.0.1:4000"
+    @Published var proxyURLString: String = AppViewModel.defaultProxyURLString
 
     var upstreamAPIBaseURLString: String {
         get { providerManager.upstreamAPIBaseURLString }
@@ -138,7 +206,16 @@ final class AppViewModel: ObservableObject {
         objectWillChange.send()
     }
 
-    @Published var xcodeProviderConfirmed: Bool = false
+    @Published var copilotSidecarStatusText: String = ""
+    @Published var copilotSidecarExecutablePath: String = ""
+    @Published var copilotSidecarSupportsLaunchAgent: Bool = false
+    @Published var isCopilotSidecarAgentInstalled: Bool = false
+    @Published var isCopilotSidecarEndpointResponding: Bool = false
+    @Published var isCopilotSidecarExternal: Bool = false
+    @Published var isCopilotSidecarDirectProcessRunning: Bool = false
+    @Published var isCopilotSidecarRunning: Bool = false
+    @Published var isCopilotSidecarManaged: Bool = false
+    @Published var isStartingCopilotSidecar: Bool = false
 
     @Published var launchAtLogin: Bool = false
 
@@ -151,6 +228,23 @@ final class AppViewModel: ObservableObject {
         localProxyServer.state.sessionRequestCount = 0
         localProxyServer.state.lastModelSeen = ""
         localProxyServer.state.lastUpstreamModelUsed = ""
+        localProxyServer.state.lastXcodeAgentRequestModel = ""
+        localProxyServer.state.lastXcodeAgentRequestStatus = nil
+        localProxyServer.state.lastXcodeAgentRequestAt = nil
+        importedExternalSessionEventIDs.removeAll()
+        try? SessionReportStore.reset(at: sessionReportURL)
+    }
+
+    func importExternalSessionReportEvents() {
+        guard let events = try? SessionReportStore.readEvents(from: sessionReportURL) else { return }
+        for event in events where event.source != "gui" && !importedExternalSessionEventIDs.contains(event.id) {
+            importedExternalSessionEventIDs.insert(event.id)
+            localProxyServer.reportCard.record(event.record)
+            localProxyServer.state.sessionRequestCount = localProxyServer.reportCard.totalRequests
+            if !event.record.model.isEmpty {
+                localProxyServer.state.lastModelSeen = event.record.model
+            }
+        }
     }
 
     @Published var xcodeInstallations: [XcodeInstallation] = []
@@ -171,12 +265,122 @@ final class AppViewModel: ObservableObject {
         set { proxyLifecycle.statusText = newValue }
     }
 
+    @Published private(set) var proxyRuntimeStatus: ProxyRuntimeStatus = .stopped
+
+    var canStartProxy: Bool { proxyRuntimeStatus == .stopped }
+    var canStopProxy: Bool { Self.canStopProxy(for: proxyRuntimeStatus, isStoppingCLIProxy: isStoppingCLIProxy) }
+    var canRestartProxy: Bool { proxyRuntimeStatus == .runningInApp }
+
+    static func canStopProxy(for status: ProxyRuntimeStatus, isStoppingCLIProxy: Bool = false) -> Bool {
+        guard !isStoppingCLIProxy else { return false }
+        return status == .runningInApp || status == .runningExternal
+    }
+
+    static func statusText(for status: ProxyRuntimeStatus) -> String {
+        switch status {
+        case .stopped:
+            return String(localized: "Stopped")
+        case .runningInApp:
+            return String(localized: "Running")
+        case .runningExternal:
+            return String(localized: "Running (via CLI)")
+        case .portOccupied(let statusCode):
+            return String(localized: "Port occupied by another service") + " (HTTP \(statusCode))"
+        }
+    }
+
+    private static func httpReasonPhrase(_ status: Int) -> String {
+        switch status {
+        case 200: return "OK"
+        case 400: return "Bad Request"
+        case 401: return "Unauthorized"
+        case 404: return "Not Found"
+        case 413: return "Payload Too Large"
+        case 429: return "Too Many Requests"
+        case 500: return "Internal Server Error"
+        case 502: return "Bad Gateway"
+        default: return "HTTP"
+        }
+    }
+
+    static func normalizedMenuBarSectionOrder(_ order: [MenuBarSection]) -> [MenuBarSection] {
+        var seen = Set<MenuBarSection>()
+        var normalized: [MenuBarSection] = []
+
+        for section in order where !seen.contains(section) {
+            normalized.append(section)
+            seen.insert(section)
+        }
+
+        for section in MenuBarSection.defaultOrder where !seen.contains(section) {
+            normalized.append(section)
+            seen.insert(section)
+        }
+
+        return normalized
+    }
+
+    static func decodedMenuBarSectionOrder(from defaults: UserDefaults) -> [MenuBarSection] {
+        let stored = defaults.stringArray(forKey: menuBarSectionOrderDefaultsKey) ?? []
+        let decoded = stored.compactMap(MenuBarSection.init(rawValue:))
+        return normalizedMenuBarSectionOrder(decoded)
+    }
+
+    static func decodedVisibleMenuBarSections(from defaults: UserDefaults) -> Set<MenuBarSection> {
+        guard let stored = defaults.stringArray(forKey: visibleMenuBarSectionsDefaultsKey) else {
+            return Set(MenuBarSection.defaultOrder)
+        }
+        return Set(stored.compactMap(MenuBarSection.init(rawValue:)))
+    }
+
+    static func decodedVisibleHomeDashboardSections(from defaults: UserDefaults) -> Set<HomeDashboardSection> {
+        guard let stored = defaults.stringArray(forKey: visibleHomeDashboardSectionsDefaultsKey) else {
+            return Set(HomeDashboardSection.allCases)
+        }
+        return Set(stored.compactMap(HomeDashboardSection.init(rawValue:)))
+    }
+
+    func isHomeDashboardSectionVisible(_ section: HomeDashboardSection) -> Bool {
+        visibleHomeDashboardSections.contains(section)
+    }
+
+    func setHomeDashboardSection(_ section: HomeDashboardSection, isVisible: Bool) {
+        if isVisible {
+            visibleHomeDashboardSections.insert(section)
+        } else {
+            visibleHomeDashboardSections.remove(section)
+        }
+    }
+
+    func setMenuBarSection(_ section: MenuBarSection, isVisible: Bool) {
+        if isVisible {
+            visibleMenuBarSections.insert(section)
+        } else {
+            visibleMenuBarSections.remove(section)
+        }
+    }
+
+    func moveMenuBarSection(_ section: MenuBarSection, up: Bool) {
+        guard let index = menuBarSectionOrder.firstIndex(of: section) else { return }
+        let destination = up ? index - 1 : index + 1
+        guard menuBarSectionOrder.indices.contains(destination) else { return }
+        menuBarSectionOrder.swapAt(index, destination)
+    }
+
+    func resetMenuBarCustomization() {
+        showMenuBarExtra = true
+        menuBarSectionOrder = MenuBarSection.defaultOrder
+        visibleMenuBarSections = Set(MenuBarSection.defaultOrder)
+    }
+
     @Published var lastError: String?
     @Published var activeIssue: AppIssue?
     @Published var recentIssueCodes: [String] = []
 
     @Published var logText: String = ""
     @Published var modelsJSON: String = ""
+    @Published var xcodeVisibleModelsSnapshot = XcodeVisibleModelsSnapshot()
+    @Published var isRefreshingXcodeVisibleModels: Bool = false
 
     var upstreamModels: [UpstreamModel] {
         get { providerManager.upstreamModels }
@@ -223,6 +427,7 @@ final class AppViewModel: ObservableObject {
         proxyLifecycle.resetForFreshInstall()
 
         await stopProxy()
+        await stopCopilotSidecar()
         removeXcodeAgentConfig()
 
         for key in KeychainService.Key.allCases {
@@ -232,6 +437,14 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: ProviderManager.upstreamProviderDefaultsKey)
         defaults.removeObject(forKey: Self.didCompleteOnboardingDefaultsKey)
         defaults.removeObject(forKey: Self.telemetryOptInDefaultsKey)
+        defaults.removeObject(forKey: Self.liquidGlassEnabledDefaultsKey)
+        defaults.removeObject(forKey: Self.appearancePreferenceDefaultsKey)
+        defaults.removeObject(forKey: Self.proxyPilotAccentHexDefaultsKey)
+        defaults.removeObject(forKey: Self.showMenuBarExtraDefaultsKey)
+        defaults.removeObject(forKey: Self.menuBarSectionOrderDefaultsKey)
+        defaults.removeObject(forKey: Self.visibleMenuBarSectionsDefaultsKey)
+        defaults.removeObject(forKey: Self.visibleHomeDashboardSectionsDefaultsKey)
+        defaults.removeObject(forKey: Self.defaultSettingsSectionDefaultsKey)
         defaults.removeObject(forKey: Self.autoRestartEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.requireLocalAuthDefaultsKey)
         defaults.removeObject(forKey: Self.preflightSnapshotDefaultsKey)
@@ -265,7 +478,7 @@ final class AppViewModel: ObservableObject {
             try? fm.removeItem(at: url)
         }
 
-        proxyURLString = "http://127.0.0.1:4000"
+        proxyURLString = Self.defaultProxyURLString
         useBuiltInProxy = true
         upstreamProvider = .zAI
         upstreamAPIBaseURLString = upstreamProvider.defaultAPIBaseURL
@@ -273,7 +486,11 @@ final class AppViewModel: ObservableObject {
         selectedUpstreamModels = []
         selectedXcodeAgentModel = providerManager.preferredXcodeAgentModel(from: savedDefaultModels, provider: upstreamProvider)
         providerManager.reconcileXcodeAgentModelSelection()
-        xcodeProviderConfirmed = false
+        copilotSidecarStatusText = ""
+        copilotSidecarExecutablePath = ""
+        isCopilotSidecarRunning = false
+        isCopilotSidecarManaged = false
+        isStartingCopilotSidecar = false
 
         launchAtLogin = false
         anthropicTranslatorFallbackEnabled = false
@@ -283,6 +500,14 @@ final class AppViewModel: ObservableObject {
         verifiedFilterEnabled = false
         showOnboardingWizard = true
         telemetryOptIn = false
+        liquidGlassEnabled = true
+        appearancePreference = .system
+        proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
+        showMenuBarExtra = true
+        menuBarSectionOrder = MenuBarSection.defaultOrder
+        visibleMenuBarSections = Set(MenuBarSection.defaultOrder)
+        visibleHomeDashboardSections = Set(HomeDashboardSection.allCases)
+        defaultSettingsSection = .home
         showKeychainAccessPrimer = false
         suppressKeychainAccessPrimer = false
         autoRestartEnabled = true
@@ -290,12 +515,15 @@ final class AppViewModel: ObservableObject {
 
         providerKeyDrafts = [:]
         providerKeyEditing = [:]
+        providerCLIAuthStatuses = [:]
         showingUpstreamKeyField = false
         showingMasterKeyField = false
         upstreamKeyDraft = ""
         masterKeyDraft = ""
 
         modelsJSON = ""
+        xcodeVisibleModelsSnapshot = XcodeVisibleModelsSnapshot()
+        isRefreshingXcodeVisibleModels = false
         upstreamTestOutput = ""
         upstreamTestModelUsed = ""
         logText = ""
@@ -319,15 +547,112 @@ final class AppViewModel: ObservableObject {
     }
 
     func saveKey(for provider: UpstreamProvider) {
-        providerManager.saveKey(for: provider)
+        guard providerManager.saveKey(for: provider) else { return }
+        providerCLIAuthStatuses[provider] = .checking
+        Task { await verifyProviderKeyCLIVisibility(for: provider) }
     }
 
     func deleteKey(for provider: UpstreamProvider) {
         providerManager.deleteKey(for: provider)
+        providerCLIAuthStatuses[provider] = .notChecked
+    }
+
+    func providerCLIAuthStatusText(for provider: UpstreamProvider) -> String? {
+        switch providerCLIAuthStatuses[provider] ?? .notChecked {
+        case .notChecked:
+            return nil
+        case .checking:
+            return String(localized: "Checking whether the installed CLI can see this key...")
+        case .visible:
+            return String(localized: "Installed CLI can see this provider key.")
+        case .notVisible(let message):
+            return message
+        case .cliMissing:
+            return String(localized: "ProxyPilot CLI was not found. Keychain save succeeded, but CLI visibility was not checked.")
+        case .failed(let message):
+            return String(localized: "Could not verify installed CLI key visibility:") + " " + message
+        }
+    }
+
+    func providerCLIAuthStatusIsWarning(for provider: UpstreamProvider) -> Bool {
+        switch providerCLIAuthStatuses[provider] ?? .notChecked {
+        case .notVisible, .cliMissing, .failed:
+            return true
+        case .notChecked, .checking, .visible:
+            return false
+        }
+    }
+
+    func verifyProviderKeyCLIVisibility(for provider: UpstreamProvider) async {
+        guard let executableURL = resolveCLIExecutableURL() else {
+            providerCLIAuthStatuses[provider] = .cliMissing
+            return
+        }
+
+        do {
+            let execution = try await runCLIAuthStatus(executableURL: executableURL, provider: provider)
+            providerCLIAuthStatuses[provider] = Self.providerCLIAuthStatus(from: execution, provider: provider)
+        } catch {
+            providerCLIAuthStatuses[provider] = .failed(error.localizedDescription)
+        }
     }
 
     func testKey(for provider: UpstreamProvider) async {
         await providerManager.testKey(for: provider)
+    }
+
+    func refreshCopilotSidecarStatus() async {
+        let status = await copilotSidecarService.status()
+        copilotSidecarExecutablePath = status.executablePath ?? ""
+        copilotSidecarSupportsLaunchAgent = status.supportsLaunchAgent
+        isCopilotSidecarAgentInstalled = status.isLaunchAgentInstalled
+        isCopilotSidecarEndpointResponding = status.endpointResponding
+        isCopilotSidecarExternal = status.isExternal
+        isCopilotSidecarDirectProcessRunning = status.isDirectProcessRunning
+        isCopilotSidecarRunning = status.isRunning
+        isCopilotSidecarManaged = status.isManaged
+        copilotSidecarStatusText = status.message
+    }
+
+    func startCopilotSidecar() async {
+        isStartingCopilotSidecar = true
+        defer { isStartingCopilotSidecar = false }
+        do {
+            try await copilotSidecarService.installOrStart()
+            upstreamProvider = .githubCopilot
+            upstreamAPIBaseURLString = UpstreamProvider.githubCopilot.defaultAPIBaseURL
+            await refreshCopilotSidecarStatus()
+        } catch {
+            copilotSidecarStatusText = error.localizedDescription
+            isCopilotSidecarAgentInstalled = false
+            isCopilotSidecarEndpointResponding = false
+            isCopilotSidecarExternal = false
+            isCopilotSidecarDirectProcessRunning = false
+            isCopilotSidecarRunning = false
+            isCopilotSidecarManaged = false
+        }
+    }
+
+    func stopCopilotSidecar() async {
+        do {
+            try await copilotSidecarService.uninstallOrStop()
+            await refreshCopilotSidecarStatus()
+            if !isCopilotSidecarAgentInstalled && !isCopilotSidecarEndpointResponding && !isCopilotSidecarDirectProcessRunning {
+                copilotSidecarStatusText = "Copilot helper stopped."
+            }
+        } catch {
+            copilotSidecarStatusText = error.localizedDescription
+        }
+    }
+
+    func openCopilotSidecarLog() {
+        copilotSidecarService.openLog()
+    }
+
+    func openCopilotSidecarProject() {
+        if let url = URL(string: "https://github.com/theblixguy/xcode-copilot-server") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     @Published var useBuiltInProxy: Bool = true {
@@ -379,6 +704,91 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    @Published var liquidGlassEnabled: Bool = true {
+        didSet {
+            defaults.set(liquidGlassEnabled, forKey: Self.liquidGlassEnabledDefaultsKey)
+        }
+    }
+
+    var liquidGlassPreferenceTitle: String {
+        String(localized: "Use Liquid Glass for control strips")
+    }
+
+    var liquidGlassPreferenceDescription: String {
+        String(localized: "This only affects ProxyPilot's custom compact control strips and preview. Native sidebar, toolbar, sheets, and menus follow macOS automatically.")
+    }
+
+    @Published var appearancePreference: AppAppearancePreference = .system {
+        didSet {
+            defaults.set(appearancePreference.rawValue, forKey: Self.appearancePreferenceDefaultsKey)
+        }
+    }
+
+    @Published var proxyPilotAccentHex: String = ProxyPilotAccentColor.defaultHex {
+        didSet {
+            guard let normalized = ProxyPilotAccentColor.normalizedHex(proxyPilotAccentHex) else {
+                proxyPilotAccentHex = oldValue
+                return
+            }
+            if normalized != proxyPilotAccentHex {
+                proxyPilotAccentHex = normalized
+                return
+            }
+            defaults.set(normalized, forKey: Self.proxyPilotAccentHexDefaultsKey)
+        }
+    }
+
+    @Published var showMenuBarExtra: Bool = true {
+        didSet {
+            defaults.set(showMenuBarExtra, forKey: Self.showMenuBarExtraDefaultsKey)
+        }
+    }
+
+    @Published var menuBarSectionOrder: [MenuBarSection] = MenuBarSection.defaultOrder {
+        didSet {
+            let normalized = Self.normalizedMenuBarSectionOrder(menuBarSectionOrder)
+            if normalized != menuBarSectionOrder {
+                menuBarSectionOrder = normalized
+                return
+            }
+            defaults.set(normalized.map(\.rawValue), forKey: Self.menuBarSectionOrderDefaultsKey)
+        }
+    }
+
+    @Published var visibleMenuBarSections: Set<MenuBarSection> = Set(MenuBarSection.defaultOrder) {
+        didSet {
+            let normalized = visibleMenuBarSections.intersection(Set(MenuBarSection.allCases))
+            if normalized != visibleMenuBarSections {
+                visibleMenuBarSections = normalized
+                return
+            }
+            let orderedRawValues = MenuBarSection.defaultOrder
+                .filter { normalized.contains($0) }
+                .map(\.rawValue)
+            defaults.set(orderedRawValues, forKey: Self.visibleMenuBarSectionsDefaultsKey)
+        }
+    }
+
+    @Published var visibleHomeDashboardSections: Set<HomeDashboardSection> = Set(HomeDashboardSection.allCases) {
+        didSet {
+            let normalized = visibleHomeDashboardSections.intersection(Set(HomeDashboardSection.allCases))
+            if normalized != visibleHomeDashboardSections {
+                visibleHomeDashboardSections = normalized
+                return
+            }
+            let orderedRawValues = HomeDashboardSection.allCases
+                .filter { normalized.contains($0) }
+                .map(\.rawValue)
+            defaults.set(orderedRawValues, forKey: Self.visibleHomeDashboardSectionsDefaultsKey)
+        }
+    }
+
+    @Published var defaultSettingsSection: SettingsSection = .home {
+        didSet {
+            defaults.set(defaultSettingsSection.rawValue, forKey: Self.defaultSettingsSectionDefaultsKey)
+        }
+    }
+
     @Published var showKeychainAccessPrimer: Bool = false
     @Published var showAnalyticsPrompt: Bool = false
 
@@ -395,11 +805,30 @@ final class AppViewModel: ObservableObject {
 
     var recoveryState: RecoveryState { proxyLifecycle.recoveryState }
 
+    var proxyPilotAccentColor: Color {
+        Color(proxyPilotHex: proxyPilotAccentHex)
+    }
+
+    var shouldShowToolbarStatus: Bool {
+        if statusText != Self.statusText(for: .stopped) {
+            return true
+        }
+
+        switch recoveryState {
+        case .recovering, .degraded:
+            return true
+        default:
+            return false
+        }
+    }
+
     @Published var diagnosticsArchivePath: String = ""
     @Published var supportSummary: String = ""
     @Published var isUpdatingCLITool: Bool = false
+    @Published var isStoppingCLIProxy: Bool = false
     @Published var cliUpdateStatusText: String = ""
     @Published var cliUpdateStatusIsError: Bool = false
+    @Published var providerCLIAuthStatuses: [UpstreamProvider: ProviderCLIAuthStatus] = [:]
 
     var anthropicTranslatorModeText: String {
         anthropicTranslatorFallbackEnabled ? String(localized: "Legacy Fallback") : String(localized: "Hardened")
@@ -411,6 +840,14 @@ final class AppViewModel: ObservableObject {
 
     var currentLogSourcePath: String {
         useBuiltInProxy ? Self.builtInProxyLogFileURL.path : proxyService.paths.logFile.path
+    }
+
+    var xcodeLocallyHostedPortText: String {
+        URLComponents(string: proxyURLString)?.port.map(String.init) ?? "4000"
+    }
+
+    var proxyModelsEndpointText: String {
+        proxyURLString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/v1/models"
     }
 
     var masterKeyKeychainTitle: String {
@@ -433,6 +870,233 @@ final class AppViewModel: ObservableObject {
 
     var effectiveXcodeAgentModel: String {
         providerManager.effectiveXcodeAgentModel
+    }
+
+    var xcodeAgentRoutingSummaryText: String {
+        let model = effectiveXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if model.isEmpty {
+            return String(localized: "No model selected. Fetch or save a model for") + " \(upstreamProvider.title) " + String(localized: "before routing Xcode Agent traffic.")
+        }
+        if hasPendingXcodeAgentModelChange {
+            return String(localized: "Live route still uses") + " \(activeXcodeAgentModel). " + String(localized: "Selected model") + " \(model) " + String(localized: "is pending restart.")
+        }
+        if proxyRuntimeStatus == .runningInApp || localProxyServer.state.isRunning {
+            return String(localized: "Live route uses") + " \(model)."
+        }
+        if proxyRuntimeStatus == .runningExternal {
+            return String(localized: "Selected model") + " \(model) " + String(localized: "is configured here, but the running proxy is external. Refresh live models to verify what Xcode sees.")
+        }
+        return String(localized: "Selected model") + " \(model) " + String(localized: "will apply the next time ProxyPilot starts or restarts the proxy.")
+    }
+
+    var activeXcodeAgentModel: String {
+        localProxyServer.state.activeXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var hasPendingXcodeAgentModelChange: Bool {
+        guard isRunning || localProxyServer.state.isRunning else { return false }
+        let active = activeXcodeAgentModel
+        let selected = effectiveXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !active.isEmpty, !selected.isEmpty else { return false }
+        return active.caseInsensitiveCompare(selected) != .orderedSame
+    }
+
+    var homeAgentModelBadgeTitle: String {
+        if hasPendingXcodeAgentModelChange {
+            return activeXcodeAgentModel
+        }
+        return effectiveXcodeAgentModel
+    }
+
+    var homeAgentModelBadgeHelpText: String {
+        if hasPendingXcodeAgentModelChange {
+            return "Active model. Restart ProxyPilot to apply selected model \(effectiveXcodeAgentModel)."
+        }
+        if proxyRuntimeStatus == .runningInApp || localProxyServer.state.isRunning {
+            return "Live model for the running ProxyPilot-owned proxy."
+        }
+        return "Selected Xcode Agent model. Start or restart ProxyPilot before treating it as live."
+    }
+
+    var xcodeAgentSelectedModelText: String {
+        let selected = selectedXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return selected.isEmpty ? "None selected" : selected
+    }
+
+    var xcodeAgentPendingModelText: String {
+        let pending = effectiveXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return pending.isEmpty ? "None ready" : pending
+    }
+
+    var xcodeAgentAppliedModelText: String {
+        let active = activeXcodeAgentModel
+        if proxyRuntimeStatus == .runningInApp || localProxyServer.state.isRunning {
+            return active.isEmpty ? "Running, no applied model recorded" : active
+        }
+        if proxyRuntimeStatus == .runningExternal {
+            return "External proxy - unknown to GUI"
+        }
+        return "Not applied until proxy start"
+    }
+
+    var xcodeAgentLiveRouteText: String {
+        if xcodeVisibleModelsSnapshot.reflectsRunningProxy {
+            return "\(xcodeVisibleModelsSnapshot.modelIDs.count) model(s) from running proxy"
+        }
+        if let error = xcodeVisibleModelsSnapshot.errorMessage {
+            return "Live check failed: \(error)"
+        }
+        if xcodeVisibleModelsSnapshot.source == .pendingSettings {
+            return "\(xcodeVisibleModelsSnapshot.modelIDs.count) model(s) from pending settings"
+        }
+        return "Not checked"
+    }
+
+    var xcodeAgentLiveProofText: String {
+        let model = localProxyState.lastXcodeAgentRequestModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let status = localProxyState.lastXcodeAgentRequestStatus,
+              let timestamp = localProxyState.lastXcodeAgentRequestAt,
+              !model.isEmpty else {
+            return "No Xcode Agent request observed in this ProxyPilot session yet."
+        }
+        return "Last Xcode Agent request: \(model), \(status) \(Self.httpReasonPhrase(status)), \(timestamp.formatted(date: .abbreviated, time: .standard))."
+    }
+
+    var localProxyBindAddressText: String {
+        validatedProxySummary.host
+    }
+
+    var localProxyPortText: String {
+        String(validatedProxySummary.port)
+    }
+
+    var localProxyAuthStateText: String {
+        requireLocalAuth ? "Required" : "Disabled for local Xcode compatibility"
+    }
+
+    var localProxyWhoCanConnectText: String {
+        if useBuiltInProxy {
+            return "Built-in mode accepts loopback clients only. LAN clients are rejected before request parsing."
+        }
+        if isLoopbackHost(validatedProxySummary.host) {
+            return "Loopback URL: only apps on this Mac should connect."
+        }
+        return "Non-loopback URL: network clients may be able to connect; require auth before using this mode."
+    }
+
+    var xcodeVisibleModelsSourceText: String {
+        switch xcodeVisibleModelsSnapshot.source {
+        case .notChecked:
+            return "Not checked"
+        case .runningProxy:
+            return "Running proxy"
+        case .pendingSettings:
+            return "Pending settings"
+        }
+    }
+
+    var xcodeVisibleModelsTimestampText: String {
+        guard let checkedAt = xcodeVisibleModelsSnapshot.checkedAt else { return "Never" }
+        return checkedAt.formatted(date: .abbreviated, time: .standard)
+    }
+
+    var xcodeVisibleModelsStatusText: String {
+        if let error = xcodeVisibleModelsSnapshot.errorMessage {
+            return "Failed: \(error)"
+        }
+        switch xcodeVisibleModelsSnapshot.source {
+        case .runningProxy:
+            return "This is live evidence from GET /v1/models."
+        case .pendingSettings:
+            return "Proxy is not running; this is the model set ProxyPilot would expose after start."
+        case .notChecked:
+            return "Refresh to see what Xcode can validate right now."
+        }
+    }
+
+    var xcodeVisibleModelsListText: String {
+        if xcodeVisibleModelsSnapshot.modelIDs.isEmpty {
+            return "(no model IDs)"
+        }
+        return xcodeVisibleModelsSnapshot.modelIDs.joined(separator: "\n")
+    }
+
+    var cloudProviderActionDisclosureText: String {
+        if upstreamProvider.isLocal {
+            return "\(upstreamProvider.title) is local/helper-backed. Fetching or testing checks a local endpoint and does not create cloud-provider billing from ProxyPilot."
+        }
+        return "\(upstreamProvider.title) requests leave this Mac for \(upstreamAPIBaseURLString). Fetch Live Models calls the provider's models endpoint. Test Upstream Response sends a minimal completion request and may consume credits or quota."
+    }
+
+    var diagnosticsPreviewText: String {
+        DiagnosticsService.exportPreviewText
+    }
+
+    var alwaysOnTelemetryDisclosureText: String {
+        "Always-on health reporting sends only `app_opened`, `app_version`, and `build_number` to PostHog at https://us.i.posthog.com/capture/ so update health can be counted. Optional analytics add session/proxy events only when this toggle is enabled. Prompts, completions, API keys, provider keys, model outputs, and system details are not sent."
+    }
+
+    var contextualTerminologyHelpText: String {
+        """
+        Proxy: the local server on this Mac that Xcode connects to.
+        Upstream: the provider or local model server ProxyPilot forwards requests to.
+        OpenAI-compatible: an API shape used by many providers and local servers; it does not mean OpenAI receives the request.
+        /v1/models: the local model-list endpoint Xcode checks to decide which model IDs are visible right now.
+        Anthropic translator mode: the Xcode Agent compatibility layer that converts Claude-style /v1/messages requests into the selected upstream provider's chat format.
+        """
+    }
+
+    var xcodeAgentConfigPreviewText: String {
+        let proxyBase = proxyURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        return """
+        Settings file:
+        \(xcodeAgentConfigSettingsURL.path)
+
+        JSON keys written:
+        env.ANTHROPIC_AUTH_TOKEN = proxypilot
+        env.ANTHROPIC_BASE_URL = \(proxyBase)
+
+        Defaults write:
+        domain = \(Self.xcodeDefaultsDomain)
+        key = \(Self.xcodeAgentAPIKeyOverrideDefaultsKey)
+        value = " "
+
+        Remove deletes the settings file and runs:
+        defaults delete \(Self.xcodeDefaultsDomain) \(Self.xcodeAgentAPIKeyOverrideDefaultsKey)
+        """
+    }
+
+    func localProviderStatusText(for provider: UpstreamProvider) -> String {
+        switch provider {
+        case .githubCopilot:
+            if isCopilotSidecarEndpointResponding { return "Responding on \(provider.defaultAPIBaseURL)" }
+            if isCopilotSidecarAgentInstalled { return "Background helper installed; refresh or start to confirm endpoint response." }
+            return "Helper not confirmed running."
+        case .ollama, .lmStudio:
+            guard let base = URL(string: provider.defaultAPIBaseURL) else {
+                return "Default URL could not be parsed."
+            }
+            let port = base.port ?? (base.scheme?.lowercased() == "https" ? 443 : 80)
+            let occupied = preflightService.isPortAvailable(port) == false
+            return occupied
+                ? "A local service appears to be listening at \(provider.defaultAPIBaseURL)."
+                : "No local service detected at \(provider.defaultAPIBaseURL)."
+        default:
+            return "Not a local provider."
+        }
+    }
+
+    func localProviderSetupHint(for provider: UpstreamProvider) -> String {
+        switch provider {
+        case .ollama:
+            return "Start with `ollama serve`, then pull a model such as `ollama pull qwen2.5-coder:0.5b`."
+        case .lmStudio:
+            return "Open LM Studio, load a model, and start the Local Server with OpenAI-compatible mode enabled."
+        case .githubCopilot:
+            return "Install or start the Copilot helper above; ProxyPilot uses your existing GitHub Copilot account."
+        default:
+            return ""
+        }
     }
 
     var proxySyncModelCandidates: [String] {
@@ -572,12 +1236,48 @@ final class AppViewModel: ObservableObject {
         providerManager.filteredUpstreamModels
     }
 
+    var modelSelectionRows: [ProviderManager.ModelSelectionRow] {
+        providerManager.modelSelectionRows
+    }
+
+    var selectedModelRowCount: Int {
+        providerManager.selectedModelRowCount
+    }
+
+    var allVisibleModelsSelected: Bool {
+        providerManager.allVisibleModelsSelected
+    }
+
+    var canClearModelSelection: Bool {
+        providerManager.canClearModelSelection
+    }
+
+    var canSaveSelectedModelsAsDefaults: Bool {
+        providerManager.canSaveSelectedModelsAsDefaults
+    }
+
     func selectAllUpstreamModels() {
         providerManager.selectAllUpstreamModels()
     }
 
     func clearUpstreamModelSelection() {
         providerManager.clearUpstreamModelSelection()
+    }
+
+    func isDefaultModel(_ id: String) -> Bool {
+        providerManager.isDefaultModel(id)
+    }
+
+    func isModelSelected(_ id: String) -> Bool {
+        providerManager.isModelSelected(id)
+    }
+
+    func setModelSelected(_ id: String, isSelected: Bool) {
+        providerManager.setModelSelected(id, isSelected: isSelected)
+    }
+
+    func removeDefaultModel(_ id: String) {
+        providerManager.removeDefaultModel(id)
     }
 
     var checklistIsProxyURLValid: Bool {
@@ -605,9 +1305,13 @@ final class AppViewModel: ObservableObject {
         diagnosticsService: DiagnosticsService = DiagnosticsService(),
         telemetryService: TelemetryService = .shared,
         healthMonitor: HealthMonitor = HealthMonitor(),
+        copilotSidecarService: CopilotSidecarService = CopilotSidecarService(),
         xcodeAgentConfigStateProvider: (() -> Bool)? = nil,
         cliExecutableResolver: CLIExecutableResolver? = nil,
-        cliUpdateRunner: CLIUpdateRunner? = nil
+        cliUpdateRunner: CLIUpdateRunner? = nil,
+        cliAuthStatusRunner: CLIAuthStatusRunner? = nil,
+        cliStopRunner: CLIStopRunner? = nil,
+        sessionReportURL: URL = SessionReportStore.defaultURL
     ) {
         self.defaults = defaults
         self.proxyService = proxyService
@@ -616,9 +1320,13 @@ final class AppViewModel: ObservableObject {
         self.diagnosticsService = diagnosticsService
         self.telemetryService = telemetryService
         self.healthMonitor = healthMonitor
+        self.copilotSidecarService = copilotSidecarService
         self.xcodeAgentConfigStateProvider = xcodeAgentConfigStateProvider
         self.cliExecutableResolver = cliExecutableResolver
         self.cliUpdateRunner = cliUpdateRunner
+        self.cliAuthStatusRunner = cliAuthStatusRunner
+        self.cliStopRunner = cliStopRunner
+        self.sessionReportURL = sessionReportURL
 
         self.providerManager = ProviderManager(defaults: defaults, proxyService: proxyService)
         self.customProviderStorage = CustomProviderStorage(defaults: defaults)
@@ -633,6 +1341,20 @@ final class AppViewModel: ObservableObject {
         anthropicTranslatorFallbackEnabled = defaults.bool(forKey: Self.anthropicFallbackDefaultsKey)
 
         telemetryOptIn = defaults.bool(forKey: Self.telemetryOptInDefaultsKey)
+        liquidGlassEnabled = defaults.object(forKey: Self.liquidGlassEnabledDefaultsKey) as? Bool ?? true
+        appearancePreference = AppAppearancePreference(
+            rawValue: defaults.string(forKey: Self.appearancePreferenceDefaultsKey) ?? ""
+        ) ?? .system
+        proxyPilotAccentHex = ProxyPilotAccentColor.normalizedHex(
+            defaults.string(forKey: Self.proxyPilotAccentHexDefaultsKey) ?? ""
+        ) ?? ProxyPilotAccentColor.defaultHex
+        showMenuBarExtra = defaults.object(forKey: Self.showMenuBarExtraDefaultsKey) as? Bool ?? true
+        menuBarSectionOrder = Self.decodedMenuBarSectionOrder(from: defaults)
+        visibleMenuBarSections = Self.decodedVisibleMenuBarSections(from: defaults)
+        visibleHomeDashboardSections = Self.decodedVisibleHomeDashboardSections(from: defaults)
+        defaultSettingsSection = SettingsSection(
+            rawValue: defaults.string(forKey: Self.defaultSettingsSectionDefaultsKey) ?? ""
+        ) ?? .home
         suppressKeychainAccessPrimer = defaults.bool(forKey: Self.suppressKeychainPrimerDefaultsKey)
         requireLocalAuth = defaults.bool(forKey: Self.requireLocalAuthDefaultsKey)
 
@@ -742,10 +1464,14 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshStatus() {
+        importExternalSessionReportEvents()
         refreshAgentConfigInstallationState()
-        isRunning = useBuiltInProxy ? localProxyServer.state.isRunning : proxyService.isRunning()
-        statusText = proxyLifecycle.statusTextForState(isRunning: isRunning)
+        statusRefreshSequence += 1
+        let sequence = statusRefreshSequence
+        let locallyRunning = useBuiltInProxy ? localProxyServer.state.isRunning : proxyService.isRunning()
+        applyProxyRuntimeStatus(locallyRunning ? .runningInApp : .stopped)
         refreshLogText()
+        Task { await refreshReachableProxyStatus(sequence: sequence, locallyRunning: locallyRunning) }
     }
 
     func refreshAgentConfigInstallationState() {
@@ -768,27 +1494,38 @@ final class AppViewModel: ObservableObject {
     // MARK: - Analytics Opt-In Prompt
 
     func maybeShowAnalyticsPrompt() {
-        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
-        let shownVersion = defaults.string(forKey: Self.analyticsPromptShownVersionKey)
-        guard shownVersion != currentVersion else { return }
+        guard defaults.string(forKey: Self.analyticsPromptShownVersionKey) != Self.appVersion else { return }
         guard !showOnboardingWizard else { return }
         showAnalyticsPrompt = true
     }
 
     func dismissAnalyticsPrompt(optIn: Bool) {
         telemetryOptIn = optIn
-        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
-        defaults.set(currentVersion, forKey: Self.analyticsPromptShownVersionKey)
+        markAnalyticsPromptHandledForCurrentVersion()
         showAnalyticsPrompt = false
     }
 
+    private func markAnalyticsPromptHandledForCurrentVersion() {
+        defaults.set(Self.appVersion, forKey: Self.analyticsPromptShownVersionKey)
+    }
+
     func startLogUpdates() {
+        importExternalSessionReportEvents()
         refreshLogText()
         logRefreshTimer?.invalidate()
         logRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
+                self.importExternalSessionReportEvents()
                 self.refreshLogText()
+            }
+        }
+
+        statusAutoRefreshTimer?.invalidate()
+        statusAutoRefreshTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.refreshStatus()
             }
         }
 
@@ -798,11 +1535,22 @@ final class AppViewModel: ObservableObject {
     func stopLogUpdates() {
         logRefreshTimer?.invalidate()
         logRefreshTimer = nil
+        statusAutoRefreshTimer?.invalidate()
+        statusAutoRefreshTimer = nil
         proxyLifecycle.stopHealthMonitor()
     }
 
     func saveUpstreamKey() {
         guard let keychainKey = upstreamProvider.keychainKey else { return }
+        if case let .failure(_, message) = APIKeyValidator.validate(upstreamKeyDraft, for: upstreamProvider) {
+            applyIssue(AppIssue(
+                code: .missingUpstreamKey,
+                title: String(localized: "Invalid API Key"),
+                message: message,
+                actions: [.openUpstreamKeyEditor]
+            ))
+            return
+        }
         do {
             try KeychainService.set(upstreamKeyDraft, forKey: keychainKey)
             upstreamKeyDraft = ""
@@ -874,7 +1622,7 @@ final class AppViewModel: ObservableObject {
         case .openUpstreamKeyEditor:
             showingUpstreamKeyField = true
         case .resetProxyURL:
-            proxyURLString = "http://127.0.0.1:4000"
+            resetProxyURLToDefault()
             clearIssue()
         case .setProxyURLTo4001:
             if let validated = try? validatedProxyURL(requireLocalhost: false) {
@@ -903,6 +1651,11 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func resetProxyURLToDefault() {
+        proxyURLString = Self.defaultProxyURLString
+        clearIssue()
+    }
+
     func applyPreflightFixAction(_ action: PreflightFixAction) {
         switch action {
         case .openMasterKeyEditor:
@@ -928,6 +1681,7 @@ final class AppViewModel: ObservableObject {
             proxyURLString: proxyURLString,
             useBuiltInProxy: useBuiltInProxy,
             requireLocalAuth: requireLocalAuth,
+            upstreamProvider: upstreamProvider,
             upstreamAPIBaseURLString: upstreamAPIBaseURLString,
             fallbackUpstreamBaseURLString: selectedUpstreamProviderDefaultAPIBaseURL,
             hasMasterKey: hasMasterKey,
@@ -961,6 +1715,9 @@ final class AppViewModel: ObservableObject {
         }
 
         defaults.set(true, forKey: Self.didCompleteOnboardingDefaultsKey)
+        if telemetryOptIn {
+            markAnalyticsPromptHandledForCurrentVersion()
+        }
         showOnboardingWizard = false
         telemetryService.track(name: "onboarding_completed", telemetryOptIn: telemetryOptIn)
         clearIssue()
@@ -975,7 +1732,78 @@ final class AppViewModel: ObservableObject {
     }
 
     func stopProxy() async {
+        if proxyRuntimeStatus == .runningExternal {
+            await stopExternalCLIProxy()
+            return
+        }
+
         await proxyLifecycle.stopProxy()
+    }
+
+    private func stopExternalCLIProxy() async {
+        guard !isStoppingCLIProxy else { return }
+
+        guard let executableURL = resolveCLIExecutableURL() else {
+            applyIssue(AppIssue(
+                code: .generic,
+                title: String(localized: "CLI Proxy Stop Failed"),
+                message: String(localized: "ProxyPilot CLI was not found. Install the CLI tool, then retry stopping the CLI proxy."),
+                actions: [.openReadme]
+            ))
+            return
+        }
+
+        let port: UInt16
+        do {
+            let validation = try validatedProxyURL(requireLocalhost: false)
+            guard let validatedPort = UInt16(exactly: validation.port) else {
+                throw IssueError(issue: AppIssue(
+                    code: .invalidProxyURL,
+                    title: String(localized: "Invalid Proxy URL"),
+                    message: String(localized: "Proxy URL port is outside the supported range."),
+                    actions: [.resetProxyURL]
+                ))
+            }
+            port = validatedPort
+        } catch let issueError as IssueError {
+            applyIssue(issueError.issue)
+            return
+        } catch {
+            applyIssue(AppIssue(
+                code: .invalidProxyURL,
+                title: String(localized: "Invalid Proxy URL"),
+                message: error.localizedDescription,
+                actions: [.resetProxyURL]
+            ))
+            return
+        }
+
+        isStoppingCLIProxy = true
+        defer { isStoppingCLIProxy = false }
+
+        do {
+            let execution = try await runCLIStop(executableURL: executableURL, port: port)
+            guard Self.cliStopSucceeded(execution) else {
+                applyIssue(AppIssue(
+                    code: .generic,
+                    title: String(localized: "CLI Proxy Stop Failed"),
+                    message: Self.cliExecutionFailureMessage(execution, fallback: String(localized: "Installed CLI could not stop the CLI proxy.")),
+                    actions: [.openReadme]
+                ))
+                return
+            }
+
+            clearIssue()
+            applyProxyRuntimeStatus(.stopped)
+            importExternalSessionReportEvents()
+        } catch {
+            applyIssue(AppIssue(
+                code: .generic,
+                title: String(localized: "CLI Proxy Stop Failed"),
+                message: String(localized: "Failed to run installed CLI stop:") + " " + error.localizedDescription,
+                actions: [.openReadme]
+            ))
+        }
     }
 
     func testModels() async {
@@ -1014,10 +1842,56 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func refreshXcodeVisibleModels() async {
+        clearIssue()
+        isRefreshingXcodeVisibleModels = true
+        defer { isRefreshingXcodeVisibleModels = false }
+
+        let running = proxyRuntimeStatus == .runningInApp
+            || proxyRuntimeStatus == .runningExternal
+            || isRunning
+            || localProxyServer.state.isRunning
+
+        guard running else {
+            xcodeVisibleModelsSnapshot = XcodeVisibleModelsSnapshot(
+                modelIDs: pendingProxyModelIDs(),
+                checkedAt: Date(),
+                source: .pendingSettings,
+                errorMessage: nil
+            )
+            return
+        }
+
+        let masterKey: String?
+        if requiresMasterKey {
+            masterKey = KeychainService.get(key: .litellmMasterKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            masterKey = nil
+        }
+
+        do {
+            let baseURL = try validatedProxyURL(requireLocalhost: false).url
+            let rawJSON = try await proxyService.fetchModels(baseURL: baseURL, masterKey: masterKey)
+            let ids = try ModelDiscovery.parseModelIDs(from: Data(rawJSON.utf8))
+            xcodeVisibleModelsSnapshot = XcodeVisibleModelsSnapshot(
+                modelIDs: ids,
+                checkedAt: Date(),
+                source: .runningProxy,
+                errorMessage: nil
+            )
+        } catch {
+            xcodeVisibleModelsSnapshot = XcodeVisibleModelsSnapshot(
+                modelIDs: [],
+                checkedAt: Date(),
+                source: .runningProxy,
+                errorMessage: error.localizedDescription
+            )
+        }
+    }
+
     func fetchUpstreamModels() async {
         clearIssue()
-        upstreamModels = []
-        selectedUpstreamModels = []
 
         let apiBase: URL
         do {
@@ -1055,16 +1929,19 @@ final class AppViewModel: ObservableObject {
                 apiKey: apiKey,
                 provider: upstreamProvider
             )
-            upstreamModels = models
-            selectedUpstreamModels = []
+            providerManager.applyFetchedUpstreamModels(models)
             providerManager.reconcileXcodeAgentModelSelection()
             markFirstSuccessfulRequestIfNeeded()
         } catch {
-            applyIssue(issueFor(
+            applyIssue(upstreamIssueFor(
                 error,
                 fallbackCode: .generic,
                 fallbackTitle: String(localized: "Upstream Model Fetch Failed"),
-                fallbackActions: [.openUpstreamKeyEditor, .resetUpstreamURL, .exportDiagnostics]
+                fallbackActions: upstreamFallbackActions,
+                provider: upstreamProvider,
+                apiBase: apiBase,
+                path: upstreamProvider.modelsPath,
+                operation: .modelFetch
             ))
         }
     }
@@ -1084,16 +1961,20 @@ final class AppViewModel: ObservableObject {
 
         providerManager.reconcileXcodeAgentModelSelection()
 
-        do {
-            try writeLiteLLMConfig(models: models)
-            try await proxyService.restart()
-        } catch {
-            applyIssue(issueFor(
-                error,
-                fallbackCode: .generic,
-                fallbackTitle: String(localized: "Sync Failed"),
-                fallbackActions: [.exportDiagnostics]
-            ))
+        if useBuiltInProxy {
+            await proxyLifecycle.restartProxy()
+        } else {
+            do {
+                try writeLiteLLMConfig(models: models)
+                try await proxyService.restart()
+            } catch {
+                applyIssue(issueFor(
+                    error,
+                    fallbackCode: .generic,
+                    fallbackTitle: String(localized: "Sync Failed"),
+                    fallbackActions: [.exportDiagnostics]
+                ))
+            }
         }
 
         refreshStatus()
@@ -1147,11 +2028,15 @@ final class AppViewModel: ObservableObject {
             upstreamTestOutput = text.isEmpty ? "(empty response)" : text
             markFirstSuccessfulRequestIfNeeded()
         } catch {
-            applyIssue(issueFor(
+            applyIssue(upstreamIssueFor(
                 error,
                 fallbackCode: .generic,
                 fallbackTitle: String(localized: "Upstream Test Failed"),
-                fallbackActions: [.openUpstreamKeyEditor, .resetUpstreamURL, .exportDiagnostics]
+                fallbackActions: upstreamFallbackActions,
+                provider: upstreamProvider,
+                apiBase: apiBase,
+                path: upstreamProvider.chatCompletionsPath,
+                operation: .upstreamTest
             ))
         }
     }
@@ -1258,10 +2143,19 @@ final class AppViewModel: ObservableObject {
     }
 
     func openReadme() {
-        guard let url = URL(string: "https://github.com/masterofthechaos/Zai-ProxyPilot/blob/main/README.md") else {
-            return
-        }
-        NSWorkspace.shared.open(url)
+        NSWorkspace.shared.open(readmeURL)
+    }
+
+    var publicRepositoryURL: URL {
+        URL(string: Self.publicRepositoryURLString)!
+    }
+
+    var readmeURL: URL {
+        URL(string: Self.readmeURLString)!
+    }
+
+    func openPublicRepository() {
+        NSWorkspace.shared.open(publicRepositoryURL)
     }
 
     func openWebsite() {
@@ -1383,6 +2277,20 @@ general_settings:
         return try await Self.executeCLIUpdateProcess(executableURL: executableURL)
     }
 
+    private func runCLIAuthStatus(executableURL: URL, provider: UpstreamProvider) async throws -> CLIUpdateExecutionResult {
+        if let cliAuthStatusRunner {
+            return try await cliAuthStatusRunner(executableURL, provider)
+        }
+        return try await Self.executeCLIAuthStatusProcess(executableURL: executableURL, provider: provider)
+    }
+
+    private func runCLIStop(executableURL: URL, port: UInt16) async throws -> CLIUpdateExecutionResult {
+        if let cliStopRunner {
+            return try await cliStopRunner(executableURL, port)
+        }
+        return try await Self.executeCLIStopProcess(executableURL: executableURL, port: port)
+    }
+
     private static func executeCLIUpdateProcess(executableURL: URL) async throws -> CLIUpdateExecutionResult {
         try await Task.detached(priority: .userInitiated) {
             let process = Process()
@@ -1405,6 +2313,136 @@ general_settings:
                 stderr: String(decoding: stderrData, as: UTF8.self)
             )
         }.value
+    }
+
+    private static func executeCLIStopProcess(executableURL: URL, port: UInt16) async throws -> CLIUpdateExecutionResult {
+        try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+
+            process.executableURL = executableURL
+            process.arguments = ["stop", "--port", String(port), "--json"]
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+            try process.run()
+            process.waitUntilExit()
+
+            let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+
+            return CLIUpdateExecutionResult(
+                terminationStatus: process.terminationStatus,
+                stdout: String(decoding: stdoutData, as: UTF8.self),
+                stderr: String(decoding: stderrData, as: UTF8.self)
+            )
+        }.value
+    }
+
+    private static func executeCLIAuthStatusProcess(executableURL: URL, provider: UpstreamProvider) async throws -> CLIUpdateExecutionResult {
+        let providerName = provider.rawValue
+        return try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+
+            process.executableURL = executableURL
+            process.arguments = ["auth", "status", "--provider", providerName, "--json"]
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+            try process.run()
+            process.waitUntilExit()
+
+            let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+
+            return CLIUpdateExecutionResult(
+                terminationStatus: process.terminationStatus,
+                stdout: String(decoding: stdoutData, as: UTF8.self),
+                stderr: String(decoding: stderrData, as: UTF8.self)
+            )
+        }.value
+    }
+
+    private static func providerCLIAuthStatus(from execution: CLIUpdateExecutionResult, provider: UpstreamProvider) -> ProviderCLIAuthStatus {
+        let stdout = execution.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stderr = execution.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let data = stdout.data(using: .utf8),
+           let envelope = try? JSONDecoder().decode(CLIAuthStatusEnvelope.self, from: data) {
+            if envelope.ok, let authData = envelope.data {
+                guard authData.provider == provider.rawValue else {
+                    return .notVisible(
+                        String(localized: "Installed CLI returned auth status for")
+                            + " \(authData.provider), "
+                            + String(localized: "not")
+                            + " \(provider.rawValue)."
+                    )
+                }
+
+                if authData.stored && authData.status == "stored" {
+                    return .visible
+                }
+
+                var message = String(localized: "Installed CLI reports")
+                    + " \(provider.rawValue) "
+                    + String(localized: "auth")
+                    + " \(authData.status)."
+                if let backend = authData.backend, !backend.isEmpty {
+                    message += " " + String(localized: "Backend:") + " \(backend)."
+                }
+                return .notVisible(message)
+            }
+
+            if let errorPayload = envelope.error {
+                var message = "[\(errorPayload.code)] \(errorPayload.message)"
+                if let suggestion = errorPayload.suggestion, !suggestion.isEmpty {
+                    message += " " + suggestion
+                }
+                return .failed(message)
+            }
+        }
+
+        if execution.terminationStatus == 0 {
+            return stdout.isEmpty ? .failed(String(localized: "CLI returned an empty response.")) : .failed(stdout)
+        }
+
+        let detail = stderr.isEmpty ? stdout : stderr
+        if detail.isEmpty {
+            return .failed(String(localized: "CLI exited with code") + " \(execution.terminationStatus).")
+        }
+        return .failed(detail)
+    }
+
+    private static func cliStopSucceeded(_ execution: CLIUpdateExecutionResult) -> Bool {
+        let stdout = execution.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = stdout.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(CLIUpdateEnvelope.self, from: data) else {
+            return execution.terminationStatus == 0
+        }
+        return execution.terminationStatus == 0 && envelope.ok
+    }
+
+    private static func cliExecutionFailureMessage(_ execution: CLIUpdateExecutionResult, fallback: String) -> String {
+        let stdout = execution.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stderr = execution.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let data = stdout.data(using: .utf8),
+           let envelope = try? JSONDecoder().decode(CLIUpdateEnvelope.self, from: data),
+           let errorPayload = envelope.error {
+            var message = "[\(errorPayload.code)] \(errorPayload.message)"
+            if let suggestion = errorPayload.suggestion, !suggestion.isEmpty {
+                message += " " + suggestion
+            }
+            return message
+        }
+
+        let detail = [stdout, stderr].filter { !$0.isEmpty }.joined(separator: " ")
+        if !detail.isEmpty { return detail }
+        if execution.terminationStatus != 0 {
+            return String(localized: "CLI exited with code") + " \(execution.terminationStatus)."
+        }
+        return fallback
     }
 
     private func applyCLIUpdateExecutionResult(_ execution: CLIUpdateExecutionResult, executableURL: URL) {
@@ -1488,6 +2526,33 @@ general_settings:
         case .failure(let issue):
             throw IssueError(issue: issue)
         }
+    }
+
+    private var validatedProxySummary: (host: String, port: Int) {
+        if case .success(let validation) = preflightService.validateProxyURL(proxyURLString) {
+            return (validation.host, validation.port)
+        }
+        return ("invalid", 4000)
+    }
+
+    private func isLoopbackHost(_ host: String) -> Bool {
+        let lowered = host.lowercased()
+        return lowered == "localhost" || lowered == "::1" || lowered.hasPrefix("127.")
+    }
+
+    private func pendingProxyModelIDs() -> [String] {
+        var ids: Set<String> = []
+        ids.formUnion(selectedUpstreamModels)
+        ids.formUnion(upstreamModels.map(\.id))
+        ids.formUnion(savedDefaultModels)
+        if let fallback = upstreamProvider.fallbackModelIDs {
+            ids.formUnion(fallback)
+        }
+        let preferred = effectiveXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !preferred.isEmpty {
+            ids.insert(preferred)
+        }
+        return ids.sorted()
     }
 
     private func validatedUpstreamBaseURL() throws -> URL {
@@ -1631,6 +2696,41 @@ general_settings:
         telemetryService.track(name: "first_successful_request", telemetryOptIn: telemetryOptIn)
     }
 
+    private func refreshReachableProxyStatus(sequence: Int, locallyRunning: Bool) async {
+        guard let baseURL = try? validatedProxyURL(requireLocalhost: false).url else { return }
+
+        do {
+            let statusCode = try await proxyService.probe(baseURL: baseURL)
+            guard sequence == statusRefreshSequence else { return }
+            if statusCode == 200 {
+                applyProxyRuntimeStatus(locallyRunning ? .runningInApp : .runningExternal)
+            } else {
+                applyProxyRuntimeStatus(.portOccupied(statusCode: statusCode))
+            }
+        } catch {
+            guard sequence == statusRefreshSequence else { return }
+            applyProxyRuntimeStatus(.stopped)
+        }
+    }
+
+    func applyProxyRuntimeStatus(_ status: ProxyRuntimeStatus) {
+        proxyRuntimeStatus = status
+        switch status {
+        case .stopped:
+            isRunning = false
+            statusText = Self.statusText(for: status)
+        case .runningInApp:
+            isRunning = true
+            statusText = Self.statusText(for: status)
+        case .runningExternal:
+            isRunning = true
+            statusText = Self.statusText(for: status)
+        case .portOccupied(let statusCode):
+            isRunning = false
+            statusText = Self.statusText(for: .portOccupied(statusCode: statusCode))
+        }
+    }
+
     private func applyIssue(_ issue: AppIssue) {
         activeIssue = issue
         lastError = "[\(issue.code.rawValue)] \(issue.message)"
@@ -1650,6 +2750,113 @@ general_settings:
         recentIssueCodes.insert(codeString, at: 0)
         if recentIssueCodes.count > 20 {
             recentIssueCodes = Array(recentIssueCodes.prefix(20))
+        }
+    }
+
+    private enum UpstreamIssueOperation {
+        case modelFetch
+        case upstreamTest
+    }
+
+    private var upstreamFallbackActions: [AppIssue.Action] {
+        if upstreamProvider.requiresAPIKey {
+            return [.openUpstreamKeyEditor, .resetUpstreamURL, .exportDiagnostics]
+        }
+        return [.resetUpstreamURL, .exportDiagnostics]
+    }
+
+    private func upstreamIssueFor(
+        _ error: Error,
+        fallbackCode: AppIssue.Code,
+        fallbackTitle: String,
+        fallbackActions: [AppIssue.Action],
+        provider: UpstreamProvider,
+        apiBase: URL,
+        path: String,
+        operation: UpstreamIssueOperation
+    ) -> AppIssue {
+        guard !provider.requiresAPIKey else {
+            return issueFor(
+                error,
+                fallbackCode: fallbackCode,
+                fallbackTitle: fallbackTitle,
+                fallbackActions: fallbackActions
+            )
+        }
+
+        let endpoint = upstreamEndpoint(base: apiBase, path: path)
+        let actions = fallbackActions.filter { $0 != .openUpstreamKeyEditor }
+        let text = error.localizedDescription.lowercased()
+
+        if provider == .ollama,
+           operation == .modelFetch,
+           text.contains("missing") || text.contains("data couldn") || text.contains("invalidjson") {
+            return AppIssue(
+                code: fallbackCode,
+                title: fallbackTitle,
+                message: String(localized: "Ollama is running but returned no models. Pull one locally, for example: ollama pull qwen2.5-coder:0.5b."),
+                actions: actions
+            )
+        }
+
+        if let urlError = error as? URLError {
+            if urlError.code == .timedOut {
+                let message: String
+                if provider == .ollama && operation == .upstreamTest {
+                    message = String(localized: "Ollama did not respond at") + " \(endpoint) " + String(localized: "before the timeout. Local models can take 10-30 seconds to cold-start; try again after the model finishes loading.")
+                } else {
+                    message = provider.title + " " + String(localized: "did not respond at") + " \(endpoint). " + localProviderRecoveryHint(for: provider)
+                }
+                return AppIssue(
+                    code: .upstreamTimeout,
+                    title: String(localized: "Request Timed Out"),
+                    message: message,
+                    actions: [.retryStart, .exportDiagnostics]
+                )
+            }
+
+            return AppIssue(
+                code: fallbackCode,
+                title: fallbackTitle,
+                message: provider.title + " " + String(localized: "is not reachable at") + " \(endpoint). " + localProviderRecoveryHint(for: provider),
+                actions: actions
+            )
+        }
+
+        if let serviceError = error as? ProxyServiceError,
+           case .httpStatus(let status, let body) = serviceError {
+            return AppIssue(
+                code: fallbackCode,
+                title: fallbackTitle,
+                message: provider.title + " " + String(localized: "returned HTTP") + " \(status) " + String(localized: "from") + " \(endpoint)." + (body.isEmpty ? "" : " \(body)"),
+                actions: actions
+            )
+        }
+
+        return AppIssue(
+            code: fallbackCode,
+            title: fallbackTitle,
+            message: provider.title + " " + String(localized: "failed at") + " \(endpoint): " + error.localizedDescription,
+            actions: actions
+        )
+    }
+
+    private func upstreamEndpoint(base: URL, path: String) -> String {
+        let normalized = ProxyService.normalizedUpstreamAPIBase(base).absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let suffix = path.hasPrefix("/") ? path : "/" + path
+        return normalized + suffix
+    }
+
+    private func localProviderRecoveryHint(for provider: UpstreamProvider) -> String {
+        switch provider {
+        case .lmStudio:
+            return String(localized: "Start LM Studio's local server or change the base URL.")
+        case .ollama:
+            return String(localized: "Start Ollama with ollama serve, check the base URL, or pull a model locally.")
+        case .githubCopilot:
+            return String(localized: "Start or reinstall the GitHub Copilot helper.")
+        default:
+            return String(localized: "Check the local provider and base URL.")
         }
     }
 

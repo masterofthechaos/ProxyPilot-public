@@ -17,23 +17,41 @@ final class TelemetryService {
         case analytics
     }
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private let installIDKey = "proxypilot.telemetry.installID"
+    private let isMicahInternalInstallKey = "proxypilot.telemetry.isMicah"
     private let crashMarkerURL: URL
     private let localEventLogURL: URL
+    private let protectedInternalMarkerURL: URL?
     private let remoteCaptureHook: ((String, [String: String]) -> Void)?
+    private let postHogDeliveryEnabled: Bool
+    private let postHogRequestHook: ((URLRequest) -> Void)?
     private var sessionID = UUID().uuidString
 
+    static let defaultProtectedInternalMarkerURL = URL(fileURLWithPath: "/Library/Application Support/ProxyPilot/internal-telemetry-marker")
+
     init(
+        defaults: UserDefaults = .standard,
         baseDirectory: URL? = nil,
-        remoteCaptureHook: ((String, [String: String]) -> Void)? = nil
+        postHogDeliveryEnabled: Bool = TelemetryService.defaultPostHogDeliveryEnabled,
+        protectedInternalMarkerURL: URL? = TelemetryService.defaultProtectedInternalMarkerURL,
+        remoteCaptureHook: ((String, [String: String]) -> Void)? = nil,
+        postHogRequestHook: ((URLRequest) -> Void)? = nil
     ) {
         let base = (baseDirectory ?? FileManager.default.temporaryDirectory)
             .appendingPathComponent("ProxyPilotTelemetry", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        self.defaults = defaults
         crashMarkerURL = base.appendingPathComponent("session.marker")
         localEventLogURL = base.appendingPathComponent("events.ndjson")
+        self.protectedInternalMarkerURL = protectedInternalMarkerURL
+        self.postHogDeliveryEnabled = postHogDeliveryEnabled
         self.remoteCaptureHook = remoteCaptureHook
+        self.postHogRequestHook = postHogRequestHook
+    }
+
+    private static var defaultPostHogDeliveryEnabled: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
     }
 
     var installID: String {
@@ -57,12 +75,17 @@ final class TelemetryService {
     }
 
     func trackCoreHealthAppOpen(appVersion: String, buildNumber: String) {
+        var payload = [
+            "app_version": appVersion,
+            "build_number": buildNumber
+        ]
+        if isMicahInternalInstall {
+            payload["is_micah"] = "true"
+        }
+
         let event = makeEvent(
             name: "app_opened",
-            payload: [
-                "app_version": appVersion,
-                "build_number": buildNumber
-            ]
+            payload: payload
         )
 
         persistLocally(event: event)
@@ -86,6 +109,22 @@ final class TelemetryService {
             sessionID: sessionID,
             payload: payload
         )
+    }
+
+    private var isMicahInternalInstall: Bool {
+        defaults.bool(forKey: isMicahInternalInstallKey) || protectedInternalMarkerIsPresent
+    }
+
+    private var protectedInternalMarkerIsPresent: Bool {
+        guard let protectedInternalMarkerURL,
+              let marker = try? String(contentsOf: protectedInternalMarkerURL, encoding: .utf8) else {
+            return false
+        }
+
+        return marker
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .contains("is_micah=true")
     }
 
     private func persistLocally(event: TelemetryEvent) {
@@ -120,6 +159,7 @@ final class TelemetryService {
         }
 
         remoteCaptureHook?(event.name, properties)
+        guard postHogDeliveryEnabled else { return }
 
         guard let apiKey = Bundle.main.object(forInfoDictionaryKey: "POSTHOG_API_KEY") as? String,
               !apiKey.isEmpty,
@@ -142,6 +182,11 @@ final class TelemetryService {
         request.timeoutInterval = 8
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = bodyData
+
+        if let postHogRequestHook {
+            postHogRequestHook(request)
+            return
+        }
 
         Task.detached {
             _ = try? await URLSession.shared.data(for: request)

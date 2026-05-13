@@ -48,7 +48,7 @@ proxypilot status --port 4000
 Manual / advanced flow:
 
 ```sh
-proxypilot auth set --provider zai --key "$ZAI_API_KEY"
+printf '%s\n' "$ZAI_API_KEY" | proxypilot auth set --provider zai --stdin
 proxypilot start --provider zai --model glm-4.7
 proxypilot config install --port 4000
 ```
@@ -88,7 +88,7 @@ proxypilot start [--port <port>] [--provider <provider>] [--upstream-url <url>] 
 | Flag | Default | Description |
 |---|---|---|
 | `--port`, `-p` | `4000` | Port to listen on |
-| `--provider` | `openai` | Upstream provider. Valid: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `ollama`, `lmstudio` |
+| `--provider` | `openai` | Upstream provider. Valid: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `deepseek`, `mistral`, `minimax`, `minimax-cn`, `github-copilot`, `ollama`, `lmstudio` |
 | `--upstream-url` | provider default | Override upstream API base URL |
 | `--key` | — | Upstream API key. Falls back to environment variable, then keychain/secrets store |
 | `--key-stdin` | false | Read one API key line from stdin |
@@ -119,7 +119,7 @@ proxypilot stop [--port <port>] [--json]
 
 ### `status`
 
-Check whether the proxy is running. Reads the PID file and probes `GET /v1/models` on the configured port. If the port responds but no PID file is present, status is reported as `running_unmanaged`.
+Check whether the proxy is running. Reads the PID file and probes `GET /v1/models` on the configured port. If the port responds but no PID file is present, status is reported as `running_unmanaged` with `process.owner` set to `external_or_gui` so CLI-owned and GUI/external listeners are distinguishable.
 
 ```
 proxypilot status [--port <port>] [--json]
@@ -185,13 +185,14 @@ proxypilot auth set --provider <provider> [--key <value>] [--stdin] [--json]
 
 | Flag | Default | Description |
 |---|---|---|
-| `--provider` | — | Required provider. Cloud only: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google` |
-| `--key` | — | Non-interactive key value (highest priority) |
-| `--stdin` | false | Read one key line from stdin |
+| `--provider` | — | Required provider. Cloud only: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `deepseek`, `mistral`, `minimax`, `minimax-cn` |
+| `--key` | — | Non-interactive key value; avoid in shared shells because it can be retained in shell history |
+| `--stdin` | false | Read one key line from stdin; recommended for scripts and terminals |
 | `--json` | false | Emit JSON output |
 
 If neither `--key` nor `--stdin` is passed, `auth set` prompts securely in a TTY.  
-Local providers (`ollama`, `lmstudio`) are rejected with `E041`.
+Prefer `--stdin` for non-interactive use. Use `--key` only when shell history retention is acceptable.
+Local/helper providers (`github-copilot`, `ollama`, `lmstudio`) are rejected with `E041`.
 
 ---
 
@@ -423,7 +424,7 @@ Pass `--json` to any command to get machine-readable output on stdout.
 **Error:**
 
 ```json
-{"ok": false, "error": {"code": "E001", "message": "Unknown provider: foo", "suggestion": "Valid: openai, groq, zai, openrouter, xai, chutes, google, ollama, lmstudio"}}
+{"ok": false, "error": {"code": "E001", "message": "Unknown provider: foo", "suggestion": "Valid: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, github-copilot, ollama, lmstudio"}}
 ```
 
 Error codes:

@@ -123,6 +123,35 @@ private enum ParseError: Error {
     #expect(result.usedGoogleBypassFallback == false)
 }
 
+@Test func requestToOpenAIPreservesAssistantThinkingBlocksAsTaggedText() throws {
+    let anthropic: [String: Any] = [
+        "model": "claude-sonnet-4-5-20250514",
+        "messages": [
+            [
+                "role": "assistant",
+                "content": [
+                    [
+                        "type": "thinking",
+                        "thinking": "I should preserve this reasoning context."
+                    ],
+                    [
+                        "type": "text",
+                        "text": "Final answer."
+                    ]
+                ]
+            ]
+        ]
+    ]
+
+    let openAI = AnthropicTranslator.requestToOpenAI(anthropic)
+    let messages = try #require(openAI["messages"] as? [[String: Any]])
+    let assistant = try #require(messages.first)
+    #expect(
+        assistant["content"] as? String
+            == "<thinking>I should preserve this reasoning context.</thinking>\nFinal answer."
+    )
+}
+
 @Test func responseFromOpenAICapturesGoogleThoughtSignature() throws {
     let store = GoogleThoughtSignatureStore()
     let openAI: [String: Any] = [
@@ -189,15 +218,63 @@ private enum ParseError: Error {
     #expect(request["max_tokens"] as? Int == 1024)
 }
 
-@Test func parameterRewriteNoOpForOpenAI() {
+@Test func parameterRewriteNoOpForLegacyOpenAIModel() {
     var request: [String: Any] = [
-        "model": "gpt-4",
+        "model": "gpt-4o",
         "seed": 42,
-        "max_completion_tokens": 1024
+        "max_tokens": 1024
     ]
     AnthropicTranslator.applyParameterRewrites(&request, for: .openAI)
     #expect(request["seed"] as? Int == 42)
-    #expect(request["max_completion_tokens"] as? Int == 1024)
+    #expect(request["max_tokens"] as? Int == 1024)
+    #expect(request["max_completion_tokens"] == nil)
+}
+
+@Test func parameterRewriteRenamesMaxTokensForDirectOpenAIGPT5() {
+    var request: [String: Any] = [
+        "model": "gpt-5.4",
+        "max_tokens": 4096,
+        "messages": [["role": "user", "content": "hi"]]
+    ]
+    AnthropicTranslator.applyParameterRewrites(&request, for: .openAI)
+    #expect(request["max_tokens"] == nil)
+    #expect(request["max_completion_tokens"] as? Int == 4096)
+}
+
+@Test func parameterRewriteRemovesMaxTokensWhenOpenAIGPT5AlreadyHasMaxCompletionTokens() {
+    var request: [String: Any] = [
+        "model": "gpt-5.5",
+        "max_tokens": 2048,
+        "max_completion_tokens": 8192
+    ]
+    AnthropicTranslator.applyParameterRewrites(&request, for: .openAI)
+    #expect(request["max_tokens"] == nil)
+    #expect(request["max_completion_tokens"] as? Int == 8192)
+}
+
+@Test func parameterRewriteLeavesOpenRouterGPT5MaxTokensUnchanged() {
+    var request: [String: Any] = [
+        "model": "openai/gpt-5.4",
+        "max_tokens": 4096
+    ]
+    AnthropicTranslator.applyParameterRewrites(&request, for: .openRouter)
+    #expect(request["max_tokens"] as? Int == 4096)
+    #expect(request["max_completion_tokens"] == nil)
+}
+
+@Test func requestToOpenAIUsesResolvedModelBeforeOpenAIParameterRewrite() {
+    let anthropic: [String: Any] = [
+        "model": "claude-sonnet-4-5-20250514",
+        "max_tokens": 4096,
+        "messages": [["role": "user", "content": "hi"]]
+    ]
+    let result = AnthropicTranslator.requestToOpenAI(
+        anthropic,
+        context: .init(upstreamProvider: .openAI, resolvedUpstreamModel: "gpt-5.4")
+    )
+    #expect(result.payload["model"] as? String == "gpt-5.4")
+    #expect(result.payload["max_tokens"] == nil)
+    #expect(result.payload["max_completion_tokens"] as? Int == 4096)
 }
 
 @Test func parameterRewritePreservesUnrelatedKeys() {
@@ -751,6 +828,43 @@ private enum ParseError: Error {
     // sentMessageStart is false by default
     let events = AnthropicTranslator.streamingFinishEvents(state: state)
     #expect(events.isEmpty)
+}
+
+@Test func finishEventsPropagateAccumulatedCompletionTokens() throws {
+    var state = AnthropicTranslator.StreamingState(requestID: "req_1", messageID: "msg_1")
+    let textChunk: [String: Any] = [
+        "choices": [
+            [
+                "delta": ["content": "Hello"],
+                "finish_reason": NSNull()
+            ]
+        ]
+    ]
+    _ = AnthropicTranslator.processStreamingChunk(textChunk, state: &state, model: "glm-5")
+
+    let usageChunk: [String: Any] = [
+        "usage": [
+            "prompt_tokens": 11,
+            "completion_tokens": 37,
+            "total_tokens": 48
+        ],
+        "choices": [
+            [
+                "delta": [:],
+                "finish_reason": "stop"
+            ]
+        ]
+    ]
+    _ = AnthropicTranslator.processStreamingChunk(usageChunk, state: &state, model: "glm-5")
+
+    let events = AnthropicTranslator.streamingFinishEvents(state: state)
+    let messageDeltaSSE = try #require(events.first { sse in
+        guard let (event, _) = try? parseSSE(sse) else { return false }
+        return event == "message_delta"
+    })
+    let (_, data) = try parseSSE(messageDeltaSSE)
+    let usage = try #require(data["usage"] as? [String: Any])
+    #expect(usage["output_tokens"] as? Int == 37)
 }
 
 // MARK: - Streaming SSE Event Generator Tests

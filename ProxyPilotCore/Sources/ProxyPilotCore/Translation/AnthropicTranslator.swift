@@ -77,6 +77,9 @@ public enum AnthropicTranslator {
         if let model = anthropic["model"] as? String {
             openAI["model"] = model
         }
+        if !context.resolvedUpstreamModel.isEmpty {
+            openAI["model"] = context.resolvedUpstreamModel
+        }
 
         var messages: [[String: Any]] = []
 
@@ -155,11 +158,43 @@ public enum AnthropicTranslator {
         _ request: inout [String: Any],
         for provider: UpstreamProvider
     ) {
+        applyOpenAIModelParameterRewrites(&request, for: provider)
+
         for (oldKey, newKey) in provider.parameterRewrites {
             if let value = request.removeValue(forKey: oldKey) {
                 request[newKey] = value
             }
         }
+    }
+
+    private static func applyOpenAIModelParameterRewrites(
+        _ request: inout [String: Any],
+        for provider: UpstreamProvider
+    ) {
+        guard provider == .openAI,
+              let model = request["model"] as? String,
+              requiresMaxCompletionTokens(modelID: model) else {
+            return
+        }
+
+        if request["max_completion_tokens"] == nil,
+           let maxTokens = request["max_tokens"] {
+            request["max_completion_tokens"] = maxTokens
+        }
+        request.removeValue(forKey: "max_tokens")
+    }
+
+    private static func requiresMaxCompletionTokens(modelID: String) -> Bool {
+        let normalized = modelID
+            .lowercased()
+            .split(separator: "/")
+            .last
+            .map(String.init) ?? modelID.lowercased()
+
+        return normalized.hasPrefix("gpt-5")
+            || normalized.hasPrefix("o1")
+            || normalized.hasPrefix("o3")
+            || normalized.hasPrefix("o4")
     }
 
     /// Clamps the temperature parameter to the provider's valid range.
@@ -529,6 +564,12 @@ public enum AnthropicTranslator {
                     textParts.append(text)
                 }
 
+            case "thinking":
+                if let thinking = (block["thinking"] as? String) ?? (block["text"] as? String),
+                   !thinking.isEmpty {
+                    textParts.append("<thinking>\(thinking)</thinking>")
+                }
+
             case "tool_use":
                 let toolCallID = block["id"] as? String ?? UUID().uuidString
                 var toolCall: [String: Any] = [
@@ -579,17 +620,24 @@ public enum AnthropicTranslator {
         if role == "assistant" {
             var assistantMsg: [String: Any] = ["role": "assistant"]
             if !textParts.isEmpty {
-                assistantMsg["content"] = textParts.joined()
+                assistantMsg["content"] = joinedConversationText(textParts)
             }
             if !toolCalls.isEmpty {
                 assistantMsg["tool_calls"] = toolCalls
             }
             result.insert(assistantMsg, at: 0)
         } else if !textParts.isEmpty {
-            result.insert(["role": role, "content": textParts.joined()], at: 0)
+            result.insert(["role": role, "content": joinedConversationText(textParts)], at: 0)
         }
 
         return result
+    }
+
+    private static func joinedConversationText(_ parts: [String]) -> String {
+        if parts.contains(where: { $0.hasPrefix("<thinking>") }) {
+            return parts.joined(separator: "\n")
+        }
+        return parts.joined()
     }
 
     private static func convertToolToOpenAI(_ tool: [String: Any]) -> [String: Any] {
@@ -994,7 +1042,10 @@ public enum AnthropicTranslator {
         if state.sawToolUse && stopReason == "end_turn" { stopReason = "tool_use" }
         if stopReason == "tool_use" && !state.sawToolUse { stopReason = "end_turn" }
 
-        events.append(streamingMessageDeltaEvent(stopReason: stopReason))
+        events.append(streamingMessageDeltaEvent(
+            stopReason: stopReason,
+            outputTokens: state.lastSeenCompletionTokens
+        ))
         events.append(streamingMessageStopEvent())
 
         return events
