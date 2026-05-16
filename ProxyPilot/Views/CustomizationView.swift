@@ -68,35 +68,47 @@ struct CustomizationView: View {
     }
 
     private var liquidGlassPreview: some View {
-        HStack {
-            Text("Control strip preview")
-                .foregroundStyle(.secondary)
+        ViewThatFits {
+            HStack {
+                Text("Control strip preview")
+                    .foregroundStyle(.secondary)
 
-            Spacer()
+                Spacer()
 
-            GlassControlGroup(cornerRadius: 14, padding: 3) {
-                HStack(spacing: 2) {
-                    Label("Start", systemImage: "play.fill")
-                        .labelStyle(.titleAndIcon)
-                        .font(.callout.weight(.medium))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-
-                    Rectangle()
-                        .fill(Color(nsColor: .separatorColor).opacity(0.5))
-                        .frame(width: 1, height: 20)
-                        .padding(.horizontal, 2)
-
-                    Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
-                        .labelStyle(.titleAndIcon)
-                        .font(.callout.weight(.medium))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                }
+                liquidGlassPreviewControls
             }
-            .fixedSize(horizontal: true, vertical: false)
-            .environment(\.proxypilotLiquidGlassEnabled, effectiveLiquidGlassEnabled)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Control strip preview")
+                    .foregroundStyle(.secondary)
+                liquidGlassPreviewControls
+            }
         }
+    }
+
+    private var liquidGlassPreviewControls: some View {
+        GlassControlGroup(cornerRadius: 14, padding: 3) {
+            HStack(spacing: 2) {
+                Label("Start", systemImage: "play.fill")
+                    .labelStyle(.titleAndIcon)
+                    .font(.callout.weight(.medium))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor).opacity(0.5))
+                    .frame(width: 1, height: 20)
+                    .padding(.horizontal, 2)
+
+                Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
+                    .labelStyle(.titleAndIcon)
+                    .font(.callout.weight(.medium))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .environment(\.proxypilotLiquidGlassEnabled, effectiveLiquidGlassEnabled)
     }
 
     private var windowToolbarSection: some View {
@@ -105,7 +117,7 @@ struct CustomizationView: View {
                 get: { vm.defaultSettingsSection },
                 set: { vm.defaultSettingsSection = $0 }
             )) {
-                ForEach(SettingsSection.allCases) { section in
+                ForEach(SettingsSection.sidebarSections) { section in
                     Text(section.title).tag(section)
                 }
             }
@@ -157,14 +169,25 @@ struct CustomizationView: View {
             .toggleStyle(.switch)
 
             VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("Menu bar content")
-                        .font(.headline)
-                    Spacer()
-                    Button("Reset") {
-                        vm.resetMenuBarCustomization()
+                ViewThatFits {
+                    HStack {
+                        Text("Menu bar content")
+                            .font(.headline)
+                        Spacer()
+                        Button("Reset") {
+                            vm.resetMenuBarCustomization()
+                        }
+                        .font(.caption)
                     }
-                    .font(.caption)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Menu bar content")
+                            .font(.headline)
+                        Button("Reset") {
+                            vm.resetMenuBarCustomization()
+                        }
+                        .font(.caption)
+                    }
                 }
 
                 ForEach(vm.menuBarSectionOrder) { section in

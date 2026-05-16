@@ -13,7 +13,18 @@ enum MCPServerSetup {
         var server: NIOProxyServer?
         var config: ProxyConfiguration?
         var boundPort: UInt16?
-        let sessionStats = SessionStats(sessionReportURL: SessionReportStore.defaultURL, sessionSource: "mcp")
+        let sessionID: String
+        let sessionStats: SessionStats
+
+        init() {
+            let sessionID = UUID().uuidString
+            self.sessionID = sessionID
+            self.sessionStats = SessionStats(
+                sessionReportURL: SessionReportStore.defaultURL,
+                sessionSource: "mcp",
+                sessionID: sessionID
+            )
+        }
 
         func isRunning() -> Bool { server != nil }
         func currentPort() -> UInt16? { boundPort }
@@ -140,7 +151,7 @@ enum MCPServerSetup {
         }
     }
 
-    static func run(port: UInt16, provider: String, key: String?, upstreamURL: String? = nil) async throws {
+    static func run(port: UInt16, provider: String?, key: String?, upstreamURL: String? = nil) async throws {
         let state = ProxyState()
         let lifecycleGate = LifecycleGate()
 
@@ -177,7 +188,7 @@ enum MCPServerSetup {
                     description: "Start the ProxyPilot local AI proxy server on a specified port with an upstream provider and model.",
                     inputSchema: jsonSchemaObject(properties: [
                         "port": intProp("Port to listen on (default 4000, range 1024-65535)"),
-                        "provider": stringProp("Upstream provider: \(UpstreamProvider.cliOptionsDescription)"),
+                        "provider": stringProp("Upstream provider: \(UpstreamProvider.cliOptionsDescription). Omit to select from configured provider keys."),
                         "model": stringProp("Upstream model(s) to route requests to, comma-separated (e.g. 'gpt-4o,claude-3-opus'). First model is preferred for Anthropic translation. If omitted, provider fallback models are used when available."),
                         "key": stringProp("Upstream API key (optional, falls back to secrets store)"),
                         "url": stringProp("Upstream API base URL override (e.g. http://localhost:11434/v1)"),
@@ -207,7 +218,7 @@ enum MCPServerSetup {
                     description: "Restart the ProxyPilot proxy server with the same or new configuration.",
                     inputSchema: jsonSchemaObject(properties: [
                         "port": intProp("Port to listen on (range 1024-65535)"),
-                        "provider": stringProp("Upstream provider: \(UpstreamProvider.cliOptionsDescription)"),
+                        "provider": stringProp("Upstream provider: \(UpstreamProvider.cliOptionsDescription). Omit to keep the current provider or select from configured provider keys."),
                         "model": stringProp("Upstream model(s) to route requests to, comma-separated (e.g. 'gpt-4o,claude-3-opus'). First model is preferred for Anthropic translation."),
                         "key": stringProp("Upstream API key"),
                         "url": stringProp("Upstream API base URL override (e.g. http://localhost:11434/v1)"),
@@ -374,7 +385,11 @@ enum MCPServerSetup {
                 let parsedPort = portArgument(params.arguments, default: port, tool: "preflight")
                 if let error = parsedPort.error { return error }
                 let reqPort = parsedPort.port ?? port
-                let parsedProvider = MCPArgumentValidator.provider(params.arguments?["provider"], default: provider, tool: "preflight")
+                let parsedProvider = MCPArgumentValidator.provider(
+                    params.arguments?["provider"],
+                    default: provider ?? ProxyPilotDefaults.defaultCLIProvider.rawValue,
+                    tool: "preflight"
+                )
                 guard case .success(let upstream) = parsedProvider else {
                     let message: String
                     if case .failure(_, let failureMessage) = parsedProvider {
@@ -526,7 +541,7 @@ enum MCPServerSetup {
                 let parsedPort = portArgument(params.arguments, default: port, tool: "proxy_start")
                 if let error = parsedPort.error { return error }
                 let reqPort = parsedPort.port ?? port
-                let parsedProvider = MCPArgumentValidator.provider(params.arguments?["provider"], default: provider, tool: "proxy_start")
+                let parsedProvider = MCPArgumentValidator.optionalProvider(params.arguments?["provider"], tool: "proxy_start")
                 let parsedKey = stringArgument(params.arguments, name: "key", default: key, tool: "proxy_start")
                 if let error = parsedKey.error { return error }
                 let parsedURL = stringArgument(params.arguments, name: "url", default: upstreamURL, tool: "proxy_start")
@@ -537,13 +552,11 @@ enum MCPServerSetup {
                 let reqURL = parsedURL.value
                 let reqModel = parsedModel.value
 
-                guard case .success(let upstream) = parsedProvider else {
-                    let message: String
-                    if case .failure(_, let failureMessage) = parsedProvider {
-                        message = failureMessage
-                    } else {
-                        message = "Invalid provider argument."
-                    }
+                let requestedProvider: UpstreamProvider?
+                switch parsedProvider {
+                case .success(let upstream):
+                    requestedProvider = upstream
+                case .failure(_, let message):
                     return toolError(
                         tool: "proxy_start",
                         code: "E001",
@@ -553,41 +566,48 @@ enum MCPServerSetup {
                 }
 
                 let secrets = SecretsProviderFactory.make()
-                let secretKeyName = secretKeyForProvider(upstream)
-                let apiKey: String? = if let reqKey {
-                    reqKey
-                } else if let secretKeyName {
-                    ProcessInfo.processInfo.environment[secretKeyName]
-                        ?? (try? secrets.get(key: secretKeyName))
-                } else {
-                    nil
+                let resolvedCredential = resolveMCPProviderCredential(
+                    tool: "proxy_start",
+                    rawProvider: requestedProvider?.rawValue ?? provider,
+                    explicitKey: reqKey,
+                    upstreamURL: reqURL,
+                    secrets: secrets,
+                    port: reqPort,
+                    model: reqModel
+                )
+                if let error = resolvedCredential.error {
+                    return error
                 }
-
-                // Allow nil API key for local providers or localhost URLs
-                let effectiveBaseURL = reqURL ?? upstream.defaultAPIBaseURL
-                if apiKey == nil && !upstream.isLocal && !isLocalhostURL(effectiveBaseURL) {
+                guard let credential = resolvedCredential.credential else {
                     return toolError(
                         tool: "proxy_start",
-                        code: "E004",
-                        message: "No API key found for provider \(upstream.rawValue).",
-                        suggestion: "Pass a key parameter, set the provider env var, or store it with auth_set.",
-                        nextActions: [
-                            NextAction(
-                                id: "auth_set_\(upstream.rawValue)",
-                                kind: .mcpTool,
-                                tool: "auth_set",
-                                arguments: [
-                                    "provider": .string(upstream.rawValue),
-                                    "allow_secret_write": .bool(true),
-                                ],
-                                destructive: false
-                            ),
-                        ]
+                        code: "E047",
+                        message: "Choose which configured provider ProxyPilot should use."
+                    )
+                }
+                let upstream = credential.provider
+                let apiKey = credential.apiKey
+
+                let modelResolution = await resolveProxyModelList(
+                    tool: "proxy_start",
+                    rawModels: reqModel,
+                    provider: upstream,
+                    upstreamURL: reqURL,
+                    apiKey: apiKey
+                )
+                if let error = modelResolution.error {
+                    return error
+                }
+                guard let resolvedModels = modelResolution.resolution else {
+                    return toolError(
+                        tool: "proxy_start",
+                        code: "E049",
+                        message: "No models could be resolved for \(upstream.rawValue)."
                     )
                 }
 
-                await state.sessionStats.reset(clearReportStore: true)
-                let modelList = resolvedModelList(reqModel, provider: upstream)
+                await state.sessionStats.reset(clearReportStore: false)
+                let modelList = resolvedModels.models
                 let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
                 let config = ProxyConfiguration(
                     port: reqPort,
@@ -597,13 +617,16 @@ enum MCPServerSetup {
                     allowedModels: allowedModels,
                     preferredAnthropicUpstreamModel: modelList.first ?? "",
                     sessionStats: state.sessionStats,
-                    googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil
+                    googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil,
+                    inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "mcp", sessionID: state.sessionID)
                 )
 
                 do {
                     return try await lifecycleGate.withLock {
                         let boundPort = try await state.start(config: config)
-                        let modelInfo = reqModel.map { " [\($0)]" } ?? ""
+                        let modelInfo = reqModel.map { " [\($0)]" }
+                            ?? (resolvedModels.wasDiscoveredFromUpstream ? " [\(modelList.count) discovered model(s)]" : "")
+                        let selectionInfo = credential.selectedFromStoredCredentials ? " (selected from stored provider keys)" : ""
                         return toolSuccess(
                             tool: "proxy_start",
                             data: ProxyLifecyclePayload(
@@ -612,7 +635,7 @@ enum MCPServerSetup {
                                 provider: upstream.rawValue,
                                 model: reqModel
                             ),
-                            text: "ProxyPilot started on port \(boundPort) -> \(upstream.title)\(modelInfo).\nXcode is NOT yet configured. Call xcode_config_install (port: \(boundPort)) to route Xcode through ProxyPilot.",
+                            text: "ProxyPilot started on port \(boundPort) -> \(upstream.title)\(modelInfo)\(selectionInfo).\nXcode is NOT yet configured. Call xcode_config_install (port: \(boundPort)) to route Xcode through ProxyPilot.",
                             nextActions: [
                                 NextAction(
                                     id: "install_xcode_config",
@@ -669,7 +692,7 @@ enum MCPServerSetup {
                 let parsedPort = portArgument(params.arguments, default: port, tool: "proxy_restart")
                 if let error = parsedPort.error { return error }
                 let reqPort = parsedPort.port ?? port
-                let parsedProvider = MCPArgumentValidator.provider(params.arguments?["provider"], default: provider, tool: "proxy_restart")
+                let parsedProvider = MCPArgumentValidator.optionalProvider(params.arguments?["provider"], tool: "proxy_restart")
                 let parsedKey = stringArgument(params.arguments, name: "key", default: key, tool: "proxy_restart")
                 if let error = parsedKey.error { return error }
                 let parsedURL = stringArgument(params.arguments, name: "url", default: upstreamURL, tool: "proxy_restart")
@@ -680,13 +703,11 @@ enum MCPServerSetup {
                 let reqURL = parsedURL.value
                 let reqModel = parsedModel.value
 
-                guard case .success(let upstream) = parsedProvider else {
-                    let message: String
-                    if case .failure(_, let failureMessage) = parsedProvider {
-                        message = failureMessage
-                    } else {
-                        message = "Invalid provider argument."
-                    }
+                let requestedProvider: UpstreamProvider?
+                switch parsedProvider {
+                case .success(let upstream):
+                    requestedProvider = upstream
+                case .failure(_, let message):
                     return toolError(
                         tool: "proxy_restart",
                         code: "E001",
@@ -695,41 +716,49 @@ enum MCPServerSetup {
                     )
                 }
 
+                let currentProvider = await state.currentProvider()
                 let secrets = SecretsProviderFactory.make()
-                let secretKeyName = secretKeyForProvider(upstream)
-                let apiKey: String? = if let reqKey {
-                    reqKey
-                } else if let secretKeyName {
-                    ProcessInfo.processInfo.environment[secretKeyName]
-                        ?? (try? secrets.get(key: secretKeyName))
-                } else {
-                    nil
+                let resolvedCredential = resolveMCPProviderCredential(
+                    tool: "proxy_restart",
+                    rawProvider: requestedProvider?.rawValue ?? provider ?? currentProvider,
+                    explicitKey: reqKey,
+                    upstreamURL: reqURL,
+                    secrets: secrets,
+                    port: reqPort,
+                    model: reqModel
+                )
+                if let error = resolvedCredential.error {
+                    return error
                 }
-
-                // Allow nil API key for local providers or localhost URLs
-                let effectiveBaseURL = reqURL ?? upstream.defaultAPIBaseURL
-                if apiKey == nil && !upstream.isLocal && !isLocalhostURL(effectiveBaseURL) {
+                guard let credential = resolvedCredential.credential else {
                     return toolError(
                         tool: "proxy_restart",
-                        code: "E004",
-                        message: "No API key found for provider \(upstream.rawValue).",
-                        suggestion: "Pass a key parameter, set the provider env var, or store it with auth_set.",
-                        nextActions: [
-                            NextAction(
-                                id: "auth_set_\(upstream.rawValue)",
-                                kind: .mcpTool,
-                                tool: "auth_set",
-                                arguments: [
-                                    "provider": .string(upstream.rawValue),
-                                    "allow_secret_write": .bool(true),
-                                ],
-                                destructive: false
-                            ),
-                        ]
+                        code: "E047",
+                        message: "Choose which configured provider ProxyPilot should use."
+                    )
+                }
+                let upstream = credential.provider
+                let apiKey = credential.apiKey
+
+                let modelResolution = await resolveProxyModelList(
+                    tool: "proxy_restart",
+                    rawModels: reqModel,
+                    provider: upstream,
+                    upstreamURL: reqURL,
+                    apiKey: apiKey
+                )
+                if let error = modelResolution.error {
+                    return error
+                }
+                guard let resolvedModels = modelResolution.resolution else {
+                    return toolError(
+                        tool: "proxy_restart",
+                        code: "E049",
+                        message: "No models could be resolved for \(upstream.rawValue)."
                     )
                 }
 
-                let modelList = resolvedModelList(reqModel, provider: upstream)
+                let modelList = resolvedModels.models
                 let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
                 let config = ProxyConfiguration(
                     port: reqPort,
@@ -739,7 +768,8 @@ enum MCPServerSetup {
                     allowedModels: allowedModels,
                     preferredAnthropicUpstreamModel: modelList.first ?? "",
                     sessionStats: state.sessionStats,
-                    googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil
+                    googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil,
+                    inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "mcp", sessionID: state.sessionID)
                 )
 
                 do {
@@ -747,7 +777,9 @@ enum MCPServerSetup {
                         // Stop if running (ignore error if not running)
                         try? await state.stop()
                         let boundPort = try await state.start(config: config)
-                        let modelInfo = reqModel.map { " [\($0)]" } ?? ""
+                        let modelInfo = reqModel.map { " [\($0)]" }
+                            ?? (resolvedModels.wasDiscoveredFromUpstream ? " [\(modelList.count) discovered model(s)]" : "")
+                        let selectionInfo = credential.selectedFromStoredCredentials ? " (selected from stored provider keys)" : ""
                         return toolSuccess(
                             tool: "proxy_restart",
                             data: ProxyLifecyclePayload(
@@ -756,7 +788,7 @@ enum MCPServerSetup {
                                 provider: upstream.rawValue,
                                 model: reqModel
                             ),
-                            text: "ProxyPilot restarted on port \(boundPort) -> \(upstream.title)\(modelInfo).\nCall xcode_config_install (port: \(boundPort)) to update Xcode routing.",
+                            text: "ProxyPilot restarted on port \(boundPort) -> \(upstream.title)\(modelInfo)\(selectionInfo).\nCall xcode_config_install (port: \(boundPort)) to update Xcode routing.",
                             nextActions: [
                                 NextAction(
                                     id: "install_xcode_config",
@@ -890,7 +922,11 @@ enum MCPServerSetup {
                 }
 
             case "list_upstream_models":
-                let parsedProvider = MCPArgumentValidator.provider(params.arguments?["provider"], default: provider, tool: "list_upstream_models")
+                let parsedProvider = MCPArgumentValidator.provider(
+                    params.arguments?["provider"],
+                    default: provider ?? ProxyPilotDefaults.defaultCLIProvider.rawValue,
+                    tool: "list_upstream_models"
+                )
                 let parsedKey = stringArgument(params.arguments, name: "key", default: key, tool: "list_upstream_models")
                 if let error = parsedKey.error { return error }
                 let parsedURL = stringArgument(params.arguments, name: "url", default: nil, tool: "list_upstream_models")
@@ -1035,6 +1071,113 @@ enum MCPServerSetup {
 
     // MARK: - Helpers
 
+    private static func resolveMCPProviderCredential(
+        tool: String,
+        rawProvider: String?,
+        explicitKey: String?,
+        upstreamURL: String?,
+        secrets: any SecretsProvider,
+        port: UInt16,
+        model: String?
+    ) -> (credential: ResolvedProviderCredential?, error: CallTool.Result?) {
+        let resolution = ProviderCredentialResolver.resolve(
+            rawProvider: rawProvider,
+            explicitKey: explicitKey,
+            upstreamURL: upstreamURL,
+            secrets: secrets
+        )
+
+        switch resolution {
+        case .resolved(let credential):
+            return (credential, nil)
+        case .unknownProvider(let raw):
+            return (nil, toolError(
+                tool: tool,
+                code: "E001",
+                message: "Unknown provider: \(raw).",
+                suggestion: "Valid providers: \(UpstreamProvider.cliOptionsDescription)"
+            ))
+        case .missingAPIKey(let provider, let secretKeyName):
+            return (nil, toolError(
+                tool: tool,
+                code: "E004",
+                message: "No API key found for provider \(provider.rawValue).",
+                suggestion: "Pass a key parameter, set \(secretKeyName ?? "the provider env var"), or store it with auth_set.",
+                nextActions: [
+                    NextAction(
+                        id: "auth_set_\(provider.rawValue)",
+                        kind: .mcpTool,
+                        tool: "auth_set",
+                        arguments: [
+                            "provider": .string(provider.rawValue),
+                            "allow_secret_write": .bool(true),
+                        ],
+                        destructive: false
+                    ),
+                ]
+            ))
+        case .selectionRequired(let prompt):
+            let message = prompt.availableProviders.isEmpty
+                ? "No configured provider API keys were found."
+                : "Choose which configured provider ProxyPilot should use."
+            return (nil, toolError(
+                tool: tool,
+                code: "E047",
+                message: message,
+                suggestion: prompt.humanList,
+                nextActions: mcpProviderSelectionNextActions(
+                    tool: tool,
+                    prompt: prompt,
+                    port: port,
+                    model: model,
+                    upstreamURL: upstreamURL
+                )
+            ))
+        }
+    }
+
+    private static func mcpProviderSelectionNextActions(
+        tool: String,
+        prompt: ProviderSelectionPrompt,
+        port: UInt16,
+        model: String?,
+        upstreamURL: String?
+    ) -> [NextAction] {
+        var actions = prompt.availableProviders.map { choice in
+            var arguments: [String: NextActionValue] = [
+                "provider": .string(choice.provider),
+                "port": .int(Int(port)),
+            ]
+            if let model {
+                arguments["model"] = .string(model)
+            }
+            if let upstreamURL {
+                arguments["url"] = .string(upstreamURL)
+            }
+            return NextAction(
+                id: "\(tool)_with_\(choice.provider)",
+                kind: .mcpTool,
+                tool: tool,
+                arguments: arguments,
+                destructive: false
+            )
+        }
+
+        actions.append(NextAction(
+            id: "auth_set",
+            kind: .user,
+            message: "Choose a provider, then call auth_set with provider, key, and allow_secret_write: true.",
+            destructive: false
+        ))
+        actions.append(NextAction(
+            id: "add_provider",
+            kind: .user,
+            message: "Add custom providers in the ProxyPilot app before starting the proxy from MCP.",
+            destructive: false
+        ))
+        return actions
+    }
+
     private static func secretKeyForProvider(_ provider: UpstreamProvider) -> String? {
         provider.secretKey
     }
@@ -1065,12 +1208,36 @@ enum MCPServerSetup {
         )
     }
 
-    private static func resolvedModelList(_ rawModels: String?, provider: UpstreamProvider) -> [String] {
-        let explicitModels = rawModels?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
-        if !explicitModels.isEmpty {
-            return explicitModels
+    private static func resolveProxyModelList(
+        tool: String,
+        rawModels: String?,
+        provider: UpstreamProvider,
+        upstreamURL: String?,
+        apiKey: String?
+    ) async -> (resolution: CLIStartModelResolution?, error: CallTool.Result?) {
+        do {
+            let resolution = try await CLIStartModelResolver.resolve(
+                rawModels: rawModels,
+                provider: provider,
+                upstreamURL: upstreamURL,
+                apiKey: apiKey
+            )
+            return (resolution, nil)
+        } catch let error as CLIStartModelResolver.ResolutionError {
+            return (nil, toolError(
+                tool: tool,
+                code: "E049",
+                message: error.localizedDescription,
+                suggestion: error.recoverySuggestion
+            ))
+        } catch {
+            return (nil, toolError(
+                tool: tool,
+                code: "E005",
+                message: "Failed to discover upstream models for \(provider.rawValue): \(error)",
+                suggestion: "Check the upstream URL, verify the server is reachable, or pass model explicitly."
+            ))
         }
-        return provider.fallbackModelIDs ?? []
     }
 
     private struct ModelsToolPayload: Encodable {

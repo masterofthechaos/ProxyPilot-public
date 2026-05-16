@@ -47,6 +47,12 @@ final class AppViewModel: ObservableObject {
     private static let didCompleteOnboardingDefaultsKey = "proxypilot.didCompleteOnboarding"
     private static let telemetryOptInDefaultsKey = "proxypilot.telemetryOptIn"
     private static let liquidGlassEnabledDefaultsKey = "proxypilot.liquidGlassEnabled"
+    private static let inputOutputLoggingEnabledDefaultsKey = "proxypilot.inputOutputLogging.enabled"
+    private static let inputOutputLoggingRecordInputsDefaultsKey = "proxypilot.inputOutputLogging.recordInputs"
+    private static let inputOutputLoggingRecordOutputsDefaultsKey = "proxypilot.inputOutputLogging.recordOutputs"
+    private static let inputOutputLoggingCLIEnabledDefaultsKey = "proxypilot.inputOutputLogging.cliEnabled"
+    private static let inputOutputLoggingRetentionDefaultsKey = "proxypilot.inputOutputLogging.retention"
+    private static let inputOutputLoggingExternalStorageDefaultsKey = "proxypilot.inputOutputLogging.externalStorage"
     static let appearancePreferenceDefaultsKey = "proxypilot.customization.appearance"
     static let proxyPilotAccentHexDefaultsKey = "proxypilot.customization.accentHex"
     static let showMenuBarExtraDefaultsKey = "proxypilot.customization.showMenuBarExtra"
@@ -91,6 +97,7 @@ final class AppViewModel: ObservableObject {
     private let cliUpdateRunner: CLIUpdateRunner?
     private let cliAuthStatusRunner: CLIAuthStatusRunner?
     private let cliStopRunner: CLIStopRunner?
+    private let inputOutputLoggingPreferencesStore: InputOutputLoggingPreferencesStore?
 
     typealias CLIExecutableResolver = () -> URL?
     typealias CLIUpdateRunner = (URL) async throws -> CLIUpdateExecutionResult
@@ -145,6 +152,8 @@ final class AppViewModel: ObservableObject {
     private var statusRefreshSequence = 0
     private let sessionReportURL: URL
     private var importedExternalSessionEventIDs: Set<UUID> = []
+    private var importedExternalSessionIDs: Set<String> = []
+    private var suppressedExternalSessionIDs: Set<String> = []
     private var hasTrackedFirstSuccessfulRequest = false
     private var hasEvaluatedKeychainPrimerThisLaunch = false
     private static let preflightExpandedDefaultsKey = "proxypilot.preflightExpanded"
@@ -218,6 +227,9 @@ final class AppViewModel: ObservableObject {
     @Published var isStartingCopilotSidecar: Bool = false
 
     @Published var launchAtLogin: Bool = false
+    @Published private(set) var sessionHistorySessions: [SessionHistorySession] = []
+    @Published private(set) var sessionHistoryInputOutputRecords: [InputOutputLogRecord] = []
+    @Published private(set) var sessionHistoryLoadError: String?
 
     var localProxyState: LocalProxyState { localProxyServer.state }
     var sessionReportCard: SessionReportCard { localProxyServer.reportCard }
@@ -231,19 +243,44 @@ final class AppViewModel: ObservableObject {
         localProxyServer.state.lastXcodeAgentRequestModel = ""
         localProxyServer.state.lastXcodeAgentRequestStatus = nil
         localProxyServer.state.lastXcodeAgentRequestAt = nil
+        suppressedExternalSessionIDs.formUnion(importedExternalSessionIDs)
         importedExternalSessionEventIDs.removeAll()
-        try? SessionReportStore.reset(at: sessionReportURL)
+        importedExternalSessionIDs.removeAll()
     }
 
     func importExternalSessionReportEvents() {
         guard let events = try? SessionReportStore.readEvents(from: sessionReportURL) else { return }
-        for event in events where event.source != "gui" && !importedExternalSessionEventIDs.contains(event.id) {
+        let externalEvents = events.filter { $0.source != "gui" && !suppressedExternalSessionIDs.contains($0.sessionID) }
+        guard let latestSessionID = externalEvents.max(by: {
+            $0.record.timestamp < $1.record.timestamp
+        })?.sessionID else { return }
+
+        for event in externalEvents where event.sessionID == latestSessionID && !importedExternalSessionEventIDs.contains(event.id) {
             importedExternalSessionEventIDs.insert(event.id)
+            importedExternalSessionIDs.insert(event.sessionID)
             localProxyServer.reportCard.record(event.record)
             localProxyServer.state.sessionRequestCount = localProxyServer.reportCard.totalRequests
             if !event.record.model.isEmpty {
                 localProxyServer.state.lastModelSeen = event.record.model
             }
+        }
+    }
+
+    func refreshSessionHistory() async {
+        do {
+            let events = try SessionReportStore.readEvents(from: sessionReportURL)
+            sessionHistorySessions = SessionHistorySession.build(from: events)
+            sessionHistoryLoadError = nil
+        } catch {
+            sessionHistorySessions = []
+            sessionHistoryLoadError = error.localizedDescription
+        }
+
+        do {
+            sessionHistoryInputOutputRecords = try await inputOutputLoggingRecords()
+        } catch {
+            sessionHistoryInputOutputRecords = []
+            sessionHistoryLoadError = sessionHistoryLoadError ?? error.localizedDescription
         }
     }
 
@@ -438,6 +475,12 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.didCompleteOnboardingDefaultsKey)
         defaults.removeObject(forKey: Self.telemetryOptInDefaultsKey)
         defaults.removeObject(forKey: Self.liquidGlassEnabledDefaultsKey)
+        defaults.removeObject(forKey: Self.inputOutputLoggingEnabledDefaultsKey)
+        defaults.removeObject(forKey: Self.inputOutputLoggingRecordInputsDefaultsKey)
+        defaults.removeObject(forKey: Self.inputOutputLoggingRecordOutputsDefaultsKey)
+        defaults.removeObject(forKey: Self.inputOutputLoggingCLIEnabledDefaultsKey)
+        defaults.removeObject(forKey: Self.inputOutputLoggingRetentionDefaultsKey)
+        defaults.removeObject(forKey: Self.inputOutputLoggingExternalStorageDefaultsKey)
         defaults.removeObject(forKey: Self.appearancePreferenceDefaultsKey)
         defaults.removeObject(forKey: Self.proxyPilotAccentHexDefaultsKey)
         defaults.removeObject(forKey: Self.showMenuBarExtraDefaultsKey)
@@ -501,6 +544,12 @@ final class AppViewModel: ObservableObject {
         showOnboardingWizard = true
         telemetryOptIn = false
         liquidGlassEnabled = true
+        inputOutputLoggingEnabled = false
+        inputOutputLoggingRecordInputs = false
+        inputOutputLoggingRecordOutputs = false
+        inputOutputLoggingCLIEnabled = false
+        inputOutputLoggingRetention = .twentyFourHoursDefault
+        inputOutputLoggingExternalStorageEnabled = false
         appearancePreference = .system
         proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
         showMenuBarExtra = true
@@ -710,12 +759,149 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    @Published var inputOutputLoggingEnabled: Bool = false {
+        didSet {
+            defaults.set(inputOutputLoggingEnabled, forKey: Self.inputOutputLoggingEnabledDefaultsKey)
+            persistSharedInputOutputLoggingPreferences()
+        }
+    }
+
+    @Published var inputOutputLoggingRecordInputs: Bool = false {
+        didSet {
+            defaults.set(inputOutputLoggingRecordInputs, forKey: Self.inputOutputLoggingRecordInputsDefaultsKey)
+            persistSharedInputOutputLoggingPreferences()
+        }
+    }
+
+    @Published var inputOutputLoggingRecordOutputs: Bool = false {
+        didSet {
+            defaults.set(inputOutputLoggingRecordOutputs, forKey: Self.inputOutputLoggingRecordOutputsDefaultsKey)
+            persistSharedInputOutputLoggingPreferences()
+        }
+    }
+
+    @Published var inputOutputLoggingCLIEnabled: Bool = false {
+        didSet {
+            defaults.set(inputOutputLoggingCLIEnabled, forKey: Self.inputOutputLoggingCLIEnabledDefaultsKey)
+            persistSharedInputOutputLoggingPreferences()
+        }
+    }
+
+    @Published var inputOutputLoggingRetention: InputOutputLoggingRetention = .twentyFourHoursDefault {
+        didSet {
+            defaults.set(inputOutputLoggingRetention.rawValue, forKey: Self.inputOutputLoggingRetentionDefaultsKey)
+            persistSharedInputOutputLoggingPreferences()
+        }
+    }
+
+    @Published var inputOutputLoggingExternalStorageEnabled: Bool = false {
+        didSet {
+            defaults.set(inputOutputLoggingExternalStorageEnabled, forKey: Self.inputOutputLoggingExternalStorageDefaultsKey)
+            persistSharedInputOutputLoggingPreferences()
+        }
+    }
+
     var liquidGlassPreferenceTitle: String {
         String(localized: "Use Liquid Glass for control strips")
     }
 
     var liquidGlassPreferenceDescription: String {
         String(localized: "This only affects ProxyPilot's custom compact control strips and preview. Native sidebar, toolbar, sheets, and menus follow macOS automatically.")
+    }
+
+    func confirmInputOutputLoggingEnabled() {
+        inputOutputLoggingEnabled = true
+        if !inputOutputLoggingRecordInputs && !inputOutputLoggingRecordOutputs {
+            inputOutputLoggingRecordInputs = true
+            inputOutputLoggingRecordOutputs = true
+        }
+    }
+
+    func disableInputOutputLogging() {
+        inputOutputLoggingEnabled = false
+        inputOutputLoggingRecordInputs = false
+        inputOutputLoggingRecordOutputs = false
+        inputOutputLoggingCLIEnabled = false
+        inputOutputLoggingExternalStorageEnabled = false
+    }
+
+    func setInputOutputRecordInputs(_ enabled: Bool) {
+        inputOutputLoggingRecordInputs = enabled
+        reconcileInputOutputLoggingSelection()
+    }
+
+    func setInputOutputRecordOutputs(_ enabled: Bool) {
+        inputOutputLoggingRecordOutputs = enabled
+        reconcileInputOutputLoggingSelection()
+    }
+
+    func inputOutputLoggingSavedRecordCount() async throws -> Int {
+        guard let recorder = try InputOutputLoggingRecorder.productionIfKeyExists(source: "gui") else {
+            return 0
+        }
+        return try await recorder.recordCount()
+    }
+
+    func inputOutputLoggingExportJSONL() async throws -> String {
+        guard let recorder = try InputOutputLoggingRecorder.productionIfKeyExists(source: "gui") else {
+            return ""
+        }
+        return try await recorder.exportJSONL()
+    }
+
+    func inputOutputLoggingRecords() async throws -> [InputOutputLogRecord] {
+        guard let recorder = try InputOutputLoggingRecorder.productionIfKeyExists(source: "gui") else {
+            return []
+        }
+        try await recorder.pruneExpired()
+        return try await recorder.readRecords()
+    }
+
+    func deleteInputOutputLoggingRecords() async throws {
+        guard let recorder = try InputOutputLoggingRecorder.productionIfKeyExists(source: "gui") else {
+            return
+        }
+        try await recorder.resetRecords()
+    }
+
+    private func reconcileInputOutputLoggingSelection() {
+        if inputOutputLoggingEnabled && !inputOutputLoggingRecordInputs && !inputOutputLoggingRecordOutputs {
+            inputOutputLoggingEnabled = false
+            inputOutputLoggingCLIEnabled = false
+            inputOutputLoggingExternalStorageEnabled = false
+        }
+    }
+
+    private func reconcileStoredInputOutputLoggingState() {
+        inputOutputLoggingExternalStorageEnabled = false
+
+        if inputOutputLoggingEnabled && !inputOutputLoggingRecordInputs && !inputOutputLoggingRecordOutputs {
+            inputOutputLoggingRecordInputs = true
+            inputOutputLoggingRecordOutputs = true
+        }
+
+        if !inputOutputLoggingEnabled {
+            inputOutputLoggingRecordInputs = false
+            inputOutputLoggingRecordOutputs = false
+            inputOutputLoggingCLIEnabled = false
+        }
+    }
+
+    private func persistSharedInputOutputLoggingPreferences() {
+        guard let inputOutputLoggingPreferencesStore else { return }
+
+        let coreRetention = ProxyPilotCore.InputOutputLoggingRetention(rawValue: inputOutputLoggingRetention.rawValue)
+            ?? .twentyFourHoursDefault
+        let preferences = InputOutputLoggingPreferences(
+            enabled: inputOutputLoggingEnabled,
+            recordInputs: inputOutputLoggingRecordInputs,
+            recordOutputs: inputOutputLoggingRecordOutputs,
+            cliEnabled: inputOutputLoggingCLIEnabled,
+            retention: coreRetention,
+            externalStorageEnabled: inputOutputLoggingExternalStorageEnabled
+        )
+
+        try? inputOutputLoggingPreferencesStore.save(preferences)
     }
 
     @Published var appearancePreference: AppAppearancePreference = .system {
@@ -1033,7 +1219,11 @@ final class AppViewModel: ObservableObject {
     }
 
     var alwaysOnTelemetryDisclosureText: String {
-        "Always-on health reporting sends only `app_opened`, `app_version`, and `build_number` to PostHog at https://us.i.posthog.com/capture/ so update health can be counted. Optional analytics add session/proxy events only when this toggle is enabled. Prompts, completions, API keys, provider keys, model outputs, and system details are not sent."
+        if Self.isAlphaBuild {
+            return "Alpha builds always send coarse failure-mode analytics for preflight failures, proxy start failures, and crash markers when a remote analytics key is bundled. Prompts, completions, API keys, provider keys, model outputs, URLs, provider names, and system details are not sent."
+        }
+
+        return "Always-on health reporting sends only `app_opened`, `app_version`, and `build_number` to PostHog at https://us.i.posthog.com/capture/ so update health can be counted. Optional analytics add session/proxy events only when this toggle is enabled. Prompts, completions, API keys, provider keys, model outputs, and system details are not sent."
     }
 
     var contextualTerminologyHelpText: String {
@@ -1311,7 +1501,8 @@ final class AppViewModel: ObservableObject {
         cliUpdateRunner: CLIUpdateRunner? = nil,
         cliAuthStatusRunner: CLIAuthStatusRunner? = nil,
         cliStopRunner: CLIStopRunner? = nil,
-        sessionReportURL: URL = SessionReportStore.defaultURL
+        sessionReportURL: URL = SessionReportStore.defaultURL,
+        inputOutputLoggingPreferencesStore: InputOutputLoggingPreferencesStore? = nil
     ) {
         self.defaults = defaults
         self.proxyService = proxyService
@@ -1327,6 +1518,8 @@ final class AppViewModel: ObservableObject {
         self.cliAuthStatusRunner = cliAuthStatusRunner
         self.cliStopRunner = cliStopRunner
         self.sessionReportURL = sessionReportURL
+        self.inputOutputLoggingPreferencesStore = inputOutputLoggingPreferencesStore
+            ?? (defaults === UserDefaults.standard ? InputOutputLoggingPreferencesStore() : nil)
 
         self.providerManager = ProviderManager(defaults: defaults, proxyService: proxyService)
         self.customProviderStorage = CustomProviderStorage(defaults: defaults)
@@ -1342,6 +1535,16 @@ final class AppViewModel: ObservableObject {
 
         telemetryOptIn = defaults.bool(forKey: Self.telemetryOptInDefaultsKey)
         liquidGlassEnabled = defaults.object(forKey: Self.liquidGlassEnabledDefaultsKey) as? Bool ?? true
+        inputOutputLoggingEnabled = defaults.bool(forKey: Self.inputOutputLoggingEnabledDefaultsKey)
+        inputOutputLoggingRecordInputs = defaults.bool(forKey: Self.inputOutputLoggingRecordInputsDefaultsKey)
+        inputOutputLoggingRecordOutputs = defaults.bool(forKey: Self.inputOutputLoggingRecordOutputsDefaultsKey)
+        inputOutputLoggingCLIEnabled = defaults.bool(forKey: Self.inputOutputLoggingCLIEnabledDefaultsKey)
+        inputOutputLoggingRetention = InputOutputLoggingRetention(
+            rawValue: defaults.string(forKey: Self.inputOutputLoggingRetentionDefaultsKey) ?? ""
+        ) ?? .twentyFourHoursDefault
+        inputOutputLoggingExternalStorageEnabled = defaults.bool(forKey: Self.inputOutputLoggingExternalStorageDefaultsKey)
+        reconcileStoredInputOutputLoggingState()
+        persistSharedInputOutputLoggingPreferences()
         appearancePreference = AppAppearancePreference(
             rawValue: defaults.string(forKey: Self.appearancePreferenceDefaultsKey) ?? ""
         ) ?? .system
@@ -1377,7 +1580,17 @@ final class AppViewModel: ObservableObject {
         proxyLifecycle.onRefreshStatus = { [weak self] in self?.refreshStatus() }
         proxyLifecycle.telemetryTracker = { [weak self] name, payload in
             guard let self else { return }
-            self.telemetryService.track(name: name, payload: payload, telemetryOptIn: self.telemetryOptIn)
+            let enrichedPayload: [String: String]
+            if name == "proxy_start_failed", let issue = self.activeIssue {
+                enrichedPayload = Self.telemetryPayloadForProxyStartFailure(
+                    issue: issue,
+                    useBuiltInProxy: self.useBuiltInProxy,
+                    preflightResults: self.preflightResults
+                )
+            } else {
+                enrichedPayload = payload
+            }
+            self.telemetryService.track(name: name, payload: enrichedPayload, telemetryOptIn: self.telemetryOptIn)
         }
         proxyLifecycle.proxyURLValidator = { [weak self] requireLocalhost in
             guard let self else { throw ProxyLifecycleManager.IssueError(issue: AppIssue(
@@ -1418,7 +1631,14 @@ final class AppViewModel: ObservableObject {
             buildNumber: Self.buildNumber
         )
         if priorSessionLikelyCrashed {
-            telemetryService.track(name: "previous_session_may_have_crashed", telemetryOptIn: telemetryOptIn)
+            telemetryService.track(
+                name: "previous_session_may_have_crashed",
+                payload: Self.telemetryPayloadForPreviousSessionCrash(
+                    useBuiltInProxy: useBuiltInProxy,
+                    upstreamProvider: upstreamProvider
+                ),
+                telemetryOptIn: telemetryOptIn
+            )
         }
 
         if showOnboardingWizard {
@@ -1436,6 +1656,19 @@ final class AppViewModel: ObservableObject {
     func applicationWillTerminate() {
         telemetryService.endSession()
         stopLogUpdates()
+        pruneInputOutputLogsForQuit()
+    }
+
+    private func pruneInputOutputLogsForQuit() {
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            defer { semaphore.signal() }
+            guard let recorder = try? InputOutputLoggingRecorder.productionIfConfigured(source: "gui") else {
+                return
+            }
+            try? await recorder.pruneExpired(includeUntilQuit: true)
+        }
+        _ = semaphore.wait(timeout: .now() + 2)
     }
 
     func shouldPromptBeforeQuit() -> Bool {
@@ -1494,6 +1727,7 @@ final class AppViewModel: ObservableObject {
     // MARK: - Analytics Opt-In Prompt
 
     func maybeShowAnalyticsPrompt() {
+        guard Self.analyticsPromptAvailable else { return }
         guard defaults.string(forKey: Self.analyticsPromptShownVersionKey) != Self.appVersion else { return }
         guard !showOnboardingWizard else { return }
         showAnalyticsPrompt = true
@@ -1507,6 +1741,16 @@ final class AppViewModel: ObservableObject {
 
     private func markAnalyticsPromptHandledForCurrentVersion() {
         defaults.set(Self.appVersion, forKey: Self.analyticsPromptShownVersionKey)
+    }
+
+    private static var isAlphaBuild: Bool {
+        AppBuildBadge.isAlphaBundle(Bundle.main.bundleIdentifier)
+    }
+
+    private static var analyticsPromptAvailable: Bool {
+        guard !isAlphaBuild else { return false }
+        let apiKey = Bundle.main.object(forInfoDictionaryKey: "POSTHOG_API_KEY") as? String
+        return !(apiKey?.isEmpty ?? true)
     }
 
     func startLogUpdates() {
@@ -1698,7 +1942,16 @@ final class AppViewModel: ObservableObject {
         }
 
         if trackEvent && checks.contains(where: { $0.status == .fail }) {
-            telemetryService.track(name: "preflight_failed", telemetryOptIn: telemetryOptIn)
+            telemetryService.track(
+                name: "preflight_failed",
+                payload: Self.telemetryPayloadForPreflightFailure(
+                    checks: checks,
+                    useBuiltInProxy: useBuiltInProxy,
+                    requireLocalAuth: requireLocalAuth,
+                    upstreamProvider: upstreamProvider
+                ),
+                telemetryOptIn: telemetryOptIn
+            )
         }
     }
 
@@ -2102,6 +2355,69 @@ final class AppViewModel: ObservableObject {
         }
 
         NSWorkspace.shared.open(url)
+    }
+
+    func openGitHubBugReport() {
+        copySupportSummaryToPasteboard()
+
+        let issueCode = activeIssue?.code.rawValue ?? recentIssueCodes.first
+        guard let url = Self.gitHubBugReportURL(
+            appVersion: Self.appVersion,
+            buildNumber: Self.buildNumber,
+            statusText: statusText,
+            activeIssueCode: issueCode
+        ) else {
+            openPublicRepository()
+            return
+        }
+
+        NSWorkspace.shared.open(url)
+    }
+
+    static func gitHubBugReportURL(
+        appVersion: String,
+        buildNumber: String,
+        statusText: String,
+        activeIssueCode: String?
+    ) -> URL? {
+        var components = URLComponents(string: "\(publicRepositoryURLString)/issues/new")
+        components?.queryItems = [
+            URLQueryItem(name: "title", value: "ProxyPilot bug report"),
+            URLQueryItem(name: "body", value: gitHubBugReportBody(
+                appVersion: appVersion,
+                buildNumber: buildNumber,
+                statusText: statusText,
+                activeIssueCode: activeIssueCode
+            ))
+        ]
+        return components?.url
+    }
+
+    private static func gitHubBugReportBody(
+        appVersion: String,
+        buildNumber: String,
+        statusText: String,
+        activeIssueCode: String?
+    ) -> String {
+        """
+        ## What happened
+
+        ## What you expected
+
+        ## Steps to reproduce
+
+        1.
+        2.
+        3.
+
+        ## ProxyPilot context
+
+        - App version: \(appVersion) (\(buildNumber))
+        - Proxy status: \(statusText)
+        - Issue code: \(activeIssueCode ?? "none")
+
+        A technical support summary was copied to the clipboard from ProxyPilot. Review it before attaching so no private project details are included.
+        """
     }
 
     func feedbackDraftURL() -> URL? {
@@ -2630,9 +2946,11 @@ general_settings:
 
         let upstreamBase = proxyService.normalizedUpstreamAPIBase(from: upstreamAPIBaseURLString) ?? defaultUpstreamBase
 
+        let sessionID = UUID().uuidString
         let config = LocalProxyServer.Config(
             host: proxy.host,
             port: port,
+            sessionID: sessionID,
             masterKey: masterKey,
             upstreamProvider: upstreamProvider,
             upstreamAPIBase: upstreamBase,
@@ -2644,7 +2962,8 @@ general_settings:
             preferredAnthropicUpstreamModel: preferredModel.isEmpty
                 ? providerManager.preferredXcodeAgentModel(from: savedDefaultModels)
                 : preferredModel,
-            googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil
+            googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil,
+            inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "gui", sessionID: sessionID)
         )
 
         if upstreamKey == nil && upstreamProvider.requiresAPIKey {
@@ -2751,6 +3070,77 @@ general_settings:
         if recentIssueCodes.count > 20 {
             recentIssueCodes = Array(recentIssueCodes.prefix(20))
         }
+    }
+
+    static func telemetryPayloadForPreflightFailure(
+        checks: [PreflightCheckResult],
+        useBuiltInProxy: Bool,
+        requireLocalAuth: Bool,
+        upstreamProvider: UpstreamProvider
+    ) -> [String: String] {
+        let failures = checks.filter { $0.status == .fail }
+        let warnings = checks.filter { $0.status == .warning }
+        let fixActions = failures
+            .map(\.fixAction.rawValue)
+            .filter { $0 != PreflightFixAction.none.rawValue }
+
+        return compactTelemetryPayload([
+            "failure_count": String(failures.count),
+            "warning_count": String(warnings.count),
+            "failure_ids": joinedTelemetryValues(failures.map(\.id)),
+            "warning_ids": joinedTelemetryValues(warnings.map(\.id)),
+            "fix_actions": joinedTelemetryValues(fixActions),
+            "mode": proxyModeTelemetryValue(useBuiltInProxy: useBuiltInProxy),
+            "provider_class": providerClassTelemetryValue(upstreamProvider),
+            "local_auth_required": String(!useBuiltInProxy || requireLocalAuth),
+            "upstream_key_required": String(upstreamProvider.requiresAPIKey)
+        ])
+    }
+
+    static func telemetryPayloadForProxyStartFailure(
+        issue: AppIssue,
+        useBuiltInProxy: Bool,
+        preflightResults: [PreflightCheckResult]
+    ) -> [String: String] {
+        let failures = preflightResults.filter { $0.status == .fail }
+        return compactTelemetryPayload([
+            "code": issue.code.rawValue,
+            "mode": proxyModeTelemetryValue(useBuiltInProxy: useBuiltInProxy),
+            "issue_actions": joinedTelemetryValues(issue.actions.map(\.rawValue)),
+            "preflight_failure_count": String(failures.count),
+            "preflight_failure_ids": joinedTelemetryValues(failures.map(\.id))
+        ])
+    }
+
+    static func telemetryPayloadForPreviousSessionCrash(
+        useBuiltInProxy: Bool,
+        upstreamProvider: UpstreamProvider
+    ) -> [String: String] {
+        [
+            "mode": proxyModeTelemetryValue(useBuiltInProxy: useBuiltInProxy),
+            "provider_class": providerClassTelemetryValue(upstreamProvider)
+        ]
+    }
+
+    private static func compactTelemetryPayload(_ payload: [String: String?]) -> [String: String] {
+        payload.compactMapValues { value in
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        }
+    }
+
+    private static func joinedTelemetryValues(_ values: [String]) -> String? {
+        let normalized = Set(values.filter { !$0.isEmpty })
+        guard !normalized.isEmpty else { return nil }
+        return normalized.sorted().joined(separator: ",")
+    }
+
+    private static func proxyModeTelemetryValue(useBuiltInProxy: Bool) -> String {
+        useBuiltInProxy ? "builtin" : "litellm"
+    }
+
+    private static func providerClassTelemetryValue(_ provider: UpstreamProvider) -> String {
+        provider.isLocal ? "local" : "cloud"
     }
 
     private enum UpstreamIssueOperation {

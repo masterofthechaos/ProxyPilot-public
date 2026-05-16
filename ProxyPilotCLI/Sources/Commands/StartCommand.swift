@@ -16,8 +16,8 @@ struct StartCommand: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Port to listen on.")
     var port: UInt16 = ProxyPilotDefaults.defaultPort
 
-    @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)).")
-    var provider: String = ProxyPilotDefaults.defaultCLIProvider.rawValue
+    @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)). Omit to choose from configured provider keys.")
+    var provider: String?
 
     @Option(name: .long, help: "Override the upstream API base URL (e.g. http://localhost:11434/v1).")
     var upstreamUrl: String?
@@ -38,18 +38,6 @@ struct StartCommand: AsyncParsableCommand {
     var daemon: Bool = false
 
     mutating func run() async throws {
-        // Validate provider
-        guard let upstreamProvider = UpstreamProvider(rawValue: provider) else {
-            OutputFormatter.error(
-                command: "start",
-                code: "E001",
-                message: "Unknown provider: \(provider)",
-                suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
-                json: json
-            )
-            throw ExitCode.failure
-        }
-
         // Check if already running
         if let existingPid = PidFile.read() {
             OutputFormatter.error(
@@ -76,13 +64,17 @@ struct StartCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        let secrets = SecretsProviderFactory.make()
+        let resolvedCredential = try resolveProviderCredential(inlineKey: inlineKey, secrets: secrets)
+        let upstreamProvider = resolvedCredential.provider
+
         // Daemon: spawn a detached child process that runs the proxy
         if daemon {
             let launchResult: DaemonLaunchResult
             do {
                 launchResult = try await CLIProxyRuntime.launchDaemon(
                     port: port,
-                    provider: provider,
+                    provider: upstreamProvider.rawValue,
                     upstreamUrl: upstreamUrl,
                     key: inlineKey,
                     model: model,
@@ -116,44 +108,49 @@ struct StartCommand: AsyncParsableCommand {
             throw ExitCode.success
         }
 
-        // Resolve API key: flag > env > secrets store
-        let secrets = SecretsProviderFactory.make()
-        let secretKey = upstreamProvider.secretKey
-        let apiKey: String? = if let inlineKey {
-            inlineKey
-        } else if let secretKey {
-            ProcessInfo.processInfo.environment[secretKey]
-                ?? (try? secrets.get(key: secretKey))
-        } else {
-            nil
-        }
-
-        // Warn if no API key and provider requires one
-        let effectiveBaseURL = upstreamUrl ?? upstreamProvider.defaultAPIBaseURL
-        if apiKey == nil && !upstreamProvider.isLocal && !isLocalhostURL(effectiveBaseURL) {
+        let modelResolution: CLIStartModelResolution
+        do {
+            modelResolution = try await CLIStartModelResolver.resolve(
+                rawModels: model,
+                provider: upstreamProvider,
+                upstreamURL: upstreamUrl,
+                apiKey: resolvedCredential.apiKey
+            )
+        } catch let error as CLIStartModelResolver.ResolutionError {
             OutputFormatter.error(
                 command: "start",
-                code: "E004",
-                message: "No API key found for provider \(upstreamProvider.rawValue).",
-                suggestion: "Run 'proxypilot auth set --provider \(upstreamProvider.rawValue)', pass --key, or set \(secretKey ?? "the provider env var").",
+                code: "E049",
+                message: error.localizedDescription,
+                suggestion: error.recoverySuggestion,
+                json: json
+            )
+            throw ExitCode.failure
+        } catch {
+            OutputFormatter.error(
+                command: "start",
+                code: "E005",
+                message: "Failed to discover upstream models for \(upstreamProvider.rawValue): \(error)",
+                suggestion: "Check the upstream URL, verify the server is reachable, or pass --model <id> explicitly.",
                 json: json
             )
             throw ExitCode.failure
         }
 
-        let sessionStats = SessionStats(sessionReportURL: SessionReportStore.defaultURL, sessionSource: "cli")
-        await sessionStats.reset(clearReportStore: true)
-        let modelList = parsedModelList(for: upstreamProvider)
+        let sessionID = UUID().uuidString
+        let sessionStats = SessionStats(sessionReportURL: SessionReportStore.defaultURL, sessionSource: "cli", sessionID: sessionID)
+        await sessionStats.reset(clearReportStore: false)
+        let modelList = modelResolution.models
         let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
         let config = ProxyConfiguration(
             port: port,
             upstreamProvider: upstreamProvider,
             upstreamAPIBaseURL: upstreamUrl,
-            upstreamAPIKey: apiKey,
+            upstreamAPIKey: resolvedCredential.apiKey,
             allowedModels: allowedModels,
             preferredAnthropicUpstreamModel: modelList.first ?? "",
             sessionStats: sessionStats,
-            googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil
+            googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil,
+            inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "cli", sessionID: sessionID)
         )
 
         let server = NIOProxyServer()
@@ -176,7 +173,8 @@ struct StartCommand: AsyncParsableCommand {
             PidFile.write(pid: ProcessInfo.processInfo.processIdentifier)
         }
 
-        let modelDisplay = model ?? "(all)"
+        let modelDisplay = model ?? (modelResolution.wasDiscoveredFromUpstream ? "\(modelList.count) discovered model(s)" : "(all)")
+        let selectedSuffix = resolvedCredential.selectedFromStoredCredentials ? " (selected from stored provider keys)" : ""
         OutputFormatter.success(
             command: "start",
             data: StartPayload(
@@ -188,7 +186,7 @@ struct StartCommand: AsyncParsableCommand {
                 daemon: false,
                 managed: true
             ),
-            humanMessage: "ProxyPilot running on port \(actualPort) -> \(upstreamProvider.title) [\(modelDisplay)] (PID \(ProcessInfo.processInfo.processIdentifier))",
+            humanMessage: "ProxyPilot running on port \(actualPort) -> \(upstreamProvider.title) [\(modelDisplay)] (PID \(ProcessInfo.processInfo.processIdentifier))\(selectedSuffix)",
             json: json
         )
 
@@ -208,12 +206,110 @@ struct StartCommand: AsyncParsableCommand {
         }
     }
 
-    private func parsedModelList(for provider: UpstreamProvider) -> [String] {
-        let explicitModels = model?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
-        if !explicitModels.isEmpty {
-            return explicitModels
+    private func resolveProviderCredential(
+        inlineKey: String?,
+        secrets: any SecretsProvider
+    ) throws -> ResolvedProviderCredential {
+        let rawProvider = try selectedProviderFromInteractivePromptIfNeeded(inlineKey: inlineKey, secrets: secrets)
+        let resolution = ProviderCredentialResolver.resolve(
+            rawProvider: rawProvider,
+            explicitKey: inlineKey,
+            upstreamURL: upstreamUrl,
+            secrets: secrets
+        )
+
+        switch resolution {
+        case .resolved(let credential):
+            return credential
+        case .unknownProvider(let raw):
+            OutputFormatter.error(
+                command: "start",
+                code: "E001",
+                message: "Unknown provider: \(raw)",
+                suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
+                json: json
+            )
+        case .missingAPIKey(let missingProvider, let secretKeyName):
+            OutputFormatter.error(
+                command: "start",
+                code: "E004",
+                message: "No API key found for provider \(missingProvider.rawValue).",
+                suggestion: "Run 'proxypilot auth set --provider \(missingProvider.rawValue)', pass --key, or set \(secretKeyName ?? "the provider env var").",
+                json: json
+            )
+        case .selectionRequired(let prompt):
+            OutputFormatter.error(
+                command: "start",
+                code: "E047",
+                message: prompt.availableProviders.isEmpty
+                    ? "No configured provider API keys were found."
+                    : "Choose which configured provider ProxyPilot should use.",
+                suggestion: prompt.humanList,
+                json: json,
+                nextActions: selectionNextActions(prompt: prompt)
+            )
         }
-        return provider.fallbackModelIDs ?? []
+
+        throw ExitCode.failure
+    }
+
+    private func selectedProviderFromInteractivePromptIfNeeded(
+        inlineKey: String?,
+        secrets: any SecretsProvider
+    ) throws -> String? {
+        guard provider == nil, inlineKey == nil, !json, stdinIsInteractive else {
+            return provider
+        }
+
+        let prompt = ProviderCredentialResolver.selectionPrompt(secrets: secrets)
+        print(prompt.humanList)
+        print("Select a provider or action:", terminator: " ")
+        guard let line = readLine(),
+              let choiceIndex = Int(line.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return nil
+        }
+
+        if let choice = prompt.availableProviders.first(where: { $0.index == choiceIndex }) {
+            return choice.provider
+        }
+
+        if choiceIndex == prompt.addNewAPIKeyIndex {
+            print("Run: proxypilot auth set --provider <provider>")
+            throw ExitCode.failure
+        }
+
+        if choiceIndex == prompt.addNewProviderIndex {
+            print("Custom provider setup is available in the ProxyPilot app. Built-in CLI providers: \(UpstreamProvider.cliOptionsDescription)")
+            throw ExitCode.failure
+        }
+
+        return nil
+    }
+
+    private var stdinIsInteractive: Bool {
+        #if canImport(Darwin) || canImport(Glibc)
+        isatty(STDIN_FILENO) == 1
+        #else
+        false
+        #endif
+    }
+
+    private func selectionNextActions(prompt: ProviderSelectionPrompt) -> [NextAction] {
+        var actions = prompt.availableProviders.map { choice in
+            NextAction(
+                id: "start_with_\(choice.provider)",
+                kind: .cli,
+                command: "proxypilot start --provider \(choice.provider)",
+                destructive: false
+            )
+        }
+        actions.append(NextAction(
+            id: "auth_set",
+            kind: .cli,
+            command: "proxypilot auth set --provider <provider>",
+            destructive: false
+        ))
+        return actions
     }
 
     private struct StartPayload: Encodable {

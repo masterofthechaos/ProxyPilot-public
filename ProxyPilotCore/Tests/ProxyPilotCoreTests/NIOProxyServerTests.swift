@@ -245,6 +245,75 @@ struct NIOProxyServerTests {
         try await stub.stop()
     }
 
+    @Test func chatCompletionsWritesEncryptedInputOutputLogWhenEnabled() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let preferencesURL = directory.appendingPathComponent("settings.json")
+        let logURL = directory.appendingPathComponent("records.jsonl.enc")
+        let preferencesStore = InputOutputLoggingPreferencesStore(url: preferencesURL)
+        try preferencesStore.save(InputOutputLoggingPreferences(
+            enabled: true,
+            recordInputs: true,
+            recordOutputs: true,
+            cliEnabled: true,
+            retention: .twentyFourHoursDefault
+        ))
+
+        let logStore = InputOutputLogStore(
+            url: logURL,
+            encryptionKey: Data(repeating: 7, count: 32)
+        )
+        let recorder = InputOutputLoggingRecorder(
+            source: "cli",
+            preferencesStore: preferencesStore,
+            logStore: logStore
+        )
+
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(
+            statusCode: 200,
+            body: "{\"id\":\"chatcmpl-test\",\"model\":\"test-model\",\"choices\":[{\"message\":{\"content\":\"logged output\"}}]}"
+        )
+
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)",
+            requiresAuth: false,
+            inputOutputLogger: recorder
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "test-model",
+            "messages": [["role": "user", "content": "secret prompt"]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+        let rawLog = try String(contentsOf: logURL, encoding: .utf8)
+        #expect(!rawLog.contains("secret prompt"))
+        #expect(!rawLog.contains("logged output"))
+
+        let records = try await logStore.readRecords()
+        #expect(records.count == 1)
+        #expect(records[0].source == "cli")
+        #expect(records[0].path == "/v1/chat/completions")
+        #expect(records[0].model == "test-model")
+        #expect(records[0].input?.text?.contains("secret prompt") == true)
+        #expect(records[0].output?.text?.contains("logged output") == true)
+
+        try await server.stop()
+        try await stub.stop()
+    }
+
     @Test func chatCompletionsReturns502WhenUpstreamErrors() async throws {
         // Start a stub upstream that returns 500
         let stub = StubUpstream()

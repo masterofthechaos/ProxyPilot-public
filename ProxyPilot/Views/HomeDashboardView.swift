@@ -11,6 +11,7 @@ struct HomeDashboardView: View {
     let onOpenProxy: () -> Void
     let onOpenAgentModel: () -> Void
     let onOpenPreflight: () -> Void
+    let onOpenSessionHistory: () -> Void
 
     @State private var sessionCSVExportStatus: String = ""
     @State private var expandedSessionRequestIDs: Set<UUID> = []
@@ -37,6 +38,7 @@ struct HomeDashboardView: View {
                 }
             }
             .padding(24)
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .topLeading)
         }
     }
 
@@ -47,21 +49,17 @@ struct HomeDashboardView: View {
     private var heroCard: some View {
         DashboardCard {
             VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Current Session")
-                            .font(.title2.weight(.semibold))
-                        Text(vm.isRunning ? "Proxy is running. Verify live route state below." : "Start ProxyPilot when you begin coding.")
-                            .foregroundStyle(.secondary)
+                ViewThatFits {
+                    HStack(alignment: .top, spacing: 12) {
+                        heroTitle
+                        Spacer()
+                        currentSessionStatusBadge
                     }
 
-                    Spacer()
-
-                    statusBadge(
-                        title: vm.isRunning ? "Running" : "Stopped",
-                        systemImage: vm.isRunning ? "checkmark.circle.fill" : "circle.fill",
-                        color: vm.isRunning ? .green : .secondary
-                    )
+                    VStack(alignment: .leading, spacing: 10) {
+                        heroTitle
+                        currentSessionStatusBadge
+                    }
                 }
 
                 ViewThatFits {
@@ -80,15 +78,19 @@ struct HomeDashboardView: View {
                     }
                 }
 
-                HStack(spacing: 10) {
-                    statusBadge(
-                        title: vm.upstreamProvider.title,
-                        systemImage: "network",
-                        color: .accentColor
-                    )
-                    agentModelStatusBadge
-                    preflightStatusBadge
-                    Spacer()
+                ViewThatFits {
+                    HStack(spacing: 10) {
+                        upstreamProviderBadge
+                        agentModelStatusBadge
+                        preflightStatusBadge
+                        Spacer()
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        upstreamProviderBadge
+                        agentModelStatusBadge
+                        preflightStatusBadge
+                    }
                 }
 
                 if let issue = vm.activeIssue {
@@ -102,6 +104,32 @@ struct HomeDashboardView: View {
                 }
             }
         }
+    }
+
+    private var heroTitle: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Current Session")
+                .font(.title2.weight(.semibold))
+            Text(vm.isRunning ? "Proxy is running. Verify live route state below." : "Start ProxyPilot when you begin coding.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var currentSessionStatusBadge: some View {
+        statusBadge(
+            title: vm.isRunning ? "Running" : "Stopped",
+            systemImage: vm.isRunning ? "checkmark.circle.fill" : "circle.fill",
+            color: vm.isRunning ? .green : .secondary
+        )
+    }
+
+    private var upstreamProviderBadge: some View {
+        statusBadge(
+            title: vm.upstreamProvider.title,
+            systemImage: "network",
+            color: .accentColor
+        )
     }
 
     private var workflowControls: some View {
@@ -155,13 +183,22 @@ struct HomeDashboardView: View {
     private var xcodeAgentControls: some View {
         DashboardCard {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Xcode Claude Agent Routing")
-                        .font(.headline)
-                    Spacer()
-                    Text(vm.agentConfigInstalled ? "Installed" : "Not Installed")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(vm.agentConfigInstalled ? .green : .secondary)
+                ViewThatFits {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Xcode Claude Agent Routing")
+                            .font(.headline)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer()
+                        agentConfigInstallStatusText
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Xcode Claude Agent Routing")
+                            .font(.headline)
+                            .fixedSize(horizontal: false, vertical: true)
+                        agentConfigInstallStatusText
+                    }
                 }
 
                 Text("Routes Xcode Claude Agent requests through ProxyPilot. Selected changes apply after proxy start or restart.")
@@ -203,6 +240,12 @@ struct HomeDashboardView: View {
                 .buttonStyle(.plain)
             }
         }
+    }
+
+    private var agentConfigInstallStatusText: some View {
+        Text(vm.agentConfigInstalled ? "Installed" : "Not Installed")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(vm.agentConfigInstalled ? .green : .secondary)
     }
 
     private var agentModelPicker: some View {
@@ -297,21 +340,21 @@ struct HomeDashboardView: View {
     private var sessionDetails: some View {
         DashboardCard {
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Session Report Card")
-                        .font(.headline)
-                    Spacer()
-                    Button("Export CSV") {
-                        exportSessionRequestsCSV()
+                ViewThatFits {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("Session Report Card")
+                            .font(.headline)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer()
+                        sessionReportActions
                     }
-                    .font(.caption)
-                    Button("Reset") {
-                        vm.resetSessionStats()
-                        sessionCSVExportStatus = ""
-                        expandedSessionRequestIDs.removeAll()
-                        copiedSessionRequestID = nil
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Session Report Card")
+                            .font(.headline)
+                        sessionReportActions
                     }
-                    .font(.caption)
                 }
 
                 if vm.sessionReportCard.totalRequests == 0 {
@@ -352,6 +395,24 @@ struct HomeDashboardView: View {
                 }
             }
         }
+    }
+
+    private var sessionReportActions: some View {
+        HStack(spacing: 8) {
+            Button("Export CSV") {
+                exportSessionRequestsCSV()
+            }
+            Button("View History") {
+                onOpenSessionHistory()
+            }
+            Button("Reset") {
+                vm.resetSessionStats()
+                sessionCSVExportStatus = ""
+                expandedSessionRequestIDs.removeAll()
+                copiedSessionRequestID = nil
+            }
+        }
+        .font(.caption)
     }
 
     private var hiddenHomeSectionsPlaceholder: some View {
@@ -590,6 +651,7 @@ struct HomeDashboardView: View {
             Text(title)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .minimumScaleFactor(0.85)
         }
         .font(.caption.weight(.semibold))
         .foregroundStyle(color)

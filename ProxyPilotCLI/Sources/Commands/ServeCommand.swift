@@ -11,8 +11,8 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Port to listen on.")
     var port: UInt16 = ProxyPilotDefaults.defaultPort
 
-    @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)).")
-    var provider: String = ProxyPilotDefaults.defaultCLIProvider.rawValue
+    @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)). Omit to choose from configured provider keys.")
+    var provider: String?
 
     @Option(name: .long, help: "Override the upstream API base URL (e.g. http://localhost:11434/v1).")
     var upstreamUrl: String?
@@ -37,50 +37,21 @@ struct ServeCommand: AsyncParsableCommand {
     // MARK: - Foreground proxy mode
 
     private func startProxyMode() async throws {
-        guard let upstreamProvider = UpstreamProvider(rawValue: provider) else {
-            OutputFormatter.error(
-                command: "serve",
-                code: "E001",
-                message: "Unknown provider: \(provider)",
-                suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
-                json: json
-            )
-            throw ExitCode.failure
-        }
-
         let secrets = SecretsProviderFactory.make()
-        let secretKey = upstreamProvider.secretKey
-        let apiKey: String? = if let key {
-            key
-        } else if let secretKey {
-            ProcessInfo.processInfo.environment[secretKey]
-                ?? (try? secrets.get(key: secretKey))
-        } else {
-            nil
-        }
+        let resolvedCredential = try resolveProviderCredential(secrets: secrets)
+        let upstreamProvider = resolvedCredential.provider
 
-        // Warn if no API key and provider requires one
-        let effectiveBaseURL = upstreamUrl ?? upstreamProvider.defaultAPIBaseURL
-        if apiKey == nil && !upstreamProvider.isLocal && !isLocalhostURL(effectiveBaseURL) {
-            OutputFormatter.error(
-                command: "serve",
-                code: "E004",
-                message: "No API key found for provider \(upstreamProvider.rawValue).",
-                suggestion: "Run 'proxypilot auth set --provider \(upstreamProvider.rawValue)', pass --key, or set \(secretKey ?? "the provider env var").",
-                json: json
-            )
-            throw ExitCode.failure
-        }
-
-        let sessionStats = SessionStats(sessionReportURL: SessionReportStore.defaultURL, sessionSource: "cli")
-        await sessionStats.reset(clearReportStore: true)
+        let sessionID = UUID().uuidString
+        let sessionStats = SessionStats(sessionReportURL: SessionReportStore.defaultURL, sessionSource: "cli", sessionID: sessionID)
+        await sessionStats.reset(clearReportStore: false)
         let config = ProxyConfiguration(
             port: port,
             upstreamProvider: upstreamProvider,
             upstreamAPIBaseURL: upstreamUrl,
-            upstreamAPIKey: apiKey,
+            upstreamAPIKey: resolvedCredential.apiKey,
             sessionStats: sessionStats,
-            googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil
+            googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil,
+            inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "cli", sessionID: sessionID)
         )
 
         let server = NIOProxyServer()
@@ -107,7 +78,7 @@ struct ServeCommand: AsyncParsableCommand {
                 port: Int(actualPort),
                 provider: upstreamProvider.rawValue
             ),
-            humanMessage: "ProxyPilot serving on port \(actualPort) -> \(upstreamProvider.title)",
+            humanMessage: "ProxyPilot serving on port \(actualPort) -> \(upstreamProvider.title)\(resolvedCredential.selectedFromStoredCredentials ? " (selected from stored provider keys)" : "")",
             json: json
         )
 
@@ -125,6 +96,67 @@ struct ServeCommand: AsyncParsableCommand {
                 _exit(0)
             }
         }
+    }
+
+    private func resolveProviderCredential(secrets: any SecretsProvider) throws -> ResolvedProviderCredential {
+        let resolution = ProviderCredentialResolver.resolve(
+            rawProvider: provider,
+            explicitKey: key,
+            upstreamURL: upstreamUrl,
+            secrets: secrets
+        )
+
+        switch resolution {
+        case .resolved(let credential):
+            return credential
+        case .unknownProvider(let raw):
+            OutputFormatter.error(
+                command: "serve",
+                code: "E001",
+                message: "Unknown provider: \(raw)",
+                suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
+                json: json
+            )
+        case .missingAPIKey(let missingProvider, let secretKeyName):
+            OutputFormatter.error(
+                command: "serve",
+                code: "E004",
+                message: "No API key found for provider \(missingProvider.rawValue).",
+                suggestion: "Run 'proxypilot auth set --provider \(missingProvider.rawValue)', pass --key, or set \(secretKeyName ?? "the provider env var").",
+                json: json
+            )
+        case .selectionRequired(let prompt):
+            OutputFormatter.error(
+                command: "serve",
+                code: "E047",
+                message: prompt.availableProviders.isEmpty
+                    ? "No configured provider API keys were found."
+                    : "Choose which configured provider ProxyPilot should use.",
+                suggestion: prompt.humanList,
+                json: json,
+                nextActions: selectionNextActions(prompt: prompt)
+            )
+        }
+
+        throw ExitCode.failure
+    }
+
+    private func selectionNextActions(prompt: ProviderSelectionPrompt) -> [NextAction] {
+        var actions = prompt.availableProviders.map { choice in
+            NextAction(
+                id: "serve_with_\(choice.provider)",
+                kind: .cli,
+                command: "proxypilot serve --provider \(choice.provider)",
+                destructive: false
+            )
+        }
+        actions.append(NextAction(
+            id: "auth_set",
+            kind: .cli,
+            command: "proxypilot auth set --provider <provider>",
+            destructive: false
+        ))
+        return actions
     }
 
     // MARK: - MCP stdio mode

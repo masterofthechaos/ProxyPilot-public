@@ -14,7 +14,11 @@ SMOKE_PORT=$((15000 + RANDOM % 20000))
 MCP_SMOKE_PORT=$((35000 + RANDOM % 20000))
 DISCOVERY_SMOKE_PORT=$((35000 + RANDOM % 20000))
 PROXY_PID=""
+DISCOVERY_PROXY_PID=""
 AUTH_SECRETS_DIR=""
+SMOKE_CONFIG_HOME="$(mktemp -d)"
+export XDG_CONFIG_HOME="$SMOKE_CONFIG_HOME"
+PID_FILE="$XDG_CONFIG_HOME/proxypilot/proxypilot.pid"
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -62,21 +66,33 @@ cleanup() {
     if [[ -n "$PROXY_PID" ]]; then
         if kill -0 "$PROXY_PID" 2>/dev/null; then
             kill "$PROXY_PID" 2>/dev/null || true
+            sleep 0.2
+            if kill -0 "$PROXY_PID" 2>/dev/null; then
+                kill -9 "$PROXY_PID" 2>/dev/null || true
+            fi
             wait "$PROXY_PID" 2>/dev/null || true
+        fi
+    fi
+    if [[ -n "$DISCOVERY_PROXY_PID" ]]; then
+        if kill -0 "$DISCOVERY_PROXY_PID" 2>/dev/null; then
+            kill "$DISCOVERY_PROXY_PID" 2>/dev/null || true
         fi
     fi
     if [[ -n "$AUTH_SECRETS_DIR" && -d "$AUTH_SECRETS_DIR" ]]; then
         rm -rf "$AUTH_SECRETS_DIR"
     fi
+    if [[ -n "$SMOKE_CONFIG_HOME" && -d "$SMOKE_CONFIG_HOME" ]]; then
+        rm -rf "$SMOKE_CONFIG_HOME"
+    fi
     # Also clean up any stale PID file that might be left from a crashed run
-    rm -f "$HOME/.config/proxypilot/proxypilot.pid"
+    rm -f "$PID_FILE"
 }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
 # Ensure we start clean — remove any stale PID file from prior runs
 # ---------------------------------------------------------------------------
-rm -f "$HOME/.config/proxypilot/proxypilot.pid"
+rm -f "$PID_FILE"
 
 # Pick a free TCP port for this run.
 while lsof -iTCP:"$SMOKE_PORT" -sTCP:LISTEN >/dev/null 2>&1; do
@@ -203,14 +219,41 @@ fi
 # ===========================================================================
 run_test "Start proxy on port $SMOKE_PORT"
 
-"$BINARY" start --provider ollama --port "$SMOKE_PORT" --json &
-PROXY_PID=$!
+set +e
+START_JSON="$("$BINARY" start --provider ollama --port "$SMOKE_PORT" --model smoke-model --json --daemon 2>&1)"
+START_CODE=$?
+set -e
+START_CHECK="$(python3 - "$START_JSON" <<'PY'
+import sys, json
+try:
+    d = json.loads(sys.argv[1])
+    if d.get("ok") is True and d.get("data", {}).get("status") == "started":
+        print("PASS")
+    else:
+        print(f"FAIL:{d}")
+except Exception as e:
+    print(f"PARSE_ERROR:{e}")
+PY
+)"
+if [[ "$START_CODE" -eq 0 && "$START_CHECK" == "PASS" ]]; then
+    PROXY_PID="$(python3 - "$START_JSON" <<'PY'
+import sys, json
+try:
+    d = json.loads(sys.argv[1])
+    print(d.get("data", {}).get("pid", ""))
+except Exception:
+    print("")
+PY
+)"
+else
+    fail "Proxy daemon start" "code=$START_CODE check=$START_CHECK json=$START_JSON"
+fi
 
 # Wait up to 5 seconds for the PID file and port to appear
 STARTED=0
 for i in $(seq 1 10); do
     sleep 0.5
-    if [[ -f "$HOME/.config/proxypilot/proxypilot.pid" ]]; then
+    if [[ -f "$PID_FILE" ]]; then
         STARTED=1
         break
     fi
@@ -219,7 +262,7 @@ done
 if [[ "$STARTED" -eq 1 ]]; then
     pass "Proxy started (PID $PROXY_PID, PID file present)"
 else
-    fail "Proxy started within 5 seconds" "PID file never appeared at ~/.config/proxypilot/proxypilot.pid"
+    fail "Proxy started within 5 seconds" "PID file never appeared at $PID_FILE"
 fi
 
 # Give the server another half-second to bind fully
@@ -281,7 +324,7 @@ fi
 # ===========================================================================
 run_test "status --port $SMOKE_PORT --json discovers CLI process without PID file"
 
-rm -f "$HOME/.config/proxypilot/proxypilot.pid"
+rm -f "$PID_FILE"
 
 STATUS_UNMANAGED_JSON="$("$BINARY" status --port "$SMOKE_PORT" --json 2>&1)"
 UNMANAGED_STATUS="$(python3 - "$STATUS_UNMANAGED_JSON" <<'PY'
@@ -368,14 +411,30 @@ fi
 # ===========================================================================
 # TEST 11 — Stop the proxy
 # ===========================================================================
-run_test "Stop the proxy (kill background process)"
+run_test "Stop the proxy through proxypilot stop"
 
 if [[ -n "$PROXY_PID" ]]; then
-    kill "$PROXY_PID" 2>/dev/null || true
-    wait "$PROXY_PID" 2>/dev/null || true
-    PROXY_PID=""  # mark as handled so cleanup doesn't double-kill
-    sleep 0.5
-    pass "kill signal sent to proxy process"
+    STOP_JSON="$("$BINARY" stop --port "$SMOKE_PORT" --json 2>&1)"
+    STOP_CHECK="$(python3 - "$STOP_JSON" <<'PY'
+import sys, json
+try:
+    d = json.loads(sys.argv[1])
+    status = d.get("data", {}).get("status")
+    if d.get("ok") is True and status in ("stopped", "killed", "stopped_discovered"):
+        print("PASS")
+    else:
+        print(f"FAIL:{d}")
+except Exception as e:
+    print(f"PARSE_ERROR:{e}")
+PY
+)"
+    if [[ "$STOP_CHECK" == "PASS" ]]; then
+        PROXY_PID=""  # mark as handled so cleanup doesn't double-kill
+        sleep 0.5
+        pass "proxypilot stop stopped the proxy: $STOP_JSON"
+    else
+        fail "Stop proxy" "$STOP_CHECK :: $STOP_JSON"
+    fi
 else
     fail "Stop proxy" "PROXY_PID was empty — proxy may have already exited"
 fi
@@ -426,12 +485,22 @@ except Exception as e:
 PY
 )"
 if [[ "$DISCOVERY_START_CHECK" == "PASS" ]]; then
+    DISCOVERY_PROXY_PID="$(python3 - "$DISCOVERY_START_JSON" <<'PY'
+import json
+import sys
+try:
+    d = json.loads(sys.argv[1])
+    print(d.get("data", {}).get("pid", ""))
+except Exception:
+    print("")
+PY
+)"
     pass "daemon start for discovery smoke succeeds"
 else
     fail "daemon start for discovery smoke" "$DISCOVERY_START_CHECK :: $DISCOVERY_START_JSON"
 fi
 
-rm -f "$HOME/.config/proxypilot/proxypilot.pid"
+rm -f "$PID_FILE"
 sleep 0.5
 
 DISCOVERY_STATUS_JSON="$("$BINARY" status --port "$DISCOVERY_SMOKE_PORT" --json 2>&1)"
@@ -471,6 +540,7 @@ except Exception as e:
 PY
 )"
 if [[ "$DISCOVERY_STOP_CHECK" == "PASS" ]]; then
+    DISCOVERY_PROXY_PID=""
     pass "stop --port stops discovered CLI process"
 else
     fail "stop --port stops discovered CLI process" "$DISCOVERY_STOP_CHECK :: $DISCOVERY_STOP_JSON"
