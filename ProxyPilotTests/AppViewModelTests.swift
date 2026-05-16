@@ -7,6 +7,12 @@ final class AppViewModelTests: XCTestCase {
     private var defaults: UserDefaults!
     private var suiteName: String!
 
+    private var analyticsPromptAvailableInTestHost: Bool {
+        let isAlpha = AppBuildBadge.isAlphaBundle(Bundle.main.bundleIdentifier)
+        let apiKey = Bundle.main.object(forInfoDictionaryKey: "POSTHOG_API_KEY") as? String
+        return !isAlpha && !(apiKey?.isEmpty ?? true)
+    }
+
     override func setUp() {
         super.setUp()
         suiteName = "AppViewModelTests.\(UUID().uuidString)"
@@ -64,6 +70,74 @@ final class AppViewModelTests: XCTestCase {
         let relaunched = AppViewModel(defaults: defaults)
 
         XCTAssertFalse(relaunched.liquidGlassEnabled)
+    }
+
+    func testInputOutputLoggingDefaultsOffWithDefaultRetention() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertFalse(vm.inputOutputLoggingEnabled)
+        XCTAssertFalse(vm.inputOutputLoggingRecordInputs)
+        XCTAssertFalse(vm.inputOutputLoggingRecordOutputs)
+        XCTAssertFalse(vm.inputOutputLoggingCLIEnabled)
+        XCTAssertEqual(vm.inputOutputLoggingRetention, .twentyFourHoursDefault)
+        XCTAssertFalse(vm.inputOutputLoggingExternalStorageEnabled)
+    }
+
+    func testInputOutputLoggingPreferencesPersistAcrossRelaunch() {
+        var vm: AppViewModel? = AppViewModel(defaults: defaults)
+        vm?.confirmInputOutputLoggingEnabled()
+        vm?.setInputOutputRecordInputs(false)
+        vm?.inputOutputLoggingCLIEnabled = true
+        vm?.inputOutputLoggingRetention = .sixHours
+        vm?.inputOutputLoggingExternalStorageEnabled = true
+        vm = nil
+
+        let relaunched = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(relaunched.inputOutputLoggingEnabled)
+        XCTAssertFalse(relaunched.inputOutputLoggingRecordInputs)
+        XCTAssertTrue(relaunched.inputOutputLoggingRecordOutputs)
+        XCTAssertTrue(relaunched.inputOutputLoggingCLIEnabled)
+        XCTAssertEqual(relaunched.inputOutputLoggingRetention, .sixHours)
+        XCTAssertFalse(relaunched.inputOutputLoggingExternalStorageEnabled)
+    }
+
+    func testInputOutputLoggingWritesSharedCorePreferencesWhenStoreProvided() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = InputOutputLoggingPreferencesStore(
+            url: directory.appendingPathComponent("settings.json")
+        )
+        let vm = AppViewModel(
+            defaults: defaults,
+            inputOutputLoggingPreferencesStore: store
+        )
+
+        vm.confirmInputOutputLoggingEnabled()
+        vm.inputOutputLoggingCLIEnabled = true
+        vm.inputOutputLoggingRetention = .sixHours
+
+        let preferences = try store.load()
+        XCTAssertTrue(preferences.enabled)
+        XCTAssertTrue(preferences.recordInputs)
+        XCTAssertTrue(preferences.recordOutputs)
+        XCTAssertTrue(preferences.cliEnabled)
+        XCTAssertEqual(preferences.retention, .sixHours)
+    }
+
+    func testInputOutputLoggingDisablesWhenInputsAndOutputsAreOff() {
+        let vm = AppViewModel(defaults: defaults)
+
+        vm.confirmInputOutputLoggingEnabled()
+        vm.setInputOutputRecordInputs(false)
+        vm.setInputOutputRecordOutputs(false)
+
+        XCTAssertFalse(vm.inputOutputLoggingEnabled)
+        XCTAssertFalse(vm.inputOutputLoggingCLIEnabled)
+        XCTAssertFalse(vm.inputOutputLoggingExternalStorageEnabled)
     }
 
     func testCustomizationDefaultsPreserveCurrentExperience() {
@@ -665,7 +739,7 @@ final class AppViewModelTests: XCTestCase {
         let vm = AppViewModel(defaults: defaults)
         XCTAssertFalse(vm.showOnboardingWizard)
         vm.maybeShowAnalyticsPrompt()
-        XCTAssertTrue(vm.showAnalyticsPrompt)
+        XCTAssertEqual(vm.showAnalyticsPrompt, analyticsPromptAvailableInTestHost)
     }
 
     func testAnalyticsPromptDoesNotRepeatForSameVersion() {
@@ -704,7 +778,7 @@ final class AppViewModelTests: XCTestCase {
         let relaunched = AppViewModel(defaults: defaults)
         XCTAssertFalse(relaunched.showOnboardingWizard)
         relaunched.maybeShowAnalyticsPrompt()
-        XCTAssertTrue(relaunched.showAnalyticsPrompt)
+        XCTAssertEqual(relaunched.showAnalyticsPrompt, analyticsPromptAvailableInTestHost)
     }
 
     func testAnalyticsPromptOptInSetsFlag() {
@@ -808,6 +882,105 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(capturedEvents.count, 1)
         XCTAssertEqual(capturedEvents[0].name, "app_opened")
         XCTAssertEqual(capturedEvents[0].properties["is_micah"], "true")
+    }
+
+    func testPreflightFailureTelemetryPayloadIncludesActionableContextOnly() {
+        let checks = [
+            PreflightCheckResult(
+                id: "upstream_key",
+                title: "Upstream API Key",
+                detail: "Missing upstream API key in Keychain.",
+                status: .fail,
+                fixAction: .openUpstreamKeyEditor
+            ),
+            PreflightCheckResult(
+                id: "port_available",
+                title: "Proxy Port Availability",
+                detail: "Port 4000 is already in use.",
+                status: .fail,
+                fixAction: .usePort4001
+            ),
+            PreflightCheckResult(
+                id: "local_provider_reachability",
+                title: "Ollama Server Reachability",
+                detail: "Ollama is not listening.",
+                status: .warning,
+                fixAction: .none
+            )
+        ]
+
+        let payload = AppViewModel.telemetryPayloadForPreflightFailure(
+            checks: checks,
+            useBuiltInProxy: true,
+            requireLocalAuth: false,
+            upstreamProvider: .zAI
+        )
+
+        XCTAssertEqual(payload["failure_count"], "2")
+        XCTAssertEqual(payload["warning_count"], "1")
+        XCTAssertEqual(payload["failure_ids"], "port_available,upstream_key")
+        XCTAssertEqual(payload["warning_ids"], "local_provider_reachability")
+        XCTAssertEqual(payload["fix_actions"], "openUpstreamKeyEditor,usePort4001")
+        XCTAssertEqual(payload["mode"], "builtin")
+        XCTAssertEqual(payload["provider_class"], "cloud")
+        XCTAssertEqual(payload["local_auth_required"], "false")
+        XCTAssertEqual(payload["upstream_key_required"], "true")
+        XCTAssertNil(payload["proxy_url"])
+        XCTAssertNil(payload["upstream_url"])
+        XCTAssertNil(payload["provider"])
+        XCTAssertNil(payload["model"])
+        XCTAssertNil(payload["prompt"])
+        XCTAssertNil(payload["output"])
+        XCTAssertNil(payload["system_info"])
+    }
+
+    func testProxyStartFailureTelemetryPayloadIncludesIssueAndPreflightCodesOnly() {
+        let issue = AppIssue(
+            code: .generic,
+            title: "Failed to Start Proxy",
+            message: "The local proxy could not start.",
+            actions: [.retryStart, .runPreflight, .exportDiagnostics]
+        )
+        let checks = [
+            PreflightCheckResult(
+                id: "upstream_base",
+                title: "Upstream API Base URL",
+                detail: "Invalid upstream base URL.",
+                status: .fail,
+                fixAction: .resetUpstreamURL
+            ),
+            PreflightCheckResult(
+                id: "master_key",
+                title: "Local Proxy Password",
+                detail: "Optional in built-in mode when local auth is disabled.",
+                status: .info,
+                fixAction: .none
+            )
+        ]
+
+        let payload = AppViewModel.telemetryPayloadForProxyStartFailure(
+            issue: issue,
+            useBuiltInProxy: false,
+            preflightResults: checks
+        )
+
+        XCTAssertEqual(payload["code"], "E999")
+        XCTAssertEqual(payload["mode"], "litellm")
+        XCTAssertEqual(payload["issue_actions"], "exportDiagnostics,retryStart,runPreflight")
+        XCTAssertEqual(payload["preflight_failure_count"], "1")
+        XCTAssertEqual(payload["preflight_failure_ids"], "upstream_base")
+        XCTAssertNil(payload["issue_title"])
+        XCTAssertNil(payload["issue_message"])
+        XCTAssertNil(payload["upstream_url"])
+        XCTAssertNil(payload["proxy_url"])
+        XCTAssertNil(payload["prompt"])
+        XCTAssertNil(payload["output"])
+        XCTAssertNil(payload["system_info"])
+    }
+
+    func testAlphaBuildDoesNotBundlePostHogAPIKey() {
+        let apiKey = Bundle.main.object(forInfoDictionaryKey: "POSTHOG_API_KEY") as? String
+        XCTAssertTrue(apiKey?.isEmpty ?? true)
     }
 
     // MARK: - Custom Providers (v1.4.18)
@@ -1313,6 +1486,74 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(csv.contains("model-a"))
         XCTAssertTrue(csv.contains("/v1/chat/completions"))
         XCTAssertTrue(csv.contains("0.000300"))
+    }
+
+    func testBuildBadgeIsHiddenForStableBundle() {
+        XCTAssertNil(AppBuildBadge.descriptor(bundleIdentifier: "com.example.ProxyPilot"))
+    }
+
+    func testAlphaBuildBadgeUsesAlphaPinkCopy() {
+        let descriptor = AppBuildBadge.descriptor(bundleIdentifier: "com.example.ProxyPilot-alpha")
+
+        XCTAssertEqual(descriptor?.text, "Alpha")
+        XCTAssertEqual(descriptor?.tintName, "pink")
+    }
+
+    func testAlphaBuildDisplayNameNamesAlphaBuild() {
+        XCTAssertEqual(
+            AppBuildBadge.appDisplayName(bundleIdentifier: "com.example.ProxyPilot-alpha"),
+            "ProxyPilot Alpha"
+        )
+        XCTAssertEqual(
+            AppBuildBadge.appDisplayName(bundleIdentifier: "com.example.ProxyPilot"),
+            "ProxyPilot"
+        )
+    }
+
+    func testAppBuildBadgeIsAlphaBundleRecognizesSuffix() {
+        XCTAssertTrue(AppBuildBadge.isAlphaBundle("com.example.ProxyPilot-alpha"))
+        XCTAssertTrue(AppBuildBadge.isAlphaBundle("com.acme.cool.ProxyPilot-alpha"))
+        XCTAssertFalse(AppBuildBadge.isAlphaBundle("com.example.ProxyPilot"))
+        XCTAssertFalse(AppBuildBadge.isAlphaBundle("com.example.ProxyPilot-alpha-extra"))
+        XCTAssertFalse(AppBuildBadge.isAlphaBundle(nil))
+    }
+
+    func testSparkleChannelsStayStableByDefault() {
+        XCTAssertEqual(SoftwareUpdateChannelPolicy.allowedChannels(alphaUpdatesEnabled: false, isAlphaBuild: false), [])
+    }
+
+    func testSparkleChannelsIncludeAlphaWhenOptedInOrAlreadyAlpha() {
+        XCTAssertEqual(SoftwareUpdateChannelPolicy.allowedChannels(alphaUpdatesEnabled: true, isAlphaBuild: false), ["alpha"])
+        XCTAssertEqual(SoftwareUpdateChannelPolicy.allowedChannels(alphaUpdatesEnabled: false, isAlphaBuild: true), ["alpha"])
+    }
+
+    func testAlphaRequiredFailureEventsBypassOptionalAnalytics() {
+        XCTAssertFalse(TelemetryService.shouldSendRemoteEvent(
+            name: "proxy_started",
+            telemetryOptIn: false,
+            isAlphaBuild: true
+        ))
+        XCTAssertTrue(TelemetryService.shouldSendRemoteEvent(
+            name: "proxy_start_failed",
+            telemetryOptIn: false,
+            isAlphaBuild: true
+        ))
+    }
+
+    func testGitHubBugReportURLPrefillsIssueContext() throws {
+        let url = try XCTUnwrap(AppViewModel.gitHubBugReportURL(
+            appVersion: "1.7.27",
+            buildNumber: "98",
+            statusText: "Proxy Stopped",
+            activeIssueCode: "E003"
+        ))
+        let text = url.absoluteString.removingPercentEncoding ?? url.absoluteString
+
+        XCTAssertTrue(text.hasPrefix("https://github.com/masterofthechaos/ProxyPilot-public/issues/new?"))
+        XCTAssertTrue(text.contains("ProxyPilot bug report"))
+        XCTAssertTrue(text.contains("App version: 1.7.27 (98)"))
+        XCTAssertTrue(text.contains("Proxy status: Proxy Stopped"))
+        XCTAssertTrue(text.contains("Issue code: E003"))
     }
 
     private func makeProviderManager() -> ProviderManager {

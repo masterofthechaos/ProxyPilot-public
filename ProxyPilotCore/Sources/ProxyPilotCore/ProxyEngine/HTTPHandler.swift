@@ -190,7 +190,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 allowedModels: config.allowedModels,
                 requiresAuth: config.requiresAuth,
                 preferredAnthropicUpstreamModel: config.preferredAnthropicUpstreamModel,
-                sessionStats: config.sessionStats
+                sessionStats: config.sessionStats,
+                inputOutputLogger: config.inputOutputLogger
             )
 
             if isStreaming {
@@ -198,6 +199,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     ctxBox: ctxBox,
                     eventLoop: eventLoop,
                     headers: headers,
+                    originalBody: bodyData,
                     body: passthroughBody,
                     config: passthroughConfig
                 )
@@ -206,6 +208,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     ctxBox: ctxBox,
                     eventLoop: eventLoop,
                     headers: headers,
+                    originalBody: bodyData,
                     body: passthroughBody,
                     config: passthroughConfig
                 )
@@ -246,6 +249,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 ctxBox: ctxBox,
                 eventLoop: eventLoop,
                 headers: headers,
+                originalBody: bodyData,
                 body: openAIBody,
                 originalModel: originalModel,
                 translationContext: translationContext,
@@ -256,6 +260,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 ctxBox: ctxBox,
                 eventLoop: eventLoop,
                 headers: headers,
+                originalBody: bodyData,
                 body: openAIBody,
                 originalModel: originalModel,
                 translationContext: translationContext,
@@ -270,6 +275,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         ctxBox: UnsafeSendableBox<ChannelHandlerContext>,
         eventLoop: EventLoop,
         headers: [(String, String)],
+        originalBody: Data,
         body: Data,
         config: ProxyConfiguration
     ) {
@@ -309,6 +315,16 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         config: config
                     )
                 }
+                await recordInputOutputLog(
+                    model: modelFromResponse(validated.data) ?? requestModel,
+                    path: "/v1/messages",
+                    wasStreaming: false,
+                    statusCode: validated.statusCode,
+                    startedAt: requestStart,
+                    inputBody: originalBody,
+                    outputBody: validated.data,
+                    config: config
+                )
 
                 let httpStatus: HTTPResponseStatus = .init(statusCode: validated.statusCode)
                 eventLoop.execute {
@@ -338,6 +354,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         ctxBox: UnsafeSendableBox<ChannelHandlerContext>,
         eventLoop: EventLoop,
         headers: [(String, String)],
+        originalBody: Data,
         body: Data,
         config: ProxyConfiguration
     ) {
@@ -347,6 +364,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             var lastSeenModel = HTTPRequestParser.extractModel(from: body) ?? config.preferredAnthropicUpstreamModel
             var lastSeenPromptTokens = 0
             var lastSeenCompletionTokens = 0
+            var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             do {
                 let stream = UpstreamClient.forwardStreaming(
@@ -375,6 +393,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     )
 
                     let lineData = Data((validatedLine + "\n").utf8)
+                    outputCapture.append(lineData)
 
                     if !streamStarted {
                         streamStarted = true
@@ -406,6 +425,17 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         startedAt: requestStart,
                         promptTokens: lastSeenPromptTokens,
                         completionTokens: lastSeenCompletionTokens,
+                        config: config
+                    )
+                    await recordInputOutputLog(
+                        model: lastSeenModel,
+                        path: "/v1/messages",
+                        wasStreaming: true,
+                        statusCode: 200,
+                        startedAt: requestStart,
+                        inputBody: originalBody,
+                        outputBody: outputCapture.capturedOutput,
+                        outputTruncated: outputCapture.isTruncated,
                         config: config
                     )
                 }
@@ -447,6 +477,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         ctxBox: UnsafeSendableBox<ChannelHandlerContext>,
         eventLoop: EventLoop,
         headers: [(String, String)],
+        originalBody: Data,
         body: Data,
         originalModel: String,
         translationContext: AnthropicTranslator.TranslationContext,
@@ -507,6 +538,16 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     responseData: responseJSON,
                     config: config
                 )
+                await recordInputOutputLog(
+                    model: originalModel,
+                    path: "/v1/messages",
+                    wasStreaming: false,
+                    statusCode: 200,
+                    startedAt: requestStart,
+                    inputBody: originalBody,
+                    outputBody: responseJSON,
+                    config: config
+                )
 
                 eventLoop.execute {
                     self.sendJSONResponse(context: ctxBox.value, status: .ok, json: responseString)
@@ -535,6 +576,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         ctxBox: UnsafeSendableBox<ChannelHandlerContext>,
         eventLoop: EventLoop,
         headers: [(String, String)],
+        originalBody: Data,
         body: Data,
         originalModel: String,
         translationContext: AnthropicTranslator.TranslationContext,
@@ -548,6 +590,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 requestID: UUID().uuidString,
                 messageID: messageID
             )
+            var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             do {
                 let stream = UpstreamClient.forwardStreaming(
@@ -605,6 +648,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
                     for event in anthropicEvents {
                         let eventCopy = event
+                        outputCapture.append(Data(eventCopy.utf8))
                         eventLoop.execute {
                             var buffer = ctxBox.value.channel.allocator.buffer(capacity: eventCopy.utf8.count)
                             buffer.writeString(eventCopy)
@@ -639,12 +683,27 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
                     for event in finishEvents {
                         let eventCopy = event
+                        outputCapture.append(Data(eventCopy.utf8))
                         eventLoop.execute {
                             var buffer = ctxBox.value.channel.allocator.buffer(capacity: eventCopy.utf8.count)
                             buffer.writeString(eventCopy)
                             ctxBox.value.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
                             ctxBox.value.flush()
                         }
+                    }
+
+                    if didStart {
+                        await recordInputOutputLog(
+                            model: originalModel,
+                            path: "/v1/messages",
+                            wasStreaming: true,
+                            statusCode: 200,
+                            startedAt: requestStart,
+                            inputBody: originalBody,
+                            outputBody: outputCapture.capturedOutput,
+                            outputTruncated: outputCapture.isTruncated,
+                            config: config
+                        )
                     }
 
                     eventLoop.execute {
@@ -717,6 +776,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 path: path,
                 method: String(describing: head.method),
                 headers: headers,
+                originalBody: bodyData,
                 body: sanitizedBody,
                 requestModel: requestModel,
                 config: config
@@ -728,6 +788,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 path: path,
                 method: String(describing: head.method),
                 headers: headers,
+                originalBody: bodyData,
                 body: sanitizedBody,
                 requestModel: requestModel,
                 config: config
@@ -741,6 +802,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         path: String,
         method: String,
         headers: [(String, String)],
+        originalBody: Data,
         body: Data,
         requestModel: String?,
         config: ProxyConfiguration
@@ -771,6 +833,16 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         config: config
                     )
                 }
+                await recordInputOutputLog(
+                    model: modelFromResponse(normalized.data) ?? requestModel,
+                    path: path,
+                    wasStreaming: false,
+                    statusCode: normalized.statusCode,
+                    startedAt: requestStart,
+                    inputBody: originalBody,
+                    outputBody: normalized.data,
+                    config: config
+                )
 
                 eventLoop.execute {
                     self.sendUpstreamResponse(
@@ -801,6 +873,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         path: String,
         method: String,
         headers: [(String, String)],
+        originalBody: Data,
         body: Data,
         requestModel: String?,
         config: ProxyConfiguration
@@ -811,6 +884,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             var lastSeenPromptTokens = 0
             var lastSeenCompletionTokens = 0
             var lastSeenModel = requestModel ?? config.preferredAnthropicUpstreamModel
+            var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             do {
                 let stream = UpstreamClient.forwardStreaming(
@@ -834,6 +908,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         provider: config.upstreamProvider
                     )
                     let chunkData = Data((normalizedLine + "\n").utf8)
+                    outputCapture.append(chunkData)
 
                     if !streamStarted {
                         streamStarted = true
@@ -871,6 +946,17 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         startedAt: requestStart,
                         promptTokens: lastSeenPromptTokens,
                         completionTokens: lastSeenCompletionTokens,
+                        config: config
+                    )
+                    await recordInputOutputLog(
+                        model: lastSeenModel,
+                        path: path,
+                        wasStreaming: true,
+                        statusCode: 200,
+                        startedAt: requestStart,
+                        inputBody: originalBody,
+                        outputBody: outputCapture.capturedOutput,
+                        outputTruncated: outputCapture.isTruncated,
                         config: config
                     )
                 }
@@ -1029,6 +1115,32 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             path: path,
             wasStreaming: wasStreaming
         ))
+    }
+
+    private func recordInputOutputLog(
+        model: String?,
+        path: String,
+        wasStreaming: Bool,
+        statusCode: Int?,
+        startedAt: Date,
+        inputBody: Data?,
+        outputBody: Data?,
+        outputTruncated: Bool = false,
+        config: ProxyConfiguration
+    ) async {
+        guard let logger = config.inputOutputLogger else { return }
+
+        try? await logger.record(
+            path: path,
+            model: model,
+            provider: config.upstreamProvider.rawValue,
+            wasStreaming: wasStreaming,
+            statusCode: statusCode,
+            startedAt: startedAt,
+            inputBody: inputBody,
+            outputBody: outputBody,
+            outputTruncated: outputTruncated
+        )
     }
 
     private func modelFromResponse(_ data: Data) -> String? {

@@ -42,6 +42,7 @@ final class LocalProxyServer: @unchecked Sendable {
     struct Config: Sendable {
         let host: String
         let port: UInt16
+        let sessionID: String
         let masterKey: String
         let upstreamProvider: UpstreamProvider
         let upstreamAPIBase: URL
@@ -52,11 +53,48 @@ final class LocalProxyServer: @unchecked Sendable {
         let miniMaxRoutingMode: MiniMaxRoutingMode
         let preferredAnthropicUpstreamModel: String
         let googleThoughtSignatureStore: GoogleThoughtSignatureStore?
+        let inputOutputLogger: InputOutputLoggingRecorder?
+
+        init(
+            host: String,
+            port: UInt16,
+            sessionID: String = UUID().uuidString,
+            masterKey: String,
+            upstreamProvider: UpstreamProvider,
+            upstreamAPIBase: URL,
+            upstreamAPIKey: String?,
+            allowedModels: Set<String>,
+            requiresAuth: Bool,
+            anthropicTranslatorMode: AnthropicTranslatorMode,
+            miniMaxRoutingMode: MiniMaxRoutingMode,
+            preferredAnthropicUpstreamModel: String,
+            googleThoughtSignatureStore: GoogleThoughtSignatureStore?,
+            inputOutputLogger: InputOutputLoggingRecorder? = nil
+        ) {
+            self.host = host
+            self.port = port
+            self.sessionID = sessionID
+            self.masterKey = masterKey
+            self.upstreamProvider = upstreamProvider
+            self.upstreamAPIBase = upstreamAPIBase
+            self.upstreamAPIKey = upstreamAPIKey
+            self.allowedModels = allowedModels
+            self.requiresAuth = requiresAuth
+            self.anthropicTranslatorMode = anthropicTranslatorMode
+            self.miniMaxRoutingMode = miniMaxRoutingMode
+            self.preferredAnthropicUpstreamModel = preferredAnthropicUpstreamModel
+            self.googleThoughtSignatureStore = googleThoughtSignatureStore
+            self.inputOutputLogger = inputOutputLogger
+        }
 
         var isLocalhostUpstream: Bool {
             let host = upstreamAPIBase.host ?? ""
             let lowered = host.lowercased()
             return lowered == "localhost" || lowered == "127.0.0.1" || lowered == "::1"
+        }
+
+        var requiresUpstreamAPIKey: Bool {
+            upstreamProvider.requiresAPIKey && !isLocalhostUpstream
         }
 
         var upstreamAPIBaseURL: String {
@@ -84,11 +122,13 @@ final class LocalProxyServer: @unchecked Sendable {
     private let connectionCountLock = NSLock()
     private var activeConnectionCount: Int = 0
     private var releasedConnectionIDs: Set<String> = []
+    private var sessionID = UUID().uuidString
 
     private typealias AnthropicStreamingState = AnthropicTranslator.StreamingState
 
     func start(config: Config) throws {
         if listener != nil { throw ServerError.alreadyRunning }
+        sessionID = config.sessionID
         Task { @MainActor in
             state.sessionRequestCount = 0
             state.lastModelSeen = ""
@@ -437,7 +477,7 @@ final class LocalProxyServer: @unchecked Sendable {
     private func handleChatCompletions(body: Data, connection: NWConnection, config: Config) async {
         let requestStartTime = Date()
         let requestModel = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["model"] as? String ?? ""
-        if !config.isLocalhostUpstream {
+        if config.requiresUpstreamAPIKey {
             guard let upstreamKey = config.upstreamAPIKey, !upstreamKey.isEmpty else {
                 respond(
                     connection: connection,
@@ -484,6 +524,16 @@ final class LocalProxyServer: @unchecked Sendable {
             )
             let text = String(decoding: normalized.data, as: UTF8.self)
             respond(connection: connection, status: normalized.statusCode, body: text, contentType: "application/json")
+            await recordInputOutputLog(
+                inputBody: body,
+                outputBody: normalized.data,
+                model: modelFromResponse(normalized.data) ?? requestModel,
+                path: "/v1/chat/completions",
+                wasStreaming: false,
+                statusCode: normalized.statusCode,
+                startedAt: requestStartTime,
+                config: config
+            )
 
             if normalized.statusCode == 200,
                let json = try? JSONSerialization.jsonObject(with: normalized.data) as? [String: Any],
@@ -501,7 +551,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     path: "/v1/chat/completions",
                     wasStreaming: false
                 )
-                Task { @MainActor [weak self] in self?.reportCard.record(record) }
+                recordSessionReport(record)
             }
         } catch {
             respond(
@@ -518,7 +568,7 @@ final class LocalProxyServer: @unchecked Sendable {
     private func handleStreamingChatCompletions(body: Data, connection: NWConnection, config: Config) async {
         let requestStartTime = Date()
         let requestModel = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["model"] as? String ?? ""
-        if !config.isLocalhostUpstream {
+        if config.requiresUpstreamAPIKey {
             guard let upstreamKey = config.upstreamAPIKey, !upstreamKey.isEmpty else {
                 respond(
                     connection: connection,
@@ -581,6 +631,7 @@ final class LocalProxyServer: @unchecked Sendable {
             var lastSeenPromptTokens = 0
             var lastSeenCompletionTokens = 0
             var lastSeenModel = requestModel
+            var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             for try await line in bytes.lines {
                 let normalizedLine = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
@@ -588,6 +639,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     provider: config.upstreamProvider
                 )
                 let sseData = Data((normalizedLine + "\n").utf8)
+                outputCapture.append(sseData)
                 await sendData(sseData, on: connection)
 
                 // Extract usage from SSE chunks (best-effort, provider-dependent)
@@ -620,7 +672,18 @@ final class LocalProxyServer: @unchecked Sendable {
                         path: "/v1/chat/completions",
                         wasStreaming: true
                     )
-                    Task { @MainActor [weak self] in self?.reportCard.record(record) }
+                    recordSessionReport(record)
+                    await recordInputOutputLog(
+                        inputBody: body,
+                        outputBody: outputCapture.capturedOutput,
+                        outputTruncated: outputCapture.isTruncated,
+                        model: lastSeenModel,
+                        path: "/v1/chat/completions",
+                        wasStreaming: true,
+                        statusCode: 200,
+                        startedAt: requestStartTime,
+                        config: config
+                    )
                     connection.cancel()
                     return
                 }
@@ -636,7 +699,18 @@ final class LocalProxyServer: @unchecked Sendable {
                 path: "/v1/chat/completions",
                 wasStreaming: true
             )
-            Task { @MainActor [weak self] in self?.reportCard.record(record) }
+            recordSessionReport(record)
+            await recordInputOutputLog(
+                inputBody: body,
+                outputBody: outputCapture.capturedOutput,
+                outputTruncated: outputCapture.isTruncated,
+                model: lastSeenModel,
+                path: "/v1/chat/completions",
+                wasStreaming: true,
+                statusCode: 200,
+                startedAt: requestStartTime,
+                config: config
+            )
             connection.cancel()
         } catch {
             respond(
@@ -653,7 +727,7 @@ final class LocalProxyServer: @unchecked Sendable {
     private func handleAnthropicMessages(body: Data, headers: [String: String], connection: NWConnection, config: Config) async {
         let requestID = "req_\(UUID().uuidString.prefix(12).lowercased())"
 
-        if !config.isLocalhostUpstream {
+        if config.requiresUpstreamAPIKey {
             guard let upstreamKey = config.upstreamAPIKey, !upstreamKey.isEmpty else {
                 respond(
                     connection: connection,
@@ -724,7 +798,9 @@ final class LocalProxyServer: @unchecked Sendable {
                     reportModel: upstreamModel,
                     requestID: requestID,
                     connection: connection,
-                    provider: config.upstreamProvider
+                    provider: config.upstreamProvider,
+                    inputBody: body,
+                    config: config
                 )
             } else {
                 await handleAnthropicPassthroughBuffered(
@@ -733,7 +809,9 @@ final class LocalProxyServer: @unchecked Sendable {
                     reportModel: upstreamModel,
                     requestID: requestID,
                     connection: connection,
-                    provider: config.upstreamProvider
+                    provider: config.upstreamProvider,
+                    inputBody: body,
+                    config: config
                 )
             }
             return
@@ -785,7 +863,9 @@ final class LocalProxyServer: @unchecked Sendable {
                     requestID: requestID,
                     translationContext: translationContext,
                     mode: config.anthropicTranslatorMode,
-                    connection: connection
+                    connection: connection,
+                    inputBody: body,
+                    config: config
                 )
             case .legacyFallback:
                 await handleAnthropicStreamingLegacy(
@@ -794,7 +874,9 @@ final class LocalProxyServer: @unchecked Sendable {
                     reportModel: upstreamModel,
                     requestID: requestID,
                     mode: config.anthropicTranslatorMode,
-                    connection: connection
+                    connection: connection,
+                    inputBody: body,
+                    config: config
                 )
             }
         } else {
@@ -806,7 +888,9 @@ final class LocalProxyServer: @unchecked Sendable {
                 requestID: requestID,
                 translationContext: translationContext,
                 mode: config.anthropicTranslatorMode,
-                connection: connection
+                connection: connection,
+                inputBody: body,
+                config: config
             )
         }
     }
@@ -818,7 +902,9 @@ final class LocalProxyServer: @unchecked Sendable {
         requestID: String,
         translationContext: AnthropicTranslator.TranslationContext,
         mode: AnthropicTranslatorMode,
-        connection: NWConnection
+        connection: NWConnection,
+        inputBody: Data,
+        config: Config
     ) async {
         let requestStartTime = Date()
         do {
@@ -865,7 +951,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     path: "/v1/messages",
                     wasStreaming: false
                 )
-                Task { @MainActor [weak self] in self?.reportCard.record(record) }
+                recordSessionReport(record)
             }
 
             let anthropicResponse = AnthropicTranslator.responseFromOpenAI(
@@ -877,6 +963,16 @@ final class LocalProxyServer: @unchecked Sendable {
             if let jsonData = try? JSONSerialization.data(withJSONObject: anthropicResponse),
                let jsonText = String(data: jsonData, encoding: .utf8) {
                 respond(connection: connection, status: 200, body: jsonText, contentType: "application/json")
+                await recordInputOutputLog(
+                    inputBody: inputBody,
+                    outputBody: jsonData,
+                    model: reportModel,
+                    path: "/v1/messages",
+                    wasStreaming: false,
+                    statusCode: 200,
+                    startedAt: requestStartTime,
+                    config: config
+                )
                 recordXcodeAgentRequest(model: reportModel, status: 200)
             } else {
                 respond(
@@ -904,7 +1000,9 @@ final class LocalProxyServer: @unchecked Sendable {
         reportModel: String,
         requestID: String,
         mode: AnthropicTranslatorMode,
-        connection: NWConnection
+        connection: NWConnection,
+        inputBody: Data,
+        config: Config
     ) async {
         let requestStartTime = Date()
         do {
@@ -931,6 +1029,7 @@ final class LocalProxyServer: @unchecked Sendable {
             var chunkIndex = 0
             var lastSeenPromptTokens = 0
             var lastSeenCompletionTokens = 0
+            var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             for try await line in bytes.lines {
                 guard line.hasPrefix("data: ") else { continue }
@@ -939,7 +1038,9 @@ final class LocalProxyServer: @unchecked Sendable {
                 if payload == "[DONE]" {
                     let events = AnthropicTranslator.streamingDoneEvents(messageId: msgID, model: model)
                     for event in events {
-                        await sendData(Data(event.utf8), on: connection)
+                        let eventData = Data(event.utf8)
+                        outputCapture.append(eventData)
+                        await sendData(eventData, on: connection)
                     }
                     logAnthropicStreamingEvent("AN_SSE request_id=\(requestID) mode=\(mode.rawValue) finish=done stop_reason=end_turn")
                     let record = SessionReportCard.RequestRecord(
@@ -948,7 +1049,18 @@ final class LocalProxyServer: @unchecked Sendable {
                         durationSeconds: Date().timeIntervalSince(requestStartTime),
                         path: "/v1/messages", wasStreaming: true
                     )
-                    Task { @MainActor [weak self] in self?.reportCard.record(record) }
+                    recordSessionReport(record)
+                    await recordInputOutputLog(
+                        inputBody: inputBody,
+                        outputBody: outputCapture.capturedOutput,
+                        outputTruncated: outputCapture.isTruncated,
+                        model: reportModel,
+                        path: "/v1/messages",
+                        wasStreaming: true,
+                        statusCode: 200,
+                        startedAt: requestStartTime,
+                        config: config
+                    )
                     recordXcodeAgentRequest(model: reportModel, status: 200)
                     connection.cancel()
                     return
@@ -969,10 +1081,14 @@ final class LocalProxyServer: @unchecked Sendable {
                 if isFirstChunk {
                     let events = AnthropicTranslator.streamingStartEvents(messageId: msgID, model: model)
                     for event in events {
-                        await sendData(Data(event.utf8), on: connection)
+                        let eventData = Data(event.utf8)
+                        outputCapture.append(eventData)
+                        await sendData(eventData, on: connection)
                     }
                     let textStart = AnthropicTranslator.streamingTextStartEvent(index: 0)
-                    await sendData(Data(textStart.utf8), on: connection)
+                    let textStartData = Data(textStart.utf8)
+                    outputCapture.append(textStartData)
+                    await sendData(textStartData, on: connection)
                     isFirstChunk = false
                 }
 
@@ -982,14 +1098,18 @@ final class LocalProxyServer: @unchecked Sendable {
                    let content = delta["content"] as? String,
                    !content.isEmpty {
                     let event = AnthropicTranslator.streamingDeltaEvent(index: 0, text: content)
-                    await sendData(Data(event.utf8), on: connection)
+                    let eventData = Data(event.utf8)
+                    outputCapture.append(eventData)
+                    await sendData(eventData, on: connection)
                 }
             }
 
             if !isFirstChunk {
                 let events = AnthropicTranslator.streamingDoneEvents(messageId: msgID, model: model)
                 for event in events {
-                    await sendData(Data(event.utf8), on: connection)
+                    let eventData = Data(event.utf8)
+                    outputCapture.append(eventData)
+                    await sendData(eventData, on: connection)
                 }
                 logAnthropicStreamingEvent("AN_SSE request_id=\(requestID) mode=\(mode.rawValue) finish=eof stop_reason=end_turn")
             }
@@ -999,7 +1119,18 @@ final class LocalProxyServer: @unchecked Sendable {
                 durationSeconds: Date().timeIntervalSince(requestStartTime),
                 path: "/v1/messages", wasStreaming: true
             )
-            Task { @MainActor [weak self] in self?.reportCard.record(record) }
+            recordSessionReport(record)
+            await recordInputOutputLog(
+                inputBody: inputBody,
+                outputBody: outputCapture.capturedOutput,
+                outputTruncated: outputCapture.isTruncated,
+                model: reportModel,
+                path: "/v1/messages",
+                wasStreaming: true,
+                statusCode: 200,
+                startedAt: requestStartTime,
+                config: config
+            )
             recordXcodeAgentRequest(model: reportModel, status: 200)
             connection.cancel()
         } catch {
@@ -1020,7 +1151,9 @@ final class LocalProxyServer: @unchecked Sendable {
         requestID: String,
         translationContext: AnthropicTranslator.TranslationContext,
         mode: AnthropicTranslatorMode,
-        connection: NWConnection
+        connection: NWConnection,
+        inputBody: Data,
+        config: Config
     ) async {
         let requestStartTime = Date()
         do {
@@ -1052,6 +1185,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 requestID: requestID,
                 messageID: "msg_\(UUID().uuidString.prefix(24).lowercased())"
             )
+            var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             for try await line in bytes.lines {
                 guard line.hasPrefix("data: ") else { continue }
@@ -1075,13 +1209,17 @@ final class LocalProxyServer: @unchecked Sendable {
                     context: translationContext
                 )
                 for event in events {
-                    await sendData(Data(event.utf8), on: connection)
+                    let eventData = Data(event.utf8)
+                    outputCapture.append(eventData)
+                    await sendData(eventData, on: connection)
                 }
             }
 
             let finishEvents = AnthropicTranslator.streamingFinishEvents(state: state)
             for event in finishEvents {
-                await sendData(Data(event.utf8), on: connection)
+                let eventData = Data(event.utf8)
+                outputCapture.append(eventData)
+                await sendData(eventData, on: connection)
             }
             if state.sentMessageStart {
                 logAnthropicStreamingEvent("AN_SSE request_id=\(requestID) mode=\(mode.rawValue) finish=done stop_reason=\(state.finalStopReason) chunks=\(state.upstreamChunkIndex) emitted_events=\(state.streamedEventCount + finishEvents.count)")
@@ -1092,7 +1230,18 @@ final class LocalProxyServer: @unchecked Sendable {
                 durationSeconds: Date().timeIntervalSince(requestStartTime),
                 path: "/v1/messages", wasStreaming: true
             )
-            Task { @MainActor [weak self] in self?.reportCard.record(record) }
+            recordSessionReport(record)
+            await recordInputOutputLog(
+                inputBody: inputBody,
+                outputBody: outputCapture.capturedOutput,
+                outputTruncated: outputCapture.isTruncated,
+                model: reportModel,
+                path: "/v1/messages",
+                wasStreaming: true,
+                statusCode: 200,
+                startedAt: requestStartTime,
+                config: config
+            )
             recordXcodeAgentRequest(model: reportModel, status: 200)
             connection.cancel()
         } catch {
@@ -1114,8 +1263,11 @@ final class LocalProxyServer: @unchecked Sendable {
         reportModel: String,
         requestID: String,
         connection: NWConnection,
-        provider: UpstreamProvider = .miniMax
+        provider: UpstreamProvider = .miniMax,
+        inputBody: Data,
+        config: Config
     ) async {
+        let requestStartTime = Date()
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 502
@@ -1128,6 +1280,16 @@ final class LocalProxyServer: @unchecked Sendable {
 
             let text = String(decoding: validated.data, as: UTF8.self)
             respond(connection: connection, status: validated.statusCode, body: text, contentType: "application/json")
+            await recordInputOutputLog(
+                inputBody: inputBody,
+                outputBody: validated.data,
+                model: reportModel,
+                path: "/v1/messages",
+                wasStreaming: false,
+                statusCode: validated.statusCode,
+                startedAt: requestStartTime,
+                config: config
+            )
             recordXcodeAgentRequest(model: reportModel, status: validated.statusCode)
 
             appendLog("passthrough buffered response: status=\(validated.statusCode) model=\(reportModel)")
@@ -1149,8 +1311,11 @@ final class LocalProxyServer: @unchecked Sendable {
         reportModel: String,
         requestID: String,
         connection: NWConnection,
-        provider: UpstreamProvider = .miniMax
+        provider: UpstreamProvider = .miniMax,
+        inputBody: Data,
+        config: Config
     ) async {
+        let requestStartTime = Date()
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 502
@@ -1174,6 +1339,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 "Connection: keep-alive\r\n" +
                 "\r\n"
             await sendData(Data(headers.utf8), on: connection)
+            var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             for try await line in bytes.lines {
                 let validatedLine = AnthropicTranslator.validateAnthropicPassthroughStreamingLine(
@@ -1181,6 +1347,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     provider: provider
                 )
                 let sseData = Data((validatedLine + "\n").utf8)
+                outputCapture.append(sseData)
                 await sendData(sseData, on: connection)
             }
 
@@ -1188,6 +1355,17 @@ final class LocalProxyServer: @unchecked Sendable {
             await sendData(Data("\n".utf8), on: connection)
             connection.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
             appendLog("passthrough streaming complete: model=\(reportModel)")
+            await recordInputOutputLog(
+                inputBody: inputBody,
+                outputBody: outputCapture.capturedOutput,
+                outputTruncated: outputCapture.isTruncated,
+                model: reportModel,
+                path: "/v1/messages",
+                wasStreaming: true,
+                statusCode: 200,
+                startedAt: requestStartTime,
+                config: config
+            )
             recordXcodeAgentRequest(model: reportModel, status: 200)
         } catch {
             appendLog("passthrough streaming error: \(error.localizedDescription)")
@@ -1209,6 +1387,63 @@ final class LocalProxyServer: @unchecked Sendable {
                 continuation.resume()
             })
         }
+    }
+
+    private func recordInputOutputLog(
+        inputBody: Data?,
+        outputBody: Data?,
+        outputTruncated: Bool = false,
+        model: String?,
+        path: String,
+        wasStreaming: Bool,
+        statusCode: Int?,
+        startedAt: Date,
+        config: Config
+    ) async {
+        guard let logger = config.inputOutputLogger else { return }
+
+        try? await logger.record(
+            path: path,
+            model: model,
+            provider: config.upstreamProvider.rawValue,
+            wasStreaming: wasStreaming,
+            statusCode: statusCode,
+            startedAt: startedAt,
+            inputBody: inputBody,
+            outputBody: outputBody,
+            outputTruncated: outputTruncated
+        )
+    }
+
+    private func recordSessionReport(_ record: SessionReportCard.RequestRecord) {
+        let currentSessionID = sessionID
+        Task { @MainActor [weak self] in
+            self?.reportCard.record(record)
+        }
+
+        let coreRecord = RequestRecord(
+            timestamp: record.timestamp,
+            model: record.model,
+            promptTokens: record.promptTokens,
+            completionTokens: record.completionTokens,
+            durationSeconds: record.durationSeconds,
+            path: record.path,
+            wasStreaming: record.wasStreaming
+        )
+        try? SessionReportStore.append(
+            SessionReportEvent(
+                source: "gui",
+                sessionID: currentSessionID,
+                record: coreRecord
+            )
+        )
+    }
+
+    private func modelFromResponse(_ data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json["model"] as? String
     }
 
     private func recordXcodeAgentRequest(model: String, status: Int) {

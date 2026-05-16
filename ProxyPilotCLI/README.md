@@ -53,6 +53,15 @@ proxypilot start --provider zai --model glm-4.7
 proxypilot config install --port 4000
 ```
 
+LAN Ollama flow:
+
+```sh
+proxypilot start --provider ollama --upstream-url http://192.168.1.50:11434/v1
+proxypilot config install --port 4000
+```
+
+When no `--model` is passed for Ollama or LM Studio, `start` fetches the upstream `/v1/models` list and exposes those IDs through ProxyPilot's local `/v1/models` endpoint so Xcode has models to validate.
+
 ---
 
 ## Commands
@@ -92,7 +101,7 @@ proxypilot start [--port <port>] [--provider <provider>] [--upstream-url <url>] 
 | `--upstream-url` | provider default | Override upstream API base URL |
 | `--key` | — | Upstream API key. Falls back to environment variable, then keychain/secrets store |
 | `--key-stdin` | false | Read one API key line from stdin |
-| `--model` | — | Preferred upstream model(s), comma-separated |
+| `--model` | auto-discovered for local providers when omitted | Preferred upstream model(s), comma-separated |
 | `--daemon` | false | Run in background and write PID file |
 | `--json` | false | Emit JSON output instead of human-readable text |
 

@@ -2,6 +2,7 @@ import Foundation
 
 enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     case home
+    case history
     case proxy
     case keys
     case advanced
@@ -9,12 +10,16 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 
     var id: Self { self }
 
-    static let collapsedTabSections: [SettingsSection] = [.home, .proxy, .keys, .advanced]
+    static let sidebarSections: [SettingsSection] = [.home, .history, .proxy, .keys, .advanced, .customization]
+
+    static let collapsedTabSections: [SettingsSection] = [.home, .history, .proxy, .keys, .advanced]
 
     var title: String {
         switch self {
         case .home:
             return "Home"
+        case .history:
+            return "Session History"
         case .proxy:
             return "Proxy"
         case .keys:
@@ -30,6 +35,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .home:
             return "Home"
+        case .history:
+            return "History"
         case .proxy:
             return "Proxy"
         case .keys:
@@ -45,6 +52,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .home:
             return "Session overview"
+        case .history:
+            return "Past sessions"
         case .proxy:
             return "Routing and models"
         case .keys:
@@ -60,6 +69,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .home:
             return "house"
+        case .history:
+            return "clock.arrow.circlepath"
         case .proxy:
             return "network"
         case .keys:

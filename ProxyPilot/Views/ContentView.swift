@@ -13,10 +13,10 @@ struct ContentView: View {
     @AppStorage("proxypilot.preflightExpanded") private var preflightExpanded: Bool = true
     @State private var showNuclearResetConfirm: Bool = false
     @State private var selectedSection: SettingsSection = .home
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var proxySectionFocus: ProxySectionFocus?
     @State private var highlightedProxySection: ProxySectionFocus?
     @State private var proxyFocusRequestID: Int = 0
+    @State private var windowWidth: CGFloat = 0
     private let copilotSidecarInstallCommand = "npm install -g xcode-copilot-server"
 
     private var liquidGlassAppearanceAvailable: Bool {
@@ -31,19 +31,16 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            SettingsSidebarView(
-                selection: $selectedSection,
-                versionText: appVersionText,
-                buildText: appBuildText
-            )
-            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 260)
-        } detail: {
-            detailShell
-                .navigationTitle(selectedSection.title)
-                .toolbar {
-                    settingsToolbar
-                }
+        Group {
+            if usesNarrowStandaloneLayout {
+                detailShell
+                    .navigationTitle("\(settingsWindowTitle) - \(selectedSection.title)")
+                    .toolbar {
+                        settingsToolbar
+                    }
+            } else {
+                splitSettingsBody
+            }
         }
         .onAppear {
             if selectedSection == .home {
@@ -94,27 +91,63 @@ struct ContentView: View {
         } message: {
             Text("ProxyPilot is about to modify system files on your behalf. Please note that while these changes are reversible, quitting or uninstalling ProxyPilot will not revert them automatically.")
         }
-        .frame(minWidth: 820, minHeight: 620)
+        .frame(minWidth: 680, minHeight: 620)
+        .background {
+            WindowWidthReader { width in
+                windowWidth = width
+            }
+        }
         .environment(\.proxypilotLiquidGlassEnabled, effectiveLiquidGlassEnabled)
     }
 
-    private var isSidebarCollapsed: Bool {
-        if case .detailOnly = columnVisibility {
-            return true
+    private var splitSettingsBody: some View {
+        HStack(spacing: 0) {
+            SettingsSidebarView(
+                selection: $selectedSection,
+                versionText: appVersionText,
+                buildText: appBuildText
+            )
+            .frame(width: 238)
+
+            Divider()
+
+            detailShell
+                .navigationTitle(settingsWindowTitle)
+                .toolbar {
+                    settingsToolbar
+                }
         }
-        return false
+        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var settingsWindowTitle: String {
+        AppBuildBadge.currentAppDisplayName
+    }
+
+    private var usesNarrowStandaloneLayout: Bool {
+        windowWidth > 0 && windowWidth < 760
+    }
+
+    private var usesCollapsedTopNavigation: Bool {
+        usesNarrowStandaloneLayout
     }
 
     private var detailShell: some View {
         VStack(spacing: 0) {
-            if isSidebarCollapsed {
+            if usesCollapsedTopNavigation {
                 collapsedSectionTabs
+                    .zIndex(1)
                 Divider()
+                    .zIndex(1)
             }
 
             detailContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .id(selectedSection)
+                .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .clipped()
+                .zIndex(0)
         }
+        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var collapsedSectionTabs: some View {
@@ -135,9 +168,11 @@ struct ContentView: View {
                     }
                 }
             }
+
+            collapsedCustomizationButton
         }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 24)
+        .frame(minWidth: 0, maxWidth: .infinity)
+        .padding(.horizontal, 18)
         .padding(.top, 18)
         .padding(.bottom, 16)
     }
@@ -146,20 +181,19 @@ struct ContentView: View {
         Button {
             selectedSection = section
         } label: {
-            Label {
-                Text(section.compactTitle)
-            } icon: {
+            HStack(spacing: 6) {
                 if showsIcon {
                     Image(systemName: section.systemImage)
                 }
+                Text(section.compactTitle)
             }
-            .labelStyle(.titleAndIcon)
-            .font(.headline.weight(selectedSection == section ? .semibold : .medium))
+            .font(.callout.weight(selectedSection == section ? .semibold : .medium))
             .lineLimit(1)
+            .minimumScaleFactor(0.85)
             .foregroundStyle(selectedSection == section ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-            .padding(.horizontal, showsIcon ? 20 : 28)
+            .padding(.horizontal, showsIcon ? 16 : 14)
             .padding(.vertical, 10)
-            .frame(minWidth: showsIcon ? 142 : 178)
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             .background {
                 if selectedSection == section {
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -169,6 +203,27 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(section.title)
+    }
+
+    private var collapsedCustomizationButton: some View {
+        Button {
+            selectedSection = .customization
+        } label: {
+            Image(systemName: SettingsSection.customization.systemImage)
+                .font(.callout.weight(selectedSection == .customization ? .semibold : .medium))
+                .foregroundStyle(selectedSection == .customization ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .frame(width: 34, height: 34)
+                .contentShape(Circle())
+                .background {
+                    if selectedSection == .customization {
+                        Circle()
+                            .fill(Color(nsColor: .controlAccentColor).opacity(0.13))
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .help("Open Customization")
+        .accessibilityLabel("Open Customization")
     }
 
     @ViewBuilder
@@ -184,9 +239,16 @@ struct ContentView: View {
                     selectedSection = .proxy
                     preflightExpanded = true
                     vm.runPreflightChecks()
-                }
+                },
+                onOpenSessionHistory: { selectedSection = .history }
             )
             .environmentObject(vm)
+        case .history:
+            SessionHistoryView(
+                prefersCompactLayout: usesCollapsedTopNavigation,
+                onOpenAdvancedLogging: { selectedSection = .advanced }
+            )
+                .environmentObject(vm)
         case .proxy:
             proxyTab
         case .keys:
@@ -263,7 +325,8 @@ struct ContentView: View {
             Menu {
                 Button("README") { vm.openReadme() }
                 Button("Website") { vm.openWebsite() }
-                Button("Send Feedback") { vm.openFeedbackDraft() }
+                Button("Report Bug on GitHub") { vm.openGitHubBugReport() }
+                Button("Send Feedback by Email") { vm.openFeedbackDraft() }
                 Divider()
                 Button("Export Diagnostics") { vm.exportDiagnostics() }
                 Button("Copy Support Summary") { vm.copySupportSummaryToPasteboard() }
@@ -1485,6 +1548,27 @@ struct ContentView: View {
                     .textSelection(.enabled)
             }
 
+            Section("Updates") {
+                Toggle("Include alpha channel updates", isOn: Binding(
+                    get: { updateService.alphaUpdatesEnabled },
+                    set: { updateService.alphaUpdatesEnabled = $0 }
+                ))
+                .toggleStyle(.switch)
+                .help("Allows Sparkle to offer alpha-channel builds when the appcast publishes them.")
+
+                Text(updateService.alphaUpdatesEnabled
+                     ? "Sparkle will include alpha-channel releases in update checks. Turn this off to return to the stable update channel before checking again."
+                     : "Stable update checks stay on the main appcast channel. Alpha builds can be offered later through Sparkle channel metadata without changing the app.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+
+            InputOutputLoggingSettingsView {
+                selectedSection = .proxy
+            }
+            .environmentObject(vm)
+
             Section("Danger Zone") {
                 Text("This will remove Xcode Agent config, delete all stored keys, reset proxy URLs and settings, and return ProxyPilot to first-run state.")
                     .font(.caption)
@@ -1852,6 +1936,43 @@ private struct StatusToolbarLabel: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Proxy status \(statusText)")
         .help("Proxy status: \(statusText)")
+    }
+}
+
+private struct WindowWidthReader: NSViewRepresentable {
+    let onChange: (CGFloat) -> Void
+
+    func makeNSView(context: Context) -> WidthReportingView {
+        let view = WidthReportingView()
+        view.onWidthChange = onChange
+        return view
+    }
+
+    func updateNSView(_ nsView: WidthReportingView, context: Context) {
+        nsView.onWidthChange = onChange
+        nsView.reportWindowWidth()
+    }
+
+    @MainActor
+    final class WidthReportingView: NSView {
+        var onWidthChange: ((CGFloat) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            reportWindowWidth()
+        }
+
+        override func setFrameSize(_ newSize: NSSize) {
+            super.setFrameSize(newSize)
+            reportWindowWidth()
+        }
+
+        func reportWindowWidth() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.onWidthChange?(self.window?.frame.width ?? self.bounds.width)
+            }
+        }
     }
 }
 

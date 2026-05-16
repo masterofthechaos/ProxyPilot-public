@@ -676,6 +676,43 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertFalse(config.isLocalhostUpstream)
     }
 
+    func testOllamaLANUpstreamDoesNotRequireAPIKey() {
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: 4000,
+            masterKey: "test",
+            upstreamProvider: .ollama,
+            upstreamAPIBase: URL(string: "http://192.168.1.50:11434/v1")!,
+            upstreamAPIKey: nil,
+            allowedModels: ["llama3"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "llama3",
+            googleThoughtSignatureStore: nil
+        )
+        XCTAssertFalse(config.isLocalhostUpstream)
+        XCTAssertFalse(config.requiresUpstreamAPIKey)
+    }
+
+    func testCloudLANUpstreamStillRequiresAPIKey() {
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: 4000,
+            masterKey: "test",
+            upstreamProvider: .zAI,
+            upstreamAPIBase: URL(string: "http://192.168.1.50:8080/v1")!,
+            upstreamAPIKey: nil,
+            allowedModels: ["glm-5"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "glm-5",
+            googleThoughtSignatureStore: nil
+        )
+        XCTAssertTrue(config.requiresUpstreamAPIKey)
+    }
+
     // MARK: - Static limitStatusCode (existing on LocalProxyServer)
 
     func testLimitStatusCode429AtExactLimit() {

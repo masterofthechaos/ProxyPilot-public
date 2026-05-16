@@ -16,4 +16,3 @@ xcodebuild \
 
 APP_PATH="$DERIVED_DATA/Build/Products/Release/ProxyPilot.app"
 echo "Built: $APP_PATH"
-

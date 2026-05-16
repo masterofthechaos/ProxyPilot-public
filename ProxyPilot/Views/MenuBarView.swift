@@ -96,12 +96,14 @@ struct MenuBarView: View {
                     .fill(vm.isRunning ? Color.green : Color.secondary)
                     .frame(width: 8, height: 8)
                 Text(vm.isRunning ? "Proxy Running" : "Proxy Stopped")
-                Text("Beta")
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1)
-                    .background(Color.orange.opacity(0.15), in: Capsule())
-                    .foregroundStyle(.orange)
+                if let badge = AppBuildBadge.current {
+                    Text(badge.text)
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(badge.tint.opacity(0.15), in: Capsule())
+                        .foregroundStyle(badge.tint)
+                }
             }
             .accessibilityLabel(vm.isRunning ? "Proxy running" : "Proxy stopped")
         case .modelPicker:

@@ -16,6 +16,7 @@ public struct ProxyConfiguration: Sendable {
     public let preferredAnthropicUpstreamModel: String
     public let sessionStats: SessionStats?
     public let googleThoughtSignatureStore: GoogleThoughtSignatureStore?
+    public let inputOutputLogger: InputOutputLoggingRecorder?
 
     public init(
         host: String = "127.0.0.1",
@@ -30,7 +31,8 @@ public struct ProxyConfiguration: Sendable {
         miniMaxRoutingMode: MiniMaxRoutingMode = .standard,
         preferredAnthropicUpstreamModel: String = "",
         sessionStats: SessionStats? = nil,
-        googleThoughtSignatureStore: GoogleThoughtSignatureStore? = nil
+        googleThoughtSignatureStore: GoogleThoughtSignatureStore? = nil,
+        inputOutputLogger: InputOutputLoggingRecorder? = nil
     ) {
         self.host = host
         self.port = port
@@ -45,6 +47,7 @@ public struct ProxyConfiguration: Sendable {
         self.preferredAnthropicUpstreamModel = preferredAnthropicUpstreamModel
         self.sessionStats = sessionStats
         self.googleThoughtSignatureStore = googleThoughtSignatureStore
+        self.inputOutputLogger = inputOutputLogger
     }
 
     /// Whether Anthropic passthrough is active for the current provider.

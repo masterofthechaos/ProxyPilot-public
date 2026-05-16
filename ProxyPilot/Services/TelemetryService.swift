@@ -27,6 +27,11 @@ final class TelemetryService {
     private let postHogDeliveryEnabled: Bool
     private let postHogRequestHook: ((URLRequest) -> Void)?
     private var sessionID = UUID().uuidString
+    private static let alphaRequiredFailureEvents: Set<String> = [
+        "preflight_failed",
+        "proxy_start_failed",
+        "previous_session_may_have_crashed"
+    ]
 
     static let defaultProtectedInternalMarkerURL = URL(fileURLWithPath: "/Library/Application Support/ProxyPilot/internal-telemetry-marker")
 
@@ -51,7 +56,11 @@ final class TelemetryService {
     }
 
     private static var defaultPostHogDeliveryEnabled: Bool {
-        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+            return false
+        }
+
+        return true
     }
 
     var installID: String {
@@ -96,9 +105,17 @@ final class TelemetryService {
         let event = makeEvent(name: name, payload: payload)
 
         persistLocally(event: event)
-        if telemetryOptIn {
+        if Self.shouldSendRemoteEvent(
+            name: name,
+            telemetryOptIn: telemetryOptIn,
+            isAlphaBuild: AppBuildBadge.isAlphaBundle(Bundle.main.bundleIdentifier)
+        ) {
             sendToPostHog(event: event, delivery: .analytics)
         }
+    }
+
+    static func shouldSendRemoteEvent(name: String, telemetryOptIn: Bool, isAlphaBuild: Bool) -> Bool {
+        telemetryOptIn || (isAlphaBuild && alphaRequiredFailureEvents.contains(name))
     }
 
     private func makeEvent(name: String, payload: [String: String]) -> TelemetryEvent {
