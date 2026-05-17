@@ -155,14 +155,12 @@ struct UpstreamProviderTests {
         #expect(UpstreamProvider.miniMax.alternateAPIBaseURLs.contains("https://api.minimaxi.com/v1"))
     }
     @Test func nonMiniMaxProvidersHaveNoFallbackModels() {
-        for provider in UpstreamProvider.allCases where !provider.isMiniMax && provider != .githubCopilot {
+        for provider in UpstreamProvider.allCases where !provider.isMiniMax {
             #expect(provider.fallbackModelIDs == nil, "\(provider.rawValue) should have nil fallbackModelIDs")
         }
     }
-    @Test func githubCopilotHasFallbackModels() {
-        let fallback = UpstreamProvider.githubCopilot.fallbackModelIDs
-        #expect(fallback?.contains("gpt-5.4") == true)
-        #expect(fallback?.contains("copilot-chat") == true)
+    @Test func githubCopilotDoesNotInventFallbackModels() {
+        #expect(UpstreamProvider.githubCopilot.fallbackModelIDs == nil)
     }
     @Test func temperatureClampForMiniMax() {
         var request: [String: Any] = ["model": "MiniMax-M2.5", "temperature": 0.0]

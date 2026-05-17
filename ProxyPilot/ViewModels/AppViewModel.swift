@@ -60,6 +60,9 @@ final class AppViewModel: ObservableObject {
     static let visibleMenuBarSectionsDefaultsKey = "proxypilot.customization.visibleMenuBarSections"
     static let visibleHomeDashboardSectionsDefaultsKey = "proxypilot.customization.visibleHomeDashboardSections"
     static let defaultSettingsSectionDefaultsKey = "proxypilot.customization.defaultSettingsSection"
+    static let keysProviderOrderDefaultsKey = "proxypilot.customization.keysProviderOrder"
+    static let visibleKeysProvidersDefaultsKey = "proxypilot.customization.visibleKeysProviders"
+    static let copilotSidecarExpandedDefaultsKey = "proxypilot.customization.copilotSidecarExpanded"
     // autoRestartEnabled defaults key: kept here for resetToFreshInstall cleanup
     private static let autoRestartEnabledDefaultsKey = "proxypilot.autoRestartEnabled"
     private static let requireLocalAuthDefaultsKey = "proxypilot.requireLocalAuth"
@@ -225,6 +228,17 @@ final class AppViewModel: ObservableObject {
     @Published var isCopilotSidecarRunning: Bool = false
     @Published var isCopilotSidecarManaged: Bool = false
     @Published var isStartingCopilotSidecar: Bool = false
+    @Published var copilotSidecarLoginCommand: String = ""
+    @Published var copilotSidecarLoginDescription: String = ""
+    @Published var isCopilotSidecarGitHubAuthenticated: Bool = false
+    @Published var copilotSidecarGitHubAccount: String = ""
+    @Published var isTestingCopilotToolCall: Bool = false
+    @Published var copilotToolCallTestOutput: String = ""
+    @Published var copilotToolCallTestModelUsed: String = ""
+    @Published var copilotToolCallTestSucceeded: Bool?
+    @Published var isCopilotSidecarLogVisible: Bool = false
+    @Published var copilotSidecarLogText: String = ""
+    @Published var copilotSidecarLogStatusText: String = ""
 
     @Published var launchAtLogin: Bool = false
     @Published private(set) var sessionHistorySessions: [SessionHistorySession] = []
@@ -377,6 +391,36 @@ final class AppViewModel: ObservableObject {
         return Set(stored.compactMap(HomeDashboardSection.init(rawValue:)))
     }
 
+    static func normalizedKeysProviderOrder(_ order: [KeysProviderViewItem]) -> [KeysProviderViewItem] {
+        var seen = Set<KeysProviderViewItem>()
+        var normalized: [KeysProviderViewItem] = []
+
+        for item in order where !seen.contains(item) {
+            normalized.append(item)
+            seen.insert(item)
+        }
+
+        for item in KeysProviderViewItem.defaultOrder where !seen.contains(item) {
+            normalized.append(item)
+            seen.insert(item)
+        }
+
+        return normalized
+    }
+
+    static func decodedKeysProviderOrder(from defaults: UserDefaults) -> [KeysProviderViewItem] {
+        let stored = defaults.stringArray(forKey: keysProviderOrderDefaultsKey) ?? []
+        let decoded = stored.compactMap(KeysProviderViewItem.init(rawValue:))
+        return normalizedKeysProviderOrder(decoded)
+    }
+
+    static func decodedVisibleKeysProviders(from defaults: UserDefaults) -> Set<KeysProviderViewItem> {
+        guard let stored = defaults.stringArray(forKey: visibleKeysProvidersDefaultsKey) else {
+            return Set(KeysProviderViewItem.defaultOrder)
+        }
+        return Set(stored.compactMap(KeysProviderViewItem.init(rawValue:)))
+    }
+
     func isHomeDashboardSectionVisible(_ section: HomeDashboardSection) -> Bool {
         visibleHomeDashboardSections.contains(section)
     }
@@ -408,6 +452,42 @@ final class AppViewModel: ObservableObject {
         showMenuBarExtra = true
         menuBarSectionOrder = MenuBarSection.defaultOrder
         visibleMenuBarSections = Set(MenuBarSection.defaultOrder)
+    }
+
+    func isKeysProviderVisible(_ provider: UpstreamProvider) -> Bool {
+        guard let item = KeysProviderViewItem(provider: provider) else { return false }
+        return visibleKeysProviders.contains(item)
+    }
+
+    func setKeysProvider(_ provider: UpstreamProvider, isVisible: Bool) {
+        guard let item = KeysProviderViewItem(provider: provider) else { return }
+        if isVisible {
+            visibleKeysProviders.insert(item)
+        } else {
+            visibleKeysProviders.remove(item)
+        }
+    }
+
+    func moveKeysProviderItems(fromOffsets source: IndexSet, toOffset destination: Int) {
+        var order = keysProviderOrder
+        order.move(fromOffsets: source, toOffset: destination)
+        keysProviderOrder = order
+    }
+
+    func resetKeysProvidersCustomization() {
+        copilotSidecarExpanded = true
+        keysProviderOrder = KeysProviderViewItem.defaultOrder
+        visibleKeysProviders = Set(KeysProviderViewItem.defaultOrder)
+    }
+
+    func resetAllViewCustomizations() {
+        appearancePreference = .system
+        proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
+        liquidGlassEnabled = true
+        defaultSettingsSection = .home
+        visibleHomeDashboardSections = Set(HomeDashboardSection.allCases)
+        resetMenuBarCustomization()
+        resetKeysProvidersCustomization()
     }
 
     @Published var lastError: String?
@@ -488,6 +568,9 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.visibleMenuBarSectionsDefaultsKey)
         defaults.removeObject(forKey: Self.visibleHomeDashboardSectionsDefaultsKey)
         defaults.removeObject(forKey: Self.defaultSettingsSectionDefaultsKey)
+        defaults.removeObject(forKey: Self.keysProviderOrderDefaultsKey)
+        defaults.removeObject(forKey: Self.visibleKeysProvidersDefaultsKey)
+        defaults.removeObject(forKey: Self.copilotSidecarExpandedDefaultsKey)
         defaults.removeObject(forKey: Self.autoRestartEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.requireLocalAuthDefaultsKey)
         defaults.removeObject(forKey: Self.preflightSnapshotDefaultsKey)
@@ -534,6 +617,17 @@ final class AppViewModel: ObservableObject {
         isCopilotSidecarRunning = false
         isCopilotSidecarManaged = false
         isStartingCopilotSidecar = false
+        copilotSidecarLoginCommand = ""
+        copilotSidecarLoginDescription = ""
+        isCopilotSidecarGitHubAuthenticated = false
+        copilotSidecarGitHubAccount = ""
+        isTestingCopilotToolCall = false
+        copilotToolCallTestOutput = ""
+        copilotToolCallTestModelUsed = ""
+        copilotToolCallTestSucceeded = nil
+        isCopilotSidecarLogVisible = false
+        copilotSidecarLogText = ""
+        copilotSidecarLogStatusText = ""
 
         launchAtLogin = false
         anthropicTranslatorFallbackEnabled = false
@@ -557,6 +651,9 @@ final class AppViewModel: ObservableObject {
         visibleMenuBarSections = Set(MenuBarSection.defaultOrder)
         visibleHomeDashboardSections = Set(HomeDashboardSection.allCases)
         defaultSettingsSection = .home
+        keysProviderOrder = KeysProviderViewItem.defaultOrder
+        visibleKeysProviders = Set(KeysProviderViewItem.defaultOrder)
+        copilotSidecarExpanded = true
         showKeychainAccessPrimer = false
         suppressKeychainAccessPrimer = false
         autoRestartEnabled = true
@@ -661,6 +758,10 @@ final class AppViewModel: ObservableObject {
         isCopilotSidecarRunning = status.isRunning
         isCopilotSidecarManaged = status.isManaged
         copilotSidecarStatusText = status.message
+        copilotSidecarLoginCommand = status.loginCommand ?? ""
+        copilotSidecarLoginDescription = status.loginCommandDescription
+        isCopilotSidecarGitHubAuthenticated = status.isGitHubAuthenticated
+        copilotSidecarGitHubAccount = status.githubAccount ?? ""
     }
 
     func startCopilotSidecar() async {
@@ -695,12 +796,129 @@ final class AppViewModel: ObservableObject {
     }
 
     func openCopilotSidecarLog() {
-        copilotSidecarService.openLog()
+        let snapshot = copilotSidecarService.logSnapshot()
+        copilotSidecarLogText = snapshot.text
+        copilotSidecarLogStatusText = snapshot.summary
+        isCopilotSidecarLogVisible = true
+    }
+
+    func openCopilotLoginTerminal() async {
+        guard !copilotSidecarLoginCommand.isEmpty else { return }
+        await copilotSidecarService.openLoginTerminal(command: copilotSidecarLoginCommand)
     }
 
     func openCopilotSidecarProject() {
         if let url = URL(string: "https://github.com/theblixguy/xcode-copilot-server") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    func testCopilotToolCall() async {
+        clearIssue()
+        isTestingCopilotToolCall = true
+        copilotToolCallTestOutput = "Testing Copilot tool-call endpoint..."
+        copilotToolCallTestModelUsed = ""
+        copilotToolCallTestSucceeded = nil
+        defer { isTestingCopilotToolCall = false }
+
+        let apiBase: URL
+        if upstreamProvider == .githubCopilot {
+            do {
+                apiBase = try validatedUpstreamBaseURL()
+            } catch {
+                let issue = issueFor(
+                    error,
+                    fallbackCode: .invalidProxyURL,
+                    fallbackTitle: String(localized: "Invalid Copilot Sidecar URL"),
+                    fallbackActions: [.resetUpstreamURL]
+                )
+                copilotToolCallTestSucceeded = false
+                copilotToolCallTestOutput = "Tool-call test failed: \(issue.message)"
+                applyIssue(issue)
+                return
+            }
+        } else {
+            guard let defaultBase = URL(string: UpstreamProvider.githubCopilot.defaultAPIBaseURL) else {
+                let issue = AppIssue(
+                    code: .invalidProxyURL,
+                    title: String(localized: "Invalid Copilot Sidecar URL"),
+                    message: String(localized: "ProxyPilot's GitHub Copilot sidecar URL is invalid."),
+                    actions: [.exportDiagnostics]
+                )
+                copilotToolCallTestSucceeded = false
+                copilotToolCallTestOutput = "Tool-call test failed: \(issue.message)"
+                applyIssue(issue)
+                return
+            }
+            apiBase = defaultBase
+        }
+
+        var selectedModel = upstreamProvider == .githubCopilot ? effectiveXcodeAgentModel : ""
+        if selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            do {
+                let models = try await proxyService.fetchUpstreamModels(
+                    apiBase: apiBase,
+                    apiKey: "",
+                    provider: .githubCopilot
+                )
+                providerManager.applyFetchedUpstreamModels(models)
+                providerManager.reconcileXcodeAgentModelSelection()
+                selectedModel = effectiveXcodeAgentModel
+            } catch {
+                let issue = upstreamIssueFor(
+                    error,
+                    fallbackCode: .generic,
+                    fallbackTitle: String(localized: "Copilot Model Fetch Failed"),
+                    fallbackActions: [.resetUpstreamURL, .exportDiagnostics],
+                    provider: .githubCopilot,
+                    apiBase: apiBase,
+                    path: UpstreamProvider.githubCopilot.modelsPath,
+                    operation: .modelFetch
+                )
+                copilotToolCallTestSucceeded = false
+                copilotToolCallTestOutput = "Tool-call test failed: \(issue.message)"
+                applyIssue(issue)
+                return
+            }
+        }
+
+        let model = selectedModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else {
+            let issue = AppIssue(
+                code: .generic,
+                title: String(localized: "No Copilot Models Available"),
+                message: String(localized: "ProxyPilot could not get a model list from the GitHub Copilot sidecar. Sign in, refresh models, then try the tool-call test again."),
+                actions: [.openCopilotLogin, .exportDiagnostics]
+            )
+            copilotToolCallTestSucceeded = false
+            copilotToolCallTestOutput = "Tool-call test failed: \(issue.message)"
+            applyIssue(issue)
+            return
+        }
+
+        do {
+            let result = try await proxyService.testGitHubCopilotToolCall(apiBase: apiBase, model: model)
+            copilotToolCallTestModelUsed = model
+            copilotToolCallTestSucceeded = result.sawToolCall
+            copilotToolCallTestOutput = result.summary
+            if result.sawToolCall {
+                markFirstSuccessfulRequestIfNeeded()
+            }
+        } catch {
+            let issue = upstreamIssueFor(
+                error,
+                fallbackCode: .generic,
+                fallbackTitle: String(localized: "Copilot Tool-Call Test Failed"),
+                fallbackActions: [.resetUpstreamURL, .exportDiagnostics],
+                provider: .githubCopilot,
+                apiBase: apiBase,
+                path: UpstreamProvider.githubCopilot.chatCompletionsPath,
+                operation: .upstreamTest
+            )
+            copilotToolCallTestModelUsed = model
+            copilotToolCallTestSucceeded = false
+            copilotToolCallTestOutput = "Tool-call test failed: \(issue.message)"
+            applyIssue(issue)
         }
     }
 
@@ -972,6 +1190,37 @@ final class AppViewModel: ObservableObject {
     @Published var defaultSettingsSection: SettingsSection = .home {
         didSet {
             defaults.set(defaultSettingsSection.rawValue, forKey: Self.defaultSettingsSectionDefaultsKey)
+        }
+    }
+
+    @Published var keysProviderOrder: [KeysProviderViewItem] = KeysProviderViewItem.defaultOrder {
+        didSet {
+            let normalized = Self.normalizedKeysProviderOrder(keysProviderOrder)
+            if normalized != keysProviderOrder {
+                keysProviderOrder = normalized
+                return
+            }
+            defaults.set(normalized.map(\.rawValue), forKey: Self.keysProviderOrderDefaultsKey)
+        }
+    }
+
+    @Published var visibleKeysProviders: Set<KeysProviderViewItem> = Set(KeysProviderViewItem.defaultOrder) {
+        didSet {
+            let normalized = visibleKeysProviders.intersection(Set(KeysProviderViewItem.allCases))
+            if normalized != visibleKeysProviders {
+                visibleKeysProviders = normalized
+                return
+            }
+            let orderedRawValues = KeysProviderViewItem.defaultOrder
+                .filter { normalized.contains($0) }
+                .map(\.rawValue)
+            defaults.set(orderedRawValues, forKey: Self.visibleKeysProvidersDefaultsKey)
+        }
+    }
+
+    @Published var copilotSidecarExpanded: Bool = true {
+        didSet {
+            defaults.set(copilotSidecarExpanded, forKey: Self.copilotSidecarExpandedDefaultsKey)
         }
     }
 
@@ -1558,6 +1807,9 @@ final class AppViewModel: ObservableObject {
         defaultSettingsSection = SettingsSection(
             rawValue: defaults.string(forKey: Self.defaultSettingsSectionDefaultsKey) ?? ""
         ) ?? .home
+        keysProviderOrder = Self.decodedKeysProviderOrder(from: defaults)
+        visibleKeysProviders = Self.decodedVisibleKeysProviders(from: defaults)
+        copilotSidecarExpanded = defaults.object(forKey: Self.copilotSidecarExpandedDefaultsKey) as? Bool ?? true
         suppressKeychainAccessPrimer = defaults.bool(forKey: Self.suppressKeychainPrimerDefaultsKey)
         requireLocalAuth = defaults.bool(forKey: Self.requireLocalAuthDefaultsKey)
 
@@ -1888,6 +2140,8 @@ final class AppViewModel: ObservableObject {
             Task { await startProxy() }
         case .exportDiagnostics:
             exportDiagnostics()
+        case .openCopilotLogin:
+            Task { await openCopilotLoginTerminal() }
         case .openReadme:
             openReadme()
         case .openWebsite:
@@ -1906,6 +2160,8 @@ final class AppViewModel: ObservableObject {
             performIssueAction(.openMasterKeyEditor)
         case .openUpstreamKeyEditor:
             performIssueAction(.openUpstreamKeyEditor)
+        case .openCopilotLogin:
+            Task { await openCopilotLoginTerminal() }
         case .resetProxyURL:
             performIssueAction(.resetProxyURL)
         case .switchToBuiltInProxy:
@@ -1930,7 +2186,9 @@ final class AppViewModel: ObservableObject {
             fallbackUpstreamBaseURLString: selectedUpstreamProviderDefaultAPIBaseURL,
             hasMasterKey: hasMasterKey,
             hasUpstreamKey: hasUpstreamKey,
-            liteLLMScriptsExist: liteLLMScriptsExist
+            liteLLMScriptsExist: liteLLMScriptsExist,
+            isCopilotSidecarInstalled: !copilotSidecarExecutablePath.isEmpty,
+            isCopilotGitHubAuthenticated: isCopilotSidecarGitHubAuthenticated
         )
 
         let checks = preflightService.run(context: context)
@@ -2858,7 +3116,7 @@ general_settings:
 
     private func pendingProxyModelIDs() -> [String] {
         var ids: Set<String> = []
-        ids.formUnion(selectedUpstreamModels)
+        ids.formUnion(upstreamProvider == .githubCopilot ? proxySyncModelCandidates : Array(selectedUpstreamModels))
         ids.formUnion(upstreamModels.map(\.id))
         ids.formUnion(savedDefaultModels)
         if let fallback = upstreamProvider.fallbackModelIDs {
@@ -2925,6 +3183,7 @@ general_settings:
         }()
 
         var allowedModels: Set<String> = {
+            if upstreamProvider == .githubCopilot { return Set(proxySyncModelCandidates) }
             if !selectedUpstreamModels.isEmpty { return selectedUpstreamModels }
             if !upstreamModels.isEmpty { return Set(upstreamModels.map(\.id)) }
             if let fallback = upstreamProvider.fallbackModelIDs { return Set(fallback) }
@@ -3215,6 +3474,19 @@ general_settings:
 
         if let serviceError = error as? ProxyServiceError,
            case .httpStatus(let status, let body) = serviceError {
+            if let entitlementMessage = LocalProxyServerHelpers.githubCopilotEntitlementMessage(
+                statusCode: status,
+                body: body,
+                provider: provider
+            ) {
+                return AppIssue(
+                    code: .upstreamUnauthorized,
+                    title: String(localized: "GitHub Copilot Access Required"),
+                    message: entitlementMessage,
+                    actions: [.exportDiagnostics, .openReadme]
+                )
+            }
+
             return AppIssue(
                 code: fallbackCode,
                 title: fallbackTitle,
@@ -3244,7 +3516,7 @@ general_settings:
         case .ollama:
             return String(localized: "Start Ollama with ollama serve, check the base URL, or pull a model locally.")
         case .githubCopilot:
-            return String(localized: "Start or reinstall the GitHub Copilot helper.")
+            return String(localized: "Sign in with the Copilot or GitHub CLI, confirm the account has Copilot access, then start or reinstall the helper.")
         default:
             return String(localized: "Check the local provider and base URL.")
         }

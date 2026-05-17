@@ -1,4 +1,5 @@
 import SwiftUI
+import ProxyPilotCore
 
 enum AppAppearancePreference: String, CaseIterable, Identifiable {
     case system
@@ -109,6 +110,50 @@ enum MenuBarSection: String, CaseIterable, Identifiable {
             return "Start, stop, and restart controls."
         case .updates:
             return "Check for app updates."
+        }
+    }
+}
+
+enum KeysProviderViewItem: String, CaseIterable, Identifiable {
+    case zAI = "zai"
+    case openRouter = "openrouter"
+    case openAI = "openai"
+    case xAI = "xai"
+    case chutes = "chutes"
+    case groq = "groq"
+    case google = "google"
+    case deepSeek = "deepseek"
+    case mistral = "mistral"
+    case miniMax = "minimax"
+    case miniMaxCN = "minimax-cn"
+    case githubCopilot = "github-copilot"
+    case ollama = "ollama"
+    case lmStudio = "lmstudio"
+
+    var id: Self { self }
+
+    static let defaultOrder: [KeysProviderViewItem] = UpstreamProvider.allCases.compactMap(Self.init(provider:))
+
+    init?(provider: UpstreamProvider) {
+        self.init(rawValue: provider.rawValue)
+    }
+
+    var provider: UpstreamProvider {
+        UpstreamProvider(rawValue: rawValue) ?? .zAI
+    }
+
+    var title: String {
+        provider.title
+    }
+
+    var detail: String {
+        switch provider {
+        case .githubCopilot:
+            return "Copilot sidecar setup and no-key local provider row."
+        case .ollama, .lmStudio:
+            return "Local provider setup row. No ProxyPilot API key required."
+        default:
+            return "Provider API key row."
         }
     }
 }

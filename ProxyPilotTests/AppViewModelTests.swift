@@ -150,6 +150,9 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.visibleMenuBarSections, Set(MenuBarSection.defaultOrder))
         XCTAssertEqual(vm.visibleHomeDashboardSections, Set(HomeDashboardSection.allCases))
         XCTAssertEqual(vm.defaultSettingsSection, .home)
+        XCTAssertEqual(vm.keysProviderOrder, KeysProviderViewItem.defaultOrder)
+        XCTAssertEqual(vm.visibleKeysProviders, Set(KeysProviderViewItem.defaultOrder))
+        XCTAssertTrue(vm.copilotSidecarExpanded)
     }
 
     func testToolbarStatusHidesPlainStoppedStateOnly() {
@@ -174,6 +177,9 @@ final class AppViewModelTests: XCTestCase {
         vm?.visibleMenuBarSections = [.statusDetails, .quickActions]
         vm?.visibleHomeDashboardSections = [.sessionSummary, .sessionReportCard]
         vm?.defaultSettingsSection = .customization
+        vm?.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .ollama, .lmStudio]
+        vm?.visibleKeysProviders = [.openAI, .githubCopilot]
+        vm?.copilotSidecarExpanded = false
         vm = nil
 
         let relaunched = AppViewModel(defaults: defaults)
@@ -185,6 +191,10 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(relaunched.visibleMenuBarSections, [.statusDetails, .quickActions])
         XCTAssertEqual(relaunched.visibleHomeDashboardSections, [.sessionSummary, .sessionReportCard])
         XCTAssertEqual(relaunched.defaultSettingsSection, .customization)
+        XCTAssertEqual(relaunched.keysProviderOrder.first, .openAI)
+        XCTAssertEqual(relaunched.keysProviderOrder.dropFirst().first, .githubCopilot)
+        XCTAssertEqual(relaunched.visibleKeysProviders, [.openAI, .githubCopilot])
+        XCTAssertFalse(relaunched.copilotSidecarExpanded)
     }
 
     func testCustomizationResetRestoresDefaults() async {
@@ -196,6 +206,9 @@ final class AppViewModelTests: XCTestCase {
         vm.visibleMenuBarSections = [.statusDetails, .quickActions]
         vm.visibleHomeDashboardSections = [.sessionSummary]
         vm.defaultSettingsSection = .customization
+        vm.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .ollama, .lmStudio]
+        vm.visibleKeysProviders = [.openAI]
+        vm.copilotSidecarExpanded = false
 
         await vm.resetToFreshInstall()
 
@@ -206,6 +219,9 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.visibleMenuBarSections, Set(MenuBarSection.defaultOrder))
         XCTAssertEqual(vm.visibleHomeDashboardSections, Set(HomeDashboardSection.allCases))
         XCTAssertEqual(vm.defaultSettingsSection, .home)
+        XCTAssertEqual(vm.keysProviderOrder, KeysProviderViewItem.defaultOrder)
+        XCTAssertEqual(vm.visibleKeysProviders, Set(KeysProviderViewItem.defaultOrder))
+        XCTAssertTrue(vm.copilotSidecarExpanded)
     }
 
     func testMenuBarCustomizationNormalizesStoredUnknownMissingAndDuplicateSections() {
@@ -231,6 +247,78 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertEqual(vm.menuBarSectionOrder, [.quickActions, .statusDetails, .modelPicker, .sessionStats, .updates])
         XCTAssertEqual(vm.visibleMenuBarSections, [.quickActions])
+    }
+
+    func testKeysProviderCustomizationNormalizesStoredUnknownMissingAndDuplicateProviders() {
+        defaults.set(
+            [
+                KeysProviderViewItem.openAI.rawValue,
+                "unknown",
+                KeysProviderViewItem.openAI.rawValue,
+                KeysProviderViewItem.githubCopilot.rawValue
+            ],
+            forKey: AppViewModel.keysProviderOrderDefaultsKey
+        )
+        defaults.set(
+            [
+                KeysProviderViewItem.openAI.rawValue,
+                "unknown",
+                KeysProviderViewItem.openAI.rawValue
+            ],
+            forKey: AppViewModel.visibleKeysProvidersDefaultsKey
+        )
+
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm.keysProviderOrder.prefix(2), [.openAI, .githubCopilot])
+        XCTAssertEqual(vm.keysProviderOrder.count, KeysProviderViewItem.defaultOrder.count)
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI])
+    }
+
+    func testKeysProviderCustomizationCanHideAndResetCopilotSidecar() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(vm.isKeysProviderVisible(.githubCopilot))
+        vm.setKeysProvider(.githubCopilot, isVisible: false)
+        vm.copilotSidecarExpanded = false
+
+        XCTAssertFalse(vm.isKeysProviderVisible(.githubCopilot))
+
+        vm.resetKeysProvidersCustomization()
+
+        XCTAssertTrue(vm.isKeysProviderVisible(.githubCopilot))
+        XCTAssertEqual(vm.keysProviderOrder, KeysProviderViewItem.defaultOrder)
+        XCTAssertEqual(vm.visibleKeysProviders, Set(KeysProviderViewItem.defaultOrder))
+        XCTAssertTrue(vm.copilotSidecarExpanded)
+    }
+
+    func testResetAllViewCustomizationsRestoresViewDefaultsWithoutNuclearReset() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.appearancePreference = .dark
+        vm.proxyPilotAccentHex = "#FF2D55"
+        vm.liquidGlassEnabled = false
+        vm.showMenuBarExtra = false
+        vm.menuBarSectionOrder = [.quickActions, .statusDetails, .updates, .modelPicker, .sessionStats]
+        vm.visibleMenuBarSections = [.statusDetails]
+        vm.visibleHomeDashboardSections = [.sessionSummary]
+        vm.defaultSettingsSection = .customization
+        vm.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .ollama, .lmStudio]
+        vm.visibleKeysProviders = [.openAI]
+        vm.copilotSidecarExpanded = false
+
+        vm.resetAllViewCustomizations()
+
+        XCTAssertEqual(vm.appearancePreference, .system)
+        XCTAssertEqual(vm.proxyPilotAccentHex, ProxyPilotAccentColor.defaultHex)
+        XCTAssertTrue(vm.liquidGlassEnabled)
+        XCTAssertTrue(vm.showMenuBarExtra)
+        XCTAssertEqual(vm.menuBarSectionOrder, MenuBarSection.defaultOrder)
+        XCTAssertEqual(vm.visibleMenuBarSections, Set(MenuBarSection.defaultOrder))
+        XCTAssertEqual(vm.visibleHomeDashboardSections, Set(HomeDashboardSection.allCases))
+        XCTAssertEqual(vm.defaultSettingsSection, .home)
+        XCTAssertEqual(vm.keysProviderOrder, KeysProviderViewItem.defaultOrder)
+        XCTAssertEqual(vm.visibleKeysProviders, Set(KeysProviderViewItem.defaultOrder))
+        XCTAssertTrue(vm.copilotSidecarExpanded)
     }
 
     func testLocalProviderFetchFailureDoesNotOfferAPIKeyAction() async {
@@ -460,6 +548,54 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(keyCheck?.fixAction, PreflightFixAction.none)
         XCTAssertNotNil(reachability)
         XCTAssertTrue(reachability?.detail.contains("Ollama") == true)
+    }
+
+    func testPreflightWarnsWhenCopilotSidecarInstalledButGitHubAuthMissing() {
+        let preflight = PreflightService()
+        let context = PreflightContext(
+            proxyURLString: "http://127.0.0.1:4000",
+            useBuiltInProxy: true,
+            requireLocalAuth: false,
+            upstreamProvider: .githubCopilot,
+            upstreamAPIBaseURLString: "http://127.0.0.1:8080/v1",
+            fallbackUpstreamBaseURLString: "http://127.0.0.1:8080/v1",
+            hasMasterKey: false,
+            hasUpstreamKey: false,
+            liteLLMScriptsExist: false,
+            isCopilotSidecarInstalled: true,
+            isCopilotGitHubAuthenticated: false
+        )
+
+        let results = preflight.run(context: context)
+        let copilotAuth = results.first { $0.id == "copilot_auth" }
+
+        XCTAssertEqual(copilotAuth?.status, .warning)
+        XCTAssertEqual(copilotAuth?.fixAction, PreflightFixAction.openCopilotLogin)
+        XCTAssertTrue(copilotAuth?.detail.contains("Sign in") == true)
+    }
+
+    func testPreflightShowsConfirmedCopilotSignInOnProviderKeyRowWhenReady() {
+        let preflight = PreflightService()
+        let context = PreflightContext(
+            proxyURLString: "http://127.0.0.1:4000",
+            useBuiltInProxy: true,
+            requireLocalAuth: false,
+            upstreamProvider: .githubCopilot,
+            upstreamAPIBaseURLString: "http://127.0.0.1:8080/v1",
+            fallbackUpstreamBaseURLString: "http://127.0.0.1:8080/v1",
+            hasMasterKey: false,
+            hasUpstreamKey: false,
+            liteLLMScriptsExist: false,
+            isCopilotSidecarInstalled: true,
+            isCopilotGitHubAuthenticated: true
+        )
+
+        let results = preflight.run(context: context)
+        let keyCheck = results.first { $0.id == "upstream_key" }
+
+        XCTAssertEqual(keyCheck?.status, .confirmed)
+        XCTAssertEqual(keyCheck?.fixAction, PreflightFixAction.none)
+        XCTAssertTrue(keyCheck?.detail.contains("(GitHub sign-in detected.)") == true)
     }
 
     // MARK: - Saved Default Models
@@ -715,6 +851,58 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.canSyncProxyModels)
     }
 
+    func testGitHubCopilotDropsStaleStoredModelWithoutLiveFetch() {
+        defaults.set(
+            UpstreamProvider.githubCopilot.rawValue,
+            forKey: ProviderManager.upstreamProviderDefaultsKey
+        )
+        defaults.set(
+            "copilot-chat",
+            forKey: ProviderManager.xcodeAgentModelDefaultsKey(for: .githubCopilot)
+        )
+        defaults.set(
+            ["copilot-chat"],
+            forKey: ProviderManager.defaultModelsKey(for: .githubCopilot)
+        )
+
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm.upstreamProvider, .githubCopilot)
+        XCTAssertEqual(vm.effectiveXcodeAgentModel, "")
+        XCTAssertFalse(vm.xcodeAgentModelCandidates.contains("copilot-chat"))
+        XCTAssertFalse(vm.proxySyncModelCandidates.contains("auto"))
+        XCTAssertFalse(vm.proxySyncModelCandidates.contains("copilot-chat"))
+        XCTAssertFalse(vm.canSyncProxyModels)
+    }
+
+    func testGitHubCopilotLiveModelsReplaceStaleStoredModel() {
+        defaults.set(
+            UpstreamProvider.githubCopilot.rawValue,
+            forKey: ProviderManager.upstreamProviderDefaultsKey
+        )
+        defaults.set(
+            "copilot-chat",
+            forKey: ProviderManager.xcodeAgentModelDefaultsKey(for: .githubCopilot)
+        )
+        defaults.set(
+            ["copilot-chat"],
+            forKey: ProviderManager.defaultModelsKey(for: .githubCopilot)
+        )
+        let manager = makeProviderManager()
+
+        manager.applyFetchedUpstreamModels([
+            UpstreamModel(id: "auto", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "gpt-4.1", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "gpt-5-mini", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ])
+
+        XCTAssertEqual(manager.effectiveXcodeAgentModel, "auto")
+        XCTAssertFalse(manager.xcodeAgentModelCandidates.contains("copilot-chat"))
+        XCTAssertFalse(manager.modelSelectionRows.contains { $0.id == "copilot-chat" })
+        XCTAssertFalse(manager.proxySyncModelCandidates.contains("copilot-chat"))
+        XCTAssertEqual(defaults.stringArray(forKey: ProviderManager.defaultModelsKey(for: .githubCopilot)), [])
+    }
+
     // MARK: - MiniMax Routing Mode (v1.4.16)
 
     func testMiniMaxRoutingModeDefaultsToStandard() {
@@ -884,6 +1072,40 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(capturedEvents[0].properties["is_micah"], "true")
     }
 
+    func testAppOpenedHealthHeartbeatBuildsPostHogCaptureRequestWhenStableKeyIsBundled() throws {
+        var capturedRequests: [URLRequest] = []
+        let telemetryService = TelemetryService(
+            defaults: defaults,
+            baseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true),
+            postHogDeliveryEnabled: true,
+            protectedInternalMarkerURL: nil,
+            postHogAPIKeyProvider: { "test-posthog-key" },
+            postHogRequestHook: { request in
+                capturedRequests.append(request)
+            }
+        )
+
+        telemetryService.trackCoreHealthAppOpen(appVersion: "1.8.1", buildNumber: "103")
+
+        let request = try XCTUnwrap(capturedRequests.first)
+        XCTAssertEqual(capturedRequests.count, 1)
+        XCTAssertEqual(request.url?.absoluteString, "https://us.i.posthog.com/capture/")
+        XCTAssertEqual(request.httpMethod, "POST")
+
+        let bodyData = try XCTUnwrap(request.httpBody)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        XCTAssertEqual(body["event"] as? String, "app_opened")
+        XCTAssertNotNil(body["distinct_id"])
+        XCTAssertNotNil(body["timestamp"])
+        XCTAssertNotNil(body["api_key"])
+
+        let properties = try XCTUnwrap(body["properties"] as? [String: String])
+        XCTAssertEqual(properties, [
+            "app_version": "1.8.1",
+            "build_number": "103"
+        ])
+    }
+
     func testPreflightFailureTelemetryPayloadIncludesActionableContextOnly() {
         let checks = [
             PreflightCheckResult(
@@ -978,9 +1200,54 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertNil(payload["system_info"])
     }
 
-    func testAlphaBuildDoesNotBundlePostHogAPIKey() {
-        let apiKey = Bundle.main.object(forInfoDictionaryKey: "POSTHOG_API_KEY") as? String
-        XCTAssertTrue(apiKey?.isEmpty ?? true)
+    func testStableBuildUsesBundledPostHogKeyWhenPresentAndAlphaBuildsAreRuntimeBlocked() throws {
+        let apiKey = hostAppBundle.object(forInfoDictionaryKey: "POSTHOG_API_KEY") as? String
+        let bundleIdentifier = hostAppBundle.bundleIdentifier
+
+        if AppBuildBadge.isAlphaBundle(bundleIdentifier) {
+            XCTAssertFalse(TelemetryService.defaultPostHogDeliveryEnabled(
+                bundleIdentifier: bundleIdentifier,
+                environment: [:]
+            ))
+        } else {
+            try XCTSkipIf(apiKey?.isEmpty ?? true, "PostHog key restoration is owned by the paired v1.8.1 telemetry session.")
+            XCTAssertFalse(apiKey?.isEmpty ?? true)
+            XCTAssertTrue(TelemetryService.defaultPostHogDeliveryEnabled(
+                bundleIdentifier: bundleIdentifier,
+                environment: [:]
+            ))
+        }
+    }
+
+    func testDefaultPostHogDeliveryIsDisabledForXCTestAndAlphaRuntime() {
+        let stableID = "com.example.ProxyPilot"
+        let alphaID = "com.example.ProxyPilot-alpha"
+        XCTAssertFalse(TelemetryService.defaultPostHogDeliveryEnabled(
+            bundleIdentifier: stableID,
+            environment: ["XCTestConfigurationFilePath": "/tmp/test.xctestconfiguration"]
+        ))
+        XCTAssertFalse(TelemetryService.defaultPostHogDeliveryEnabled(
+            bundleIdentifier: alphaID,
+            environment: [:]
+        ))
+        XCTAssertTrue(TelemetryService.defaultPostHogDeliveryEnabled(
+            bundleIdentifier: stableID,
+            environment: [:]
+        ))
+    }
+
+    private var hostAppBundle: Bundle {
+        guard let testHost = ProcessInfo.processInfo.environment["TEST_HOST"] else {
+            var candidate = Bundle.main.bundleURL
+            while candidate.path != "/" {
+                if candidate.pathExtension == "app", let bundle = Bundle(url: candidate) {
+                    return bundle
+                }
+                candidate.deleteLastPathComponent()
+            }
+            return Bundle(for: AppViewModel.self)
+        }
+        return Bundle(path: testHost) ?? Bundle.main
     }
 
     // MARK: - Custom Providers (v1.4.18)
@@ -1109,6 +1376,27 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.copilotSidecarStatusText.contains("Install the background helper"))
     }
 
+    func testCopilotSidecarRefreshExposesLoginCommand() async {
+        let service = makeCopilotSidecarService(
+            endpointResponding: false,
+            shellRunner: { command in
+                if command.contains("command -v copilot") {
+                    return .init(terminationStatus: 1, stdout: "", stderr: "")
+                }
+                if command.contains("command -v gh") {
+                    return .init(terminationStatus: 0, stdout: "/opt/homebrew/bin/gh\n", stderr: "")
+                }
+                return .init(terminationStatus: 1, stdout: "", stderr: "")
+            }
+        )
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        await vm.refreshCopilotSidecarStatus()
+
+        XCTAssertEqual(vm.copilotSidecarLoginCommand, "gh auth login")
+        XCTAssertTrue(vm.copilotSidecarLoginDescription.contains("GitHub CLI fallback"))
+    }
+
     func testCopilotSidecarLaunchAgentInstalledButEndpointAsleep() async {
         let service = makeCopilotSidecarService(
             endpointResponding: false,
@@ -1135,6 +1423,33 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.isCopilotSidecarExternal)
         XCTAssertFalse(vm.isCopilotSidecarManaged)
         XCTAssertTrue(vm.copilotSidecarStatusText.contains("started elsewhere"))
+    }
+
+    func testCopilotSidecarLogActionShowsInlineLogSnapshot() throws {
+        let logURL = URL(fileURLWithPath: "/tmp/proxypilot_copilot_sidecar.log")
+        let originalData = try? Data(contentsOf: logURL)
+        try? FileManager.default.removeItem(at: logURL)
+        defer {
+            try? FileManager.default.removeItem(at: logURL)
+            if let originalData {
+                try? originalData.write(to: logURL)
+            }
+        }
+
+        try "2026-05-17 WARN Rejected request from unexpected user-agent: curl/8.7.1\n"
+            .write(to: logURL, atomically: true, encoding: .utf8)
+        let service = makeCopilotSidecarService(
+            endpointResponding: false,
+            fileExists: { FileManager.default.fileExists(atPath: $0) }
+        )
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        vm.openCopilotSidecarLog()
+
+        XCTAssertTrue(vm.isCopilotSidecarLogVisible)
+        XCTAssertTrue(vm.copilotSidecarLogText.contains("Rejected request from unexpected user-agent"))
+        XCTAssertTrue(vm.copilotSidecarLogStatusText.contains("Showing"))
+        XCTAssertTrue(vm.copilotSidecarLogStatusText.contains("Copilot sidecar log file"))
     }
 
     func testCopilotSidecarInstallSwitchesProviderAndURL() async {
@@ -1564,7 +1879,8 @@ final class AppViewModelTests: XCTestCase {
         executable: URL? = URL(fileURLWithPath: "/tmp/xcode-copilot-server"),
         endpointResponding: Bool,
         fileExists: @escaping CopilotSidecarService.FileExists = { _ in false },
-        commandRunner: CopilotSidecarService.CommandRunner? = nil
+        commandRunner: CopilotSidecarService.CommandRunner? = nil,
+        shellRunner: CopilotSidecarService.ShellRunner? = nil
     ) -> CopilotSidecarService {
         CopilotSidecarService(
             executableResolver: { executable },
@@ -1575,7 +1891,7 @@ final class AppViewModelTests: XCTestCase {
                 }
                 return .init(terminationStatus: 0, stdout: "", stderr: "")
             },
-            shellRunner: { _ in .init(terminationStatus: 1, stdout: "", stderr: "") },
+            shellRunner: shellRunner ?? { _ in .init(terminationStatus: 1, stdout: "", stderr: "") },
             fileExists: fileExists,
             workspaceOpener: { _ in }
         )

@@ -523,11 +523,25 @@ final class LocalProxyServer: @unchecked Sendable {
                 provider: config.upstreamProvider
             )
             let text = String(decoding: normalized.data, as: UTF8.self)
-            respond(connection: connection, status: normalized.statusCode, body: text, contentType: "application/json")
+            let responseBody: String
+            let responseData: Data
+            if let entitlementMessage = LocalProxyServerHelpers.githubCopilotEntitlementMessage(
+                statusCode: normalized.statusCode,
+                body: text,
+                provider: config.upstreamProvider
+            ) {
+                responseBody = LocalProxyServerHelpers.openAIErrorJSON(message: entitlementMessage)
+                responseData = Data(responseBody.utf8)
+            } else {
+                responseBody = text
+                responseData = normalized.data
+            }
+
+            respond(connection: connection, status: normalized.statusCode, body: responseBody, contentType: "application/json")
             await recordInputOutputLog(
                 inputBody: body,
-                outputBody: normalized.data,
-                model: modelFromResponse(normalized.data) ?? requestModel,
+                outputBody: responseData,
+                model: modelFromResponse(responseData) ?? requestModel,
                 path: "/v1/chat/completions",
                 wasStreaming: false,
                 statusCode: normalized.statusCode,
@@ -612,6 +626,13 @@ final class LocalProxyServer: @unchecked Sendable {
             if httpStatus != 200 {
                 var errorBody = ""
                 for try await line in bytes.lines { errorBody += line }
+                if let entitlementMessage = LocalProxyServerHelpers.githubCopilotEntitlementMessage(
+                    statusCode: httpStatus,
+                    body: errorBody,
+                    provider: config.upstreamProvider
+                ) {
+                    errorBody = LocalProxyServerHelpers.openAIErrorJSON(message: entitlementMessage)
+                }
                 respond(connection: connection, status: httpStatus, body: errorBody, contentType: "application/json")
                 return
             }
@@ -1016,7 +1037,13 @@ final class LocalProxyServer: @unchecked Sendable {
                 respond(
                     connection: connection,
                     status: httpStatus,
-                    body: AnthropicTranslator.errorJSON(message: "Upstream error: \(errorBody)"),
+                    body: AnthropicTranslator.errorJSON(
+                        message: upstreamErrorMessage(
+                            statusCode: httpStatus,
+                            body: errorBody,
+                            provider: config.upstreamProvider
+                        )
+                    ),
                     contentType: "application/json"
                 )
                 return

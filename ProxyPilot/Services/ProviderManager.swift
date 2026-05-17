@@ -158,8 +158,16 @@ final class ProviderManager: ObservableObject {
         return KeychainService.exists(key: key)
     }
 
-    var savedDefaultModels: [String] {
+    private var rawSavedDefaultModels: [String] {
         defaults.stringArray(forKey: Self.defaultModelsKey(for: upstreamProvider)) ?? []
+    }
+
+    var savedDefaultModels: [String] {
+        effectiveSavedDefaultModels(
+            from: rawSavedDefaultModels,
+            provider: upstreamProvider,
+            liveModelIDs: upstreamModels.map(\.id)
+        )
     }
 
     var hasSavedDefaultModels: Bool { !savedDefaultModels.isEmpty }
@@ -172,7 +180,9 @@ final class ProviderManager: ObservableObject {
         let ids = upstreamModels.map(\.id)
         let selected = selectedUpstreamModels.isEmpty ? [] : selectedUpstreamModels.sorted()
         var candidates: [String]
-        if !selected.isEmpty {
+        if upstreamProvider == .githubCopilot {
+            candidates = githubCopilotModelCandidates(liveModelIDs: ids, selectedModelIDs: selected)
+        } else if !selected.isEmpty {
             candidates = selected
         } else if !ids.isEmpty {
             candidates = ids.sorted()
@@ -184,6 +194,7 @@ final class ProviderManager: ObservableObject {
 
         let trimmedSelection = selectedXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedSelection.isEmpty,
+           shouldPreserveStoredXcodeAgentModel(trimmedSelection, candidates: candidates),
            !candidates.contains(where: { $0.caseInsensitiveCompare(trimmedSelection) == .orderedSame }) {
             candidates.insert(trimmedSelection, at: 0)
         }
@@ -199,6 +210,10 @@ final class ProviderManager: ObservableObject {
     }
 
     var proxySyncModelCandidates: [String] {
+        if upstreamProvider == .githubCopilot {
+            return githubCopilotProxySyncModelCandidates()
+        }
+
         if !upstreamModels.isEmpty {
             var candidates = Set(upstreamModels.map(\.id).filter { isModelSelected($0) })
             candidates.formUnion(savedDefaultModelSet)
@@ -382,6 +397,13 @@ final class ProviderManager: ObservableObject {
 
     func applyFetchedUpstreamModels(_ models: [UpstreamModel]) {
         upstreamModels = models
+        if upstreamProvider == .githubCopilot {
+            let liveIDs = models.map(\.id)
+            selectedUpstreamModels = Set(selectedUpstreamModels.compactMap {
+                caseInsensitiveMatch(in: liveIDs, for: $0)
+            })
+            defaults.set(savedDefaultModels, forKey: Self.defaultModelsKey(for: upstreamProvider))
+        }
         selectedUpstreamModels.formUnion(savedDefaultModelSet)
         reconcileXcodeAgentModelSelection()
     }
@@ -445,7 +467,12 @@ final class ProviderManager: ObservableObject {
 
     func preferredXcodeAgentModel(from models: [String], provider: UpstreamProvider? = nil) -> String {
         let activeProvider = provider ?? upstreamProvider
-        let hints = defaults.stringArray(forKey: Self.defaultModelsKey(for: activeProvider)) ?? []
+        let liveModelIDs = activeProvider == upstreamProvider ? upstreamModels.map(\.id) : []
+        let hints = effectiveSavedDefaultModels(
+            from: defaults.stringArray(forKey: Self.defaultModelsKey(for: activeProvider)) ?? [],
+            provider: activeProvider,
+            liveModelIDs: liveModelIDs
+        )
         let fallback = hints.first
             ?? activeProvider.fallbackModelIDs?.first
             ?? ""
@@ -461,9 +488,23 @@ final class ProviderManager: ObservableObject {
 
     func storedXcodeAgentModel(for provider: UpstreamProvider) -> String {
         let providerScopedKey = Self.xcodeAgentModelDefaultsKey(for: provider)
+        let providerDefaults = defaults.stringArray(forKey: Self.defaultModelsKey(for: provider)) ?? []
+
         if let providerStored = defaults.string(forKey: providerScopedKey),
            !providerStored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return providerStored
+            if provider == .githubCopilot {
+                let candidates = githubCopilotStoredModelCandidates(from: providerDefaults)
+                if let match = caseInsensitiveMatch(in: candidates, for: providerStored) {
+                    return match
+                }
+            } else {
+                return providerStored
+            }
+        }
+
+        if provider == .githubCopilot {
+            let candidates = githubCopilotStoredModelCandidates(from: providerDefaults)
+            return preferredXcodeAgentModel(from: candidates, provider: provider)
         }
 
         if provider == .zAI,
@@ -472,7 +513,6 @@ final class ProviderManager: ObservableObject {
             return legacyStored
         }
 
-        let providerDefaults = defaults.stringArray(forKey: Self.defaultModelsKey(for: provider)) ?? []
         return preferredXcodeAgentModel(from: providerDefaults, provider: provider)
     }
 
@@ -508,6 +548,104 @@ final class ProviderManager: ObservableObject {
         let storedBase = defaults.string(forKey: "proxypilot.upstreamAPIBaseURL.\(provider.rawValue)")
         let raw = (provider == upstreamProvider ? upstreamAPIBaseURLString : storedBase) ?? defaultBase
         return proxyService.normalizedUpstreamAPIBase(from: raw) ?? URL(string: defaultBase)
+    }
+
+    private func githubCopilotModelCandidates(liveModelIDs: [String], selectedModelIDs: [String]) -> [String] {
+        if !liveModelIDs.isEmpty {
+            let selectedLiveModels = selectedModelIDs.compactMap {
+                caseInsensitiveMatch(in: liveModelIDs, for: $0)
+            }
+            return selectedLiveModels.isEmpty
+                ? liveModelIDs.sorted()
+                : uniqueModelIDs(selectedLiveModels).sorted()
+        }
+
+        let fallback = UpstreamProvider.githubCopilot.fallbackModelIDs ?? []
+        let selectedFallbackModels = selectedModelIDs.compactMap {
+            caseInsensitiveMatch(in: fallback, for: $0)
+        }
+        if !selectedFallbackModels.isEmpty {
+            return uniqueModelIDs(selectedFallbackModels).sorted()
+        }
+
+        return savedDefaultModels
+    }
+
+    private func githubCopilotProxySyncModelCandidates() -> [String] {
+        let liveModelIDs = upstreamModels.map(\.id)
+        if !liveModelIDs.isEmpty {
+            var candidates = Set(selectedUpstreamModels.compactMap {
+                caseInsensitiveMatch(in: liveModelIDs, for: $0)
+            })
+            let preferred = effectiveXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let preferredLiveModel = caseInsensitiveMatch(in: liveModelIDs, for: preferred) {
+                candidates.insert(preferredLiveModel)
+            }
+            if candidates.isEmpty, let firstLiveModel = liveModelIDs.sorted().first {
+                candidates.insert(firstLiveModel)
+            }
+            return candidates.sorted()
+        }
+
+        let fallback = UpstreamProvider.githubCopilot.fallbackModelIDs ?? []
+        var candidates = Set(savedDefaultModels)
+        candidates.formUnion(selectedUpstreamModels.compactMap {
+            caseInsensitiveMatch(in: fallback, for: $0)
+        })
+        let selected = selectedXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let selectedFallbackModel = caseInsensitiveMatch(in: fallback, for: selected) {
+            candidates.insert(selectedFallbackModel)
+        }
+        if candidates.isEmpty, !fallback.isEmpty {
+            candidates.formUnion(fallback)
+        }
+        return candidates.sorted()
+    }
+
+    private func githubCopilotStoredModelCandidates(from rawDefaults: [String]) -> [String] {
+        let fallback = UpstreamProvider.githubCopilot.fallbackModelIDs ?? []
+        let savedFallbackModels = rawDefaults.compactMap {
+            caseInsensitiveMatch(in: fallback, for: $0)
+        }
+        return savedFallbackModels.isEmpty ? fallback : uniqueModelIDs(savedFallbackModels)
+    }
+
+    private func effectiveSavedDefaultModels(
+        from rawModels: [String],
+        provider: UpstreamProvider,
+        liveModelIDs: [String]
+    ) -> [String] {
+        guard provider == .githubCopilot else { return rawModels }
+        let allowedModelIDs = liveModelIDs.isEmpty
+            ? (UpstreamProvider.githubCopilot.fallbackModelIDs ?? [])
+            : liveModelIDs
+        guard !allowedModelIDs.isEmpty else { return [] }
+        return uniqueModelIDs(rawModels.compactMap {
+            caseInsensitiveMatch(in: allowedModelIDs, for: $0)
+        })
+    }
+
+    private func shouldPreserveStoredXcodeAgentModel(_ model: String, candidates: [String]) -> Bool {
+        guard upstreamProvider == .githubCopilot else { return true }
+        return caseInsensitiveMatch(in: candidates, for: model) != nil
+    }
+
+    private func caseInsensitiveMatch(in values: [String], for candidate: String) -> String? {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return values.first { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
+    }
+
+    private func uniqueModelIDs(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for value in values {
+            let key = value.lowercased()
+            if seen.insert(key).inserted {
+                result.append(value)
+            }
+        }
+        return result
     }
 
     private func persistSelectedXcodeAgentModel() {

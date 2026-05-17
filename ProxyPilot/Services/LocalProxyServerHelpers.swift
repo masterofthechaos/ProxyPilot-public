@@ -161,12 +161,62 @@ enum LocalProxyServerHelpers {
         body: String,
         provider: UpstreamProvider
     ) -> String {
+        if let message = githubCopilotEntitlementMessage(
+            statusCode: statusCode,
+            body: body,
+            provider: provider
+        ) {
+            return message
+        }
+
         if provider == .google,
            statusCode == 400,
            body.localizedCaseInsensitiveContains("thought_signature") {
             return "Google direct rejected the tool-call continuation due to thought_signature validation. If this persists, use OpenRouter as the current workaround."
         }
         return "Upstream error: \(body)"
+    }
+
+    static func githubCopilotEntitlementMessage(
+        statusCode: Int,
+        body: String,
+        provider: UpstreamProvider
+    ) -> String? {
+        guard provider == .githubCopilot else { return nil }
+        guard statusCode == 401 || statusCode == 403 || statusCode == 500 else { return nil }
+
+        let lowered = body.lowercased()
+        if lowered.contains("unexpected user-agent") {
+            return nil
+        }
+
+        let mentionsCopilot = lowered.contains("copilot")
+        let entitlementTerms = [
+            "subscription",
+            "entitlement",
+            "seat",
+            "billing",
+            "not subscribed",
+            "does not have access",
+            "do not have access",
+            "no access",
+            "not eligible",
+            "not enabled",
+            "access denied"
+        ]
+        let entitlementLanguage = entitlementTerms.contains(where: lowered.contains)
+        let authorizationLanguage = statusCode == 403 && lowered.contains("not authorized")
+        if mentionsCopilot && (entitlementLanguage || authorizationLanguage) {
+            return "GitHub authentication is present, but this account does not appear to have GitHub Copilot access. ProxyPilot needs a GitHub account with Copilot Pro, Business, Enterprise, or an organization-assigned Copilot seat."
+        }
+
+        let genericSidecarAccessFailure = statusCode == 500
+            && (lowered.contains("failed to list models") || lowered.contains("failed to create session"))
+        if genericSidecarAccessFailure {
+            return "GitHub Copilot sidecar could not access Copilot models. If GitHub authentication completed successfully, this account does not appear to have GitHub Copilot access. ProxyPilot needs a GitHub account with Copilot Pro, Business, Enterprise, or an organization-assigned Copilot seat."
+        }
+
+        return nil
     }
 
     // MARK: - Log Redaction

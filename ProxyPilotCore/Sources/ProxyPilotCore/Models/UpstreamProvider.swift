@@ -139,12 +139,6 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
                 "MiniMax-M2.1-highspeed",
                 "MiniMax-M2"
             ]
-        case .githubCopilot:
-            return [
-                "gpt-5.4",
-                "gpt-4o",
-                "copilot-chat"
-            ]
         default: return nil
         }
     }

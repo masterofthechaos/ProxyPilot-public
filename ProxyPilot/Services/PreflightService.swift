@@ -4,6 +4,7 @@ import ProxyPilotCore
 
 enum PreflightCheckStatus: String, Codable {
     case pass
+    case confirmed
     case info
     case warning
     case fail
@@ -12,6 +13,7 @@ enum PreflightCheckStatus: String, Codable {
 enum PreflightFixAction: String, Codable {
     case openMasterKeyEditor
     case openUpstreamKeyEditor
+    case openCopilotLogin
     case resetProxyURL
     case switchToBuiltInProxy
     case resetUpstreamURL
@@ -37,6 +39,8 @@ struct PreflightContext: Equatable {
     let hasMasterKey: Bool
     let hasUpstreamKey: Bool
     let liteLLMScriptsExist: Bool
+    var isCopilotSidecarInstalled: Bool = false
+    var isCopilotGitHubAuthenticated: Bool = false
 }
 
 struct ProxyURLValidation: Equatable {
@@ -176,11 +180,17 @@ final class PreflightService {
         }
 
         if !context.upstreamProvider.requiresAPIKey {
+            let isConfirmedCopilot = context.upstreamProvider == .githubCopilot
+                && context.isCopilotSidecarInstalled
+                && context.isCopilotGitHubAuthenticated
+            let detail = "\(context.upstreamProvider.title) " + String(localized: "does not require an API key in ProxyPilot.")
             results.append(.init(
                 id: "upstream_key",
                 title: String(localized: "Provider API Key"),
-                detail: "\(context.upstreamProvider.title) " + String(localized: "does not require an API key in ProxyPilot."),
-                status: .info,
+                detail: isConfirmedCopilot
+                    ? detail + " " + String(localized: "(GitHub sign-in detected.)")
+                    : detail,
+                status: isConfirmedCopilot ? .confirmed : .info,
                 fixAction: .none
             ))
         } else if context.hasUpstreamKey {
@@ -198,6 +208,18 @@ final class PreflightService {
                 detail: String(localized: "Missing upstream API key in Keychain."),
                 status: .fail,
                 fixAction: .openUpstreamKeyEditor
+            ))
+        }
+
+        if context.upstreamProvider == .githubCopilot,
+           context.isCopilotSidecarInstalled,
+           !context.isCopilotGitHubAuthenticated {
+            results.append(.init(
+                id: "copilot_auth",
+                title: String(localized: "GitHub Copilot Sign-In"),
+                detail: String(localized: "xcode-copilot-server is installed, but GitHub sign-in is not detected. Sign in before testing or routing Copilot requests."),
+                status: .warning,
+                fixAction: .openCopilotLogin
             ))
         }
 

@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var recoveryCommandsCopied: Bool = false
     @State private var diyCommandsCopied: Bool = false
     @State private var copilotInstallCommandCopied: Bool = false
+    @State private var copilotLoginCommandCopied: Bool = false
     @AppStorage("proxypilot.preflightExpanded") private var preflightExpanded: Bool = true
     @State private var showNuclearResetConfirm: Bool = false
     @State private var selectedSection: SettingsSection = .home
@@ -1148,118 +1149,31 @@ struct ContentView: View {
 
     private var keysTab: some View {
         Form {
-            Section("GitHub Copilot (Beta)") {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text("Copilot helper")
-                                    .font(.subheadline.bold())
-                                Text("Beta")
-                                    .font(.caption2.weight(.semibold))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.orange.opacity(0.16), in: Capsule())
-                                    .foregroundStyle(.orange)
-                            }
-                            Text("Runs xcode-copilot-server locally on port 8080 and routes ProxyPilot through your existing GitHub Copilot account.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Label(copilotSidecarBadgeTitle, systemImage: copilotSidecarBadgeSystemImage)
-                            .font(.caption)
-                            .foregroundStyle(copilotSidecarBadgeColor)
-                    }
-
-                    if !vm.copilotSidecarExecutablePath.isEmpty {
-                        Text(verbatim: "Executable: \(vm.copilotSidecarExecutablePath)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if !vm.copilotSidecarStatusText.isEmpty {
-                        Text(vm.copilotSidecarStatusText)
-                            .font(.caption)
-                            .foregroundStyle(colorForCopilotSidecarStatus())
-                            .textSelection(.enabled)
-                    }
-
-                    HStack(spacing: 12) {
-                        Button(copilotSidecarPrimaryActionTitle) {
-                            performCopilotSidecarPrimaryAction()
-                        }
-                        .disabled(copilotSidecarPrimaryActionDisabled)
-
-                        if !vm.copilotSidecarExecutablePath.isEmpty {
-                            Button(copilotSidecarSecondaryActionTitle) {
-                                Task { await vm.stopCopilotSidecar() }
-                            }
-                            .disabled(copilotSidecarSecondaryActionDisabled)
-                        }
-
-                        Button("Refresh") {
-                            Task { await vm.refreshCopilotSidecarStatus() }
-                        }
-
-                        Button("Open Log") {
-                            vm.openCopilotSidecarLog()
-                        }
-
-                        Spacer()
-                    }
-
-                    if copilotInstallCommandCopied && vm.copilotSidecarExecutablePath.isEmpty {
-                        Text("Copied install command: \(copilotSidecarInstallCommand)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Requires your own GitHub Copilot access plus `xcode-copilot-server`.")
-                        Text("Requests may consume GitHub AI Credits. GitHub controls billing, budgets, model access, authentication, and limits.")
-                    }
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-
-                    HStack(spacing: 4) {
-                        Text("Thanks to")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Button("theblixguy/xcode-copilot-server") {
-                            vm.openCopilotSidecarProject()
-                        }
-                        .buttonStyle(.link)
-                        .font(.caption2)
-                        Text("which powers the Copilot sidecar.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+            if vm.isKeysProviderVisible(.githubCopilot) {
+                copilotSidecarSection
             }
 
             Section {
-                Text("API keys are stored in macOS Keychain under the \"proxypilot\" service.")
+                Text("API keys are stored in macOS Keychain under the \"proxypilot\" service. Local providers do not require API keys in ProxyPilot.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                ForEach(UpstreamProvider.allCases.filter { $0.requiresAPIKey }, id: \.self) { provider in
-                    providerKeyRow(provider)
+                if orderedVisibleKeysProviders.isEmpty {
+                    Text("No built-in providers are visible. Re-enable providers from Customization.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(orderedVisibleKeysProviders, id: \.self) { provider in
+                        if provider.requiresAPIKey {
+                            providerKeyRow(provider)
+                        } else {
+                            localProviderSetupRow(provider)
+                        }
+                    }
                 }
             } header: {
                 Text("Supported Providers")
-            }
-
-            Section("Local Providers") {
-                Text("Local providers do not require API keys in ProxyPilot. They must be running locally before Fetch Live Models or Test Upstream Response can prove a route.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                ForEach(UpstreamProvider.allCases.filter { $0.isLocal }, id: \.self) { provider in
-                    localProviderSetupRow(provider)
-                }
             }
 
             Section {
@@ -1312,6 +1226,190 @@ struct ContentView: View {
             AddCustomProviderView { name, url, key in
                 vm.addCustomProvider(name: name, apiBaseURL: url, apiKey: key)
             }
+        }
+    }
+
+    private var orderedVisibleKeysProviders: [UpstreamProvider] {
+        vm.keysProviderOrder
+            .map(\.provider)
+            .filter { vm.isKeysProviderVisible($0) }
+    }
+
+    private var copilotSidecarSection: some View {
+        Section("GitHub Copilot (Beta)") {
+            DisclosureGroup(isExpanded: Binding(
+                get: { vm.copilotSidecarExpanded },
+                set: { vm.copilotSidecarExpanded = $0 }
+            )) {
+                VStack(alignment: .leading, spacing: 8) {
+                    copilotSidecarDetails
+                }
+                .padding(.top, 6)
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text("Copilot helper")
+                                .font(.subheadline.bold())
+                            Text("Beta")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.orange.opacity(0.16), in: Capsule())
+                                .foregroundStyle(.orange)
+                        }
+                        Text("Runs xcode-copilot-server locally on port 8080 after GitHub Copilot authentication is set up.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Label(copilotSidecarBadgeTitle, systemImage: copilotSidecarBadgeSystemImage)
+                        .font(.caption)
+                        .foregroundStyle(copilotSidecarBadgeColor)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var copilotSidecarDetails: some View {
+        if !vm.copilotSidecarExecutablePath.isEmpty {
+            Text(verbatim: "Executable: \(vm.copilotSidecarExecutablePath)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+
+        if !vm.copilotSidecarStatusText.isEmpty {
+            Text(vm.copilotSidecarStatusText)
+                .font(.caption)
+                .foregroundStyle(colorForCopilotSidecarStatus())
+                .textSelection(.enabled)
+        }
+
+        VStack(alignment: .leading, spacing: 4) {
+            Text(vm.isCopilotSidecarGitHubAuthenticated ? "GitHub sign-in detected" : "Sign in before helper setup")
+                .font(.caption.bold())
+            Text(vm.copilotSidecarLoginDescription)
+                .font(.caption)
+                .foregroundStyle(vm.isCopilotSidecarGitHubAuthenticated ? .green : .secondary)
+                .textSelection(.enabled)
+        }
+
+        HStack(spacing: 12) {
+            if !vm.isCopilotSidecarGitHubAuthenticated {
+                Button(copilotSidecarLoginActionTitle) {
+                    performCopilotSidecarLoginAction()
+                }
+            }
+
+            Button(copilotSidecarPrimaryActionTitle) {
+                performCopilotSidecarPrimaryAction()
+            }
+            .disabled(copilotSidecarPrimaryActionDisabled)
+
+            if !vm.copilotSidecarExecutablePath.isEmpty {
+                Button(copilotSidecarSecondaryActionTitle) {
+                    Task { await vm.stopCopilotSidecar() }
+                }
+                .disabled(copilotSidecarSecondaryActionDisabled)
+            }
+
+            Button("Refresh") {
+                Task { await vm.refreshCopilotSidecarStatus() }
+            }
+
+            Button(vm.isTestingCopilotToolCall ? "Testing Tool Call..." : "Test Tool Call") {
+                Task { await vm.testCopilotToolCall() }
+            }
+            .disabled(vm.isTestingCopilotToolCall || vm.copilotSidecarExecutablePath.isEmpty)
+
+            Button(vm.isCopilotSidecarLogVisible ? "Refresh Log" : "Show Log") {
+                vm.openCopilotSidecarLog()
+            }
+
+            Spacer()
+        }
+
+        if copilotInstallCommandCopied && vm.copilotSidecarExecutablePath.isEmpty {
+            Text("Copied install command: \(copilotSidecarInstallCommand)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+
+        if copilotLoginCommandCopied {
+            Text("Copied login commands: copilot login or gh auth login")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+
+        if !vm.copilotToolCallTestOutput.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Label(copilotToolCallResultTitle, systemImage: copilotToolCallResultSystemImage)
+                    .foregroundStyle(copilotToolCallResultColor)
+                if !vm.copilotToolCallTestModelUsed.isEmpty {
+                    Text("Tool-call test model: \(vm.copilotToolCallTestModelUsed)")
+                        .foregroundStyle(.secondary)
+                }
+                Text(vm.copilotToolCallTestOutput)
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption)
+            .textSelection(.enabled)
+        }
+
+        if vm.isCopilotSidecarLogVisible {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Label("Copilot sidecar log", systemImage: "doc.text.magnifyingglass")
+                        .font(.caption.bold())
+                    Spacer()
+                    Button("Refresh") {
+                        vm.openCopilotSidecarLog()
+                    }
+                }
+
+                if !vm.copilotSidecarLogStatusText.isEmpty {
+                    Text(vm.copilotSidecarLogStatusText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                ScrollView {
+                    Text(vm.copilotSidecarLogText)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .frame(maxHeight: 180)
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.35), in: RoundedRectangle(cornerRadius: 6))
+            }
+        }
+
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Requires your own GitHub Copilot access, authentication, and `xcode-copilot-server`.")
+            Text("Test Tool Call sends a tiny streaming request and may consume GitHub AI Credits. GitHub controls billing, budgets, model access, authentication, and limits.")
+            Text(.init("As of 5-17-2026, GitHub is actively changing their Copilot subscription service. New users may not sign up, and existing users may encounter unexpected limits. For the latest, refer to [official documentation](https://docs.github.com/en/copilot/get-started/plans)."))
+        }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+
+        HStack(spacing: 4) {
+            Text("Thanks to")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Button("theblixguy/xcode-copilot-server") {
+                vm.openCopilotSidecarProject()
+            }
+            .buttonStyle(.link)
+            .font(.caption2)
+            Text("which powers the Copilot sidecar.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -1603,7 +1701,7 @@ struct ContentView: View {
                     .font(.subheadline)
                 Spacer()
                 if result.fixAction != .none {
-                    Button("Fix") {
+                    Button(preflightFixActionTitle(result.fixAction)) {
                         handlePreflightFixAction(result.fixAction)
                     }
                     .font(.caption)
@@ -1619,6 +1717,8 @@ struct ContentView: View {
         switch status {
         case .pass:
             return "checkmark.circle.fill"
+        case .confirmed:
+            return "checkmark.circle.fill"
         case .info:
             return "info.circle.fill"
         case .warning:
@@ -1632,12 +1732,23 @@ struct ContentView: View {
         switch status {
         case .pass:
             return .green
+        case .confirmed:
+            return .secondary
         case .info:
             return .secondary
         case .warning:
             return .orange
         case .fail:
             return .red
+        }
+    }
+
+    private func preflightFixActionTitle(_ action: PreflightFixAction) -> String {
+        switch action {
+        case .openCopilotLogin:
+            return "Sign In"
+        default:
+            return "Fix"
         }
     }
 
@@ -1679,6 +1790,51 @@ struct ContentView: View {
         return .secondary
     }
 
+    private var copilotToolCallResultTitle: String {
+        if vm.isTestingCopilotToolCall {
+            return "Tool-call test running"
+        }
+
+        switch vm.copilotToolCallTestSucceeded {
+        case .some(true):
+            return "Tool-call test succeeded"
+        case .some(false):
+            return "Tool-call test needs attention"
+        case .none:
+            return "Tool-call test status"
+        }
+    }
+
+    private var copilotToolCallResultSystemImage: String {
+        if vm.isTestingCopilotToolCall {
+            return "clock"
+        }
+
+        switch vm.copilotToolCallTestSucceeded {
+        case .some(true):
+            return "checkmark.circle.fill"
+        case .some(false):
+            return "exclamationmark.triangle.fill"
+        case .none:
+            return "info.circle.fill"
+        }
+    }
+
+    private var copilotToolCallResultColor: Color {
+        if vm.isTestingCopilotToolCall {
+            return .secondary
+        }
+
+        switch vm.copilotToolCallTestSucceeded {
+        case .some(true):
+            return .green
+        case .some(false):
+            return .orange
+        case .none:
+            return .secondary
+        }
+    }
+
     private var copilotSidecarPrimaryActionTitle: String {
         if vm.isStartingCopilotSidecar { return "Installing..." }
         if vm.copilotSidecarExecutablePath.isEmpty {
@@ -1696,6 +1852,12 @@ struct ContentView: View {
         return vm.isStartingCopilotSidecar
             || vm.isCopilotSidecarAgentInstalled
             || vm.isCopilotSidecarEndpointResponding
+    }
+
+    private var copilotSidecarLoginActionTitle: String {
+        vm.copilotSidecarLoginCommand.isEmpty
+            ? "Copy Login Commands"
+            : "Open \(vm.copilotSidecarLoginCommand)"
     }
 
     private var copilotSidecarSecondaryActionTitle: String {
@@ -1719,6 +1881,18 @@ struct ContentView: View {
         }
 
         Task { await vm.startCopilotSidecar() }
+    }
+
+    private func performCopilotSidecarLoginAction() {
+        copilotLoginCommandCopied = false
+        if vm.copilotSidecarLoginCommand.isEmpty {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString("copilot login\n# or\ngh auth login", forType: .string)
+            copilotLoginCommandCopied = true
+            return
+        }
+
+        Task { await vm.openCopilotLoginTerminal() }
     }
 
     private func copyCopilotSidecarInstallCommand() {
@@ -1748,6 +1922,8 @@ struct ContentView: View {
         case .openMasterKeyEditor:
             selectedSection = .keys
             vm.showingMasterKeyField = true
+        case .openCopilotLogin:
+            performCopilotSidecarLoginAction()
         default:
             vm.applyPreflightFixAction(action)
         }

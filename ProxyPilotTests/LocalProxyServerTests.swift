@@ -416,6 +416,37 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertEqual(msg, "Upstream error: thought_signature error")
     }
 
+    func testUpstreamErrorGitHubCopilotEntitlementExplainsAccessRequirement() {
+        let msg = H.upstreamErrorMessage(
+            statusCode: 403,
+            body: #"{"error":{"message":"GitHub Copilot subscription required for this account"}}"#,
+            provider: .githubCopilot
+        )
+        XCTAssertTrue(msg.contains("GitHub authentication is present"))
+        XCTAssertTrue(msg.contains("does not appear to have GitHub Copilot access"))
+        XCTAssertTrue(msg.contains("Copilot Pro, Business, Enterprise"))
+    }
+
+    func testUpstreamErrorGitHubCopilotMaskedModelListFailureExplainsAccessRequirement() {
+        let msg = H.upstreamErrorMessage(
+            statusCode: 500,
+            body: #"{"error":{"message":"Failed to list models","type":"api_error"}}"#,
+            provider: .githubCopilot
+        )
+        XCTAssertTrue(msg.contains("GitHub Copilot sidecar could not access Copilot models"))
+        XCTAssertTrue(msg.contains("If GitHub authentication completed successfully"))
+        XCTAssertTrue(msg.contains("does not appear to have GitHub Copilot access"))
+    }
+
+    func testUpstreamErrorGitHubCopilotUnexpectedUserAgentStaysGeneric() {
+        let msg = H.upstreamErrorMessage(
+            statusCode: 403,
+            body: "Forbidden: unexpected user-agent curl/8.7.1",
+            provider: .githubCopilot
+        )
+        XCTAssertEqual(msg, "Upstream error: Forbidden: unexpected user-agent curl/8.7.1")
+    }
+
     // MARK: - Log Redaction
 
     func testScrubBearerReplacesToken() {

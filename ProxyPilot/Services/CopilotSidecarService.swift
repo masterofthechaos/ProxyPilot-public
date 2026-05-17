@@ -22,8 +22,17 @@ final class CopilotSidecarService {
         let isExternal: Bool
         let isManaged: Bool
         let isRunning: Bool
+        let isGitHubAuthenticated: Bool
+        let githubAccount: String?
         let message: String
+        let loginCommand: String?
+        let loginCommandDescription: String
         let logURLs: [URL]
+    }
+
+    struct LogSnapshot: Sendable, Equatable {
+        let text: String
+        let summary: String
     }
 
     struct DirectProcessLaunch {
@@ -154,6 +163,7 @@ final class CopilotSidecarService {
         let external = endpointResponding && !directProcessRunning && !launchAgentInstalled
         let managed = directProcessRunning || launchAgentInstalled
         let running = endpointResponding || directProcessRunning || launchAgentInstalled
+        let loginCommand = await preferredLoginCommand()
 
         return Status(
             executablePath: executable?.path,
@@ -164,6 +174,8 @@ final class CopilotSidecarService {
             isExternal: external,
             isManaged: managed,
             isRunning: running,
+            isGitHubAuthenticated: loginCommand.isAuthenticated,
+            githubAccount: loginCommand.account,
             message: statusMessage(
                 executableFound: executable != nil,
                 supportsLaunchAgent: supportsLaunchAgentStatus,
@@ -172,6 +184,8 @@ final class CopilotSidecarService {
                 directProcessRunning: directProcessRunning,
                 external: external
             ),
+            loginCommand: loginCommand.command,
+            loginCommandDescription: loginCommand.description,
             logURLs: logURLs(forLaunchAgent: launchAgentInstalled)
         )
     }
@@ -224,6 +238,65 @@ final class CopilotSidecarService {
         workspaceOpener(existingLogs.isEmpty ? [launchAgentOutLogURL] : existingLogs)
     }
 
+    func logSnapshot(maxBytesPerFile: Int = 32_000) -> LogSnapshot {
+        let existingLogs = allLogURLs.filter { fileExists($0.path) }
+        let inspectedLogs = existingLogs.isEmpty ? allLogURLs : existingLogs
+        let chunks = inspectedLogs.compactMap { logURL -> String? in
+            guard fileExists(logURL.path),
+                  let text = readLogTail(from: logURL, maxBytes: maxBytesPerFile)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty else {
+                return nil
+            }
+
+            return "== \(logURL.path) ==\n\(text)"
+        }
+
+        if chunks.isEmpty {
+            return LogSnapshot(
+                text: "No Copilot sidecar log output found yet.\n\nChecked:\n\(allLogURLs.map(\.path).joined(separator: "\n"))",
+                summary: "No Copilot sidecar log output found."
+            )
+        }
+
+        let fileCount = chunks.count
+        return LogSnapshot(
+            text: chunks.joined(separator: "\n\n"),
+            summary: "Showing \(fileCount) Copilot sidecar log file\(fileCount == 1 ? "" : "s")."
+        )
+    }
+
+    private func readLogTail(from url: URL, maxBytes: Int) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer {
+            try? handle.close()
+        }
+
+        let byteLimit = UInt64(max(1, maxBytes))
+        guard let fileSize = try? handle.seekToEnd() else { return nil }
+        let offset = fileSize > byteLimit ? fileSize - byteLimit : 0
+        do {
+            try handle.seek(toOffset: offset)
+            guard let data = try handle.readToEnd(), !data.isEmpty else { return nil }
+            return String(decoding: data, as: UTF8.self)
+        } catch {
+            return nil
+        }
+    }
+
+    func openLoginTerminal(command: String) async {
+        let escapedCommand = Self.appleScriptStringLiteral(
+            "\(command); printf '\\nProxyPilot Copilot login command finished. Press Return to close this window. '; read"
+        )
+        let script = """
+        tell application "Terminal"
+            activate
+            do script "\(escapedCommand)"
+        end tell
+        """
+        _ = await commandRunner(URL(fileURLWithPath: "/usr/bin/osascript"), ["-e", script])
+    }
+
     private var allLogURLs: [URL] {
         [launchAgentOutLogURL, launchAgentErrLogURL, directLogURL]
     }
@@ -271,6 +344,92 @@ final class CopilotSidecarService {
         guard result.terminationStatus == 0 else { return false }
         let output = result.combinedOutput
         return output.contains("install-agent") && output.contains("uninstall-agent")
+    }
+
+    private struct LoginCommand {
+        let command: String?
+        let description: String
+        let isAuthenticated: Bool
+        let account: String?
+    }
+
+    private func preferredLoginCommand() async -> LoginCommand {
+        if await shellCommandExists("gh") {
+            let authStatus = await githubCLIAuthenticationStatus()
+            if authStatus.isAuthenticated {
+                let accountText = authStatus.account.map { " as \($0)" } ?? ""
+                return LoginCommand(
+                    command: nil,
+                    description: "Signed in to GitHub\(accountText) via GitHub CLI. ProxyPilot can now try the Copilot helper; Copilot access is checked separately by GitHub.",
+                    isAuthenticated: true,
+                    account: authStatus.account
+                )
+            }
+        }
+
+        if await shellCommandExists("copilot") {
+            return LoginCommand(
+                command: "copilot login",
+                description: "Authenticate GitHub Copilot first. ProxyPilot will open Terminal and run the Copilot CLI device-login flow.",
+                isAuthenticated: false,
+                account: nil
+            )
+        }
+
+        if await shellCommandExists("gh") {
+            return LoginCommand(
+                command: "gh auth login",
+                description: "Authenticate GitHub first. xcode-copilot-server can use GitHub CLI fallback auth when Copilot CLI is not installed.",
+                isAuthenticated: false,
+                account: nil
+            )
+        }
+
+        return LoginCommand(
+            command: nil,
+            description: "Authenticate GitHub Copilot before using this helper. Install GitHub Copilot CLI and run `copilot login`, or install GitHub CLI and run `gh auth login`.",
+            isAuthenticated: false,
+            account: nil
+        )
+    }
+
+    private struct GitHubAuthenticationStatus {
+        let isAuthenticated: Bool
+        let account: String?
+    }
+
+    private func githubCLIAuthenticationStatus() async -> GitHubAuthenticationStatus {
+        let result = await shellRunner("gh auth status --hostname github.com")
+        guard result.terminationStatus == 0 else {
+            return GitHubAuthenticationStatus(isAuthenticated: false, account: nil)
+        }
+
+        return GitHubAuthenticationStatus(
+            isAuthenticated: true,
+            account: Self.githubAccountName(fromAuthStatusOutput: result.combinedOutput)
+        )
+    }
+
+    static func githubAccountName(fromAuthStatusOutput output: String) -> String? {
+        for line in output.components(separatedBy: .newlines) {
+            guard let accountRange = line.range(of: " account ") else { continue }
+            let suffix = line[accountRange.upperBound...]
+            let token = suffix
+                .split(whereSeparator: { $0.isWhitespace || $0 == "(" })
+                .first
+                .map(String.init)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let token, !token.isEmpty {
+                return token
+            }
+        }
+        return nil
+    }
+
+    private func shellCommandExists(_ command: String) async -> Bool {
+        let result = await shellRunner("command -v \(command)")
+        return result.terminationStatus == 0
+            && !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func isLaunchAgentInstalled() async -> Bool {
@@ -357,6 +516,12 @@ final class CopilotSidecarService {
         } catch {
             return false
         }
+    }
+
+    private static func appleScriptStringLiteral(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
     private static func runCommand(executablePath: String, arguments: [String]) async -> CommandResult {

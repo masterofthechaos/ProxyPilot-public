@@ -61,6 +61,75 @@ final class CopilotSidecarServiceTests: XCTestCase {
         XCTAssertTrue(status.message.contains("Install xcode-copilot-server"))
     }
 
+    func testStatusPrefersCopilotLoginWhenCopilotCLIIsAvailable() async {
+        let service = makeService(
+            endpointResponding: false,
+            shellRunner: { command in
+                if command.contains("command -v copilot") {
+                    return .init(terminationStatus: 0, stdout: "/opt/homebrew/bin/copilot\n", stderr: "")
+                }
+                if command.contains("command -v gh") {
+                    return .init(terminationStatus: 0, stdout: "/opt/homebrew/bin/gh\n", stderr: "")
+                }
+                return .init(terminationStatus: 1, stdout: "", stderr: "")
+            }
+        )
+
+        let status = await service.status()
+
+        XCTAssertEqual(status.loginCommand, "copilot login")
+        XCTAssertTrue(status.loginCommandDescription.contains("Copilot CLI"))
+    }
+
+    func testStatusFallsBackToGitHubLoginWhenCopilotCLIIsMissing() async {
+        let service = makeService(
+            endpointResponding: false,
+            shellRunner: { command in
+                if command.contains("command -v copilot") {
+                    return .init(terminationStatus: 1, stdout: "", stderr: "")
+                }
+                if command.contains("command -v gh") {
+                    return .init(terminationStatus: 0, stdout: "/opt/homebrew/bin/gh\n", stderr: "")
+                }
+                return .init(terminationStatus: 1, stdout: "", stderr: "")
+            }
+        )
+
+        let status = await service.status()
+
+        XCTAssertEqual(status.loginCommand, "gh auth login")
+        XCTAssertTrue(status.loginCommandDescription.contains("GitHub CLI fallback"))
+    }
+
+    func testStatusDetectsCompletedGitHubCLIAuthentication() async {
+        let service = makeService(
+            endpointResponding: false,
+            shellRunner: { command in
+                if command.contains("command -v copilot") {
+                    return .init(terminationStatus: 1, stdout: "", stderr: "")
+                }
+                if command.contains("command -v gh") {
+                    return .init(terminationStatus: 0, stdout: "/opt/homebrew/bin/gh\n", stderr: "")
+                }
+                if command.contains("gh auth status") {
+                    return .init(
+                        terminationStatus: 0,
+                        stdout: "github.com\n  ✓ Logged in to github.com account masterofthechaos (keyring)\n",
+                        stderr: ""
+                    )
+                }
+                return .init(terminationStatus: 1, stdout: "", stderr: "")
+            }
+        )
+
+        let status = await service.status()
+
+        XCTAssertTrue(status.isGitHubAuthenticated)
+        XCTAssertEqual(status.githubAccount, "masterofthechaos")
+        XCTAssertNil(status.loginCommand)
+        XCTAssertTrue(status.loginCommandDescription.contains("Signed in to GitHub as masterofthechaos"))
+    }
+
     func testStatusEndpointRespondingExternally() async {
         let service = makeService(endpointResponding: true)
 
@@ -92,11 +161,44 @@ final class CopilotSidecarServiceTests: XCTestCase {
         XCTAssertEqual(commands.last, ["uninstall-agent"])
     }
 
+    func testLogSnapshotReadsExistingLogWithoutOpeningWorkspace() throws {
+        let logURL = URL(fileURLWithPath: "/tmp/proxypilot_copilot_sidecar.log")
+        let originalData = try? Data(contentsOf: logURL)
+        try? FileManager.default.removeItem(at: logURL)
+        defer {
+            try? FileManager.default.removeItem(at: logURL)
+            if let originalData {
+                try? originalData.write(to: logURL)
+            }
+        }
+
+        try "2026-05-17 WARN Rejected request from unexpected user-agent: curl/8.7.1\n"
+            .write(to: logURL, atomically: true, encoding: .utf8)
+
+        var openedURLs: [URL] = []
+        let service = CopilotSidecarService(
+            executableResolver: { URL(fileURLWithPath: "/tmp/xcode-copilot-server") },
+            endpointProbe: { false },
+            commandRunner: { _, _ in .init(terminationStatus: 0, stdout: "", stderr: "") },
+            shellRunner: { _ in .init(terminationStatus: 1, stdout: "", stderr: "") },
+            fileExists: { FileManager.default.fileExists(atPath: $0) },
+            workspaceOpener: { openedURLs = $0 }
+        )
+
+        let snapshot = service.logSnapshot()
+
+        XCTAssertTrue(snapshot.text.contains("Rejected request from unexpected user-agent"))
+        XCTAssertTrue(snapshot.summary.contains("Showing"))
+        XCTAssertTrue(snapshot.summary.contains("Copilot sidecar log file"))
+        XCTAssertTrue(openedURLs.isEmpty)
+    }
+
     private func makeService(
         executable: URL? = URL(fileURLWithPath: "/tmp/xcode-copilot-server"),
         endpointResponding: Bool,
         fileExists: @escaping CopilotSidecarService.FileExists = { _ in false },
-        commandRunner: CopilotSidecarService.CommandRunner? = nil
+        commandRunner: CopilotSidecarService.CommandRunner? = nil,
+        shellRunner: CopilotSidecarService.ShellRunner? = nil
     ) -> CopilotSidecarService {
         CopilotSidecarService(
             executableResolver: { executable },
@@ -107,7 +209,7 @@ final class CopilotSidecarServiceTests: XCTestCase {
                 }
                 return .init(terminationStatus: 0, stdout: "", stderr: "")
             },
-            shellRunner: { _ in .init(terminationStatus: 1, stdout: "", stderr: "") },
+            shellRunner: shellRunner ?? { _ in .init(terminationStatus: 1, stdout: "", stderr: "") },
             fileExists: fileExists,
             workspaceOpener: { _ in }
         )

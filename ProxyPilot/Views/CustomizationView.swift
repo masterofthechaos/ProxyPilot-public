@@ -19,8 +19,10 @@ struct CustomizationView: View {
         Form {
             appearanceSection
             windowToolbarSection
+            keysProvidersSection
             homeDashboardSection
             menuBarSection
+            resetViewsSection
         }
         .formStyle(.grouped)
     }
@@ -160,6 +162,36 @@ struct CustomizationView: View {
         }
     }
 
+    private var keysProvidersSection: some View {
+        Section("Keys & Providers") {
+            Toggle("Show GitHub Copilot sidecar and provider", isOn: Binding(
+                get: { vm.isKeysProviderVisible(.githubCopilot) },
+                set: { vm.setKeysProvider(.githubCopilot, isVisible: $0) }
+            ))
+            .toggleStyle(.switch)
+            .help("Hides the Copilot sidecar setup card and GitHub Copilot provider row without changing saved credentials.")
+
+            Text("Choose which built-in providers appear in Keys & Providers and drag rows to change their display order. This only changes the settings view; existing keys and provider routing settings are preserved.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            List {
+                ForEach(vm.keysProviderOrder) { item in
+                    keysProviderCustomizationRow(item)
+                }
+                .onMove { source, destination in
+                    vm.moveKeysProviderItems(fromOffsets: source, toOffset: destination)
+                }
+            }
+            .frame(minHeight: 320, maxHeight: 440)
+
+            Button("Reset Keys & Providers view") {
+                vm.resetKeysProvidersCustomization()
+            }
+            .buttonStyle(.link)
+        }
+    }
+
     private var menuBarSection: some View {
         Section("Menu Bar") {
             Toggle("Show ProxyPilot in the menu bar", isOn: Binding(
@@ -234,6 +266,38 @@ struct CustomizationView: View {
             }
             .disabled(vm.menuBarSectionOrder.last == section)
             .help("Move \(section.title) down")
+        }
+    }
+
+    private func keysProviderCustomizationRow(_ item: KeysProviderViewItem) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "line.3.horizontal")
+                .foregroundStyle(.tertiary)
+                .help("Drag to reorder")
+
+            Toggle(isOn: Binding(
+                get: { vm.visibleKeysProviders.contains(item) },
+                set: { vm.setKeysProvider(item.provider, isVisible: $0) }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title)
+                    Text(item.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.checkbox)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var resetViewsSection: some View {
+        Section {
+            Button("Reset all views to default") {
+                vm.resetAllViewCustomizations()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
         }
     }
 }

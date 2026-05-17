@@ -17,6 +17,7 @@ PROXY_PID=""
 DISCOVERY_PROXY_PID=""
 AUTH_SECRETS_DIR=""
 SMOKE_CONFIG_HOME="$(mktemp -d)"
+SMOKE_MODULE_CACHE="$(mktemp -d)"
 export XDG_CONFIG_HOME="$SMOKE_CONFIG_HOME"
 PID_FILE="$XDG_CONFIG_HOME/proxypilot/proxypilot.pid"
 
@@ -84,6 +85,9 @@ cleanup() {
     if [[ -n "$SMOKE_CONFIG_HOME" && -d "$SMOKE_CONFIG_HOME" ]]; then
         rm -rf "$SMOKE_CONFIG_HOME"
     fi
+    if [[ -n "$SMOKE_MODULE_CACHE" && -d "$SMOKE_MODULE_CACHE" ]]; then
+        rm -rf "$SMOKE_MODULE_CACHE"
+    fi
     # Also clean up any stale PID file that might be left from a crashed run
     rm -f "$PID_FILE"
 }
@@ -121,8 +125,8 @@ run_test "Build CLI binary (swift build)"
 
 cd "$PROJECT_DIR"
 if env \
-    CLANG_MODULE_CACHE_PATH="$PROJECT_DIR/.build/clang-module-cache" \
-    SWIFTPM_MODULECACHE_OVERRIDE="$PROJECT_DIR/.build/swiftpm-module-cache" \
+    CLANG_MODULE_CACHE_PATH="$SMOKE_MODULE_CACHE/clang" \
+    SWIFTPM_MODULECACHE_OVERRIDE="$SMOKE_MODULE_CACHE/swiftpm" \
     swift build >/tmp/proxypilot_smoke_build.log 2>&1; then
     pass "swift build succeeded"
 else

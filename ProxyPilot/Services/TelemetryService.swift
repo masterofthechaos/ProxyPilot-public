@@ -25,6 +25,7 @@ final class TelemetryService {
     private let protectedInternalMarkerURL: URL?
     private let remoteCaptureHook: ((String, [String: String]) -> Void)?
     private let postHogDeliveryEnabled: Bool
+    private let postHogAPIKeyProvider: () -> String?
     private let postHogRequestHook: ((URLRequest) -> Void)?
     private var sessionID = UUID().uuidString
     private static let alphaRequiredFailureEvents: Set<String> = [
@@ -38,8 +39,11 @@ final class TelemetryService {
     init(
         defaults: UserDefaults = .standard,
         baseDirectory: URL? = nil,
-        postHogDeliveryEnabled: Bool = TelemetryService.defaultPostHogDeliveryEnabled,
+        postHogDeliveryEnabled: Bool = TelemetryService.defaultPostHogDeliveryEnabled(),
         protectedInternalMarkerURL: URL? = TelemetryService.defaultProtectedInternalMarkerURL,
+        postHogAPIKeyProvider: @escaping () -> String? = {
+            Bundle.main.object(forInfoDictionaryKey: "POSTHOG_API_KEY") as? String
+        },
         remoteCaptureHook: ((String, [String: String]) -> Void)? = nil,
         postHogRequestHook: ((URLRequest) -> Void)? = nil
     ) {
@@ -51,12 +55,20 @@ final class TelemetryService {
         localEventLogURL = base.appendingPathComponent("events.ndjson")
         self.protectedInternalMarkerURL = protectedInternalMarkerURL
         self.postHogDeliveryEnabled = postHogDeliveryEnabled
+        self.postHogAPIKeyProvider = postHogAPIKeyProvider
         self.remoteCaptureHook = remoteCaptureHook
         self.postHogRequestHook = postHogRequestHook
     }
 
-    private static var defaultPostHogDeliveryEnabled: Bool {
-        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+    static func defaultPostHogDeliveryEnabled(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        guard environment["XCTestConfigurationFilePath"] == nil else {
+            return false
+        }
+
+        guard !AppBuildBadge.isAlphaBundle(bundleIdentifier) else {
             return false
         }
 
@@ -178,7 +190,7 @@ final class TelemetryService {
         remoteCaptureHook?(event.name, properties)
         guard postHogDeliveryEnabled else { return }
 
-        guard let apiKey = Bundle.main.object(forInfoDictionaryKey: "POSTHOG_API_KEY") as? String,
+        guard let apiKey = postHogAPIKeyProvider(),
               !apiKey.isEmpty,
               let url = URL(string: "https://us.i.posthog.com/capture/") else {
             return

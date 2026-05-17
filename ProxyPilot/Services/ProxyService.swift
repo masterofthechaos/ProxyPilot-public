@@ -3,6 +3,11 @@ import ProxyPilotCore
 
 @MainActor
 final class ProxyService {
+    struct CopilotToolCallProbeResult: Equatable {
+        let sawToolCall: Bool
+        let summary: String
+    }
+
     struct Paths {
         let restartScript: URL
         let startScript: URL
@@ -239,6 +244,141 @@ final class ProxyService {
 
         let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: normalized.data)
         return decoded.text ?? ""
+    }
+
+    func testGitHubCopilotToolCall(
+        apiBase: URL,
+        model: String
+    ) async throws -> CopilotToolCallProbeResult {
+        let request = try Self.githubCopilotToolCallProbeRequest(apiBase: apiBase, model: model)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            let bodyText = String(data: data, encoding: .utf8) ?? ""
+            throw ProxyServiceError.httpStatus(http.statusCode, bodyText)
+        }
+        return Self.parseGitHubCopilotToolCallProbeResponse(data)
+    }
+
+    static func githubCopilotToolCallProbeRequest(
+        apiBase: URL,
+        model: String
+    ) throws -> URLRequest {
+        let url = buildUpstreamURL(
+            base: normalizedUpstreamAPIBase(apiBase),
+            path: UpstreamProvider.githubCopilot.chatCompletionsPath
+        )
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("Xcode/24577 CFNetwork/3860.300.31 Darwin/25.2.0", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 60
+
+        let body: [String: Any] = [
+            "model": model,
+            "stream": true,
+            "temperature": 0.0,
+            "max_tokens": 128,
+            "messages": [
+                [
+                    "role": "system",
+                    "content": "You are validating tool call support. When asked, call the provided tool; do not answer in natural language."
+                ],
+                [
+                    "role": "user",
+                    "content": "Call the proxypilot_probe tool with message 'ok'."
+                ]
+            ],
+            "tools": [
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "proxypilot_probe",
+                        "description": "Records that the Copilot sidecar can emit an OpenAI-compatible tool call.",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "message": [
+                                    "type": "string",
+                                    "description": "Use the literal value ok."
+                                ]
+                            ],
+                            "required": ["message"],
+                            "additionalProperties": false
+                        ]
+                    ]
+                ]
+            ],
+            "tool_choice": [
+                "type": "function",
+                "function": ["name": "proxypilot_probe"]
+            ]
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return request
+    }
+
+    static func parseGitHubCopilotToolCallProbeResponse(_ data: Data) -> CopilotToolCallProbeResult {
+        let text = String(decoding: data, as: UTF8.self)
+        var toolNames: Set<String> = []
+        var sawToolCall = false
+        var content = ""
+        var sawDone = false
+
+        for line in text.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("data:") else { continue }
+            let payload = trimmed.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
+            if payload == "[DONE]" {
+                sawDone = true
+                continue
+            }
+
+            guard let jsonData = payload.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let choices = object["choices"] as? [[String: Any]] else {
+                continue
+            }
+
+            for choice in choices {
+                guard let delta = choice["delta"] as? [String: Any] else { continue }
+                if let deltaContent = delta["content"] as? String {
+                    content += deltaContent
+                }
+                guard let toolCalls = delta["tool_calls"] as? [[String: Any]] else { continue }
+                sawToolCall = true
+                for toolCall in toolCalls {
+                    guard let function = toolCall["function"] as? [String: Any],
+                          let name = function["name"] as? String,
+                          !name.isEmpty else {
+                        continue
+                    }
+                    toolNames.insert(name)
+                }
+            }
+        }
+
+        if sawToolCall {
+            let names = toolNames.isEmpty ? "an unnamed tool" : toolNames.sorted().joined(separator: ", ")
+            return CopilotToolCallProbeResult(
+                sawToolCall: true,
+                summary: "Copilot tool call probe succeeded: response requested \(names)."
+            )
+        }
+
+        let contentSummary = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !contentSummary.isEmpty {
+            return CopilotToolCallProbeResult(
+                sawToolCall: false,
+                summary: "Copilot responded, but did not request the sample tool call. Response: \(contentSummary)"
+            )
+        }
+
+        let completionNote = sawDone ? "stream completed" : "stream ended without a completion marker"
+        return CopilotToolCallProbeResult(
+            sawToolCall: false,
+            summary: "Copilot responded, but no tool call was detected (\(completionNote))."
+        )
     }
 
     private func fallbackModels(for provider: UpstreamProvider, statusCode: Int) -> [UpstreamModel]? {
