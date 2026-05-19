@@ -85,6 +85,156 @@ private enum ParseError: Error {
     #expect(openAI["tool_choice"] as? String == "auto")
 }
 
+@Test func requestToOpenAIPreservesAnthropicOutputConfigAsResponseFormat() throws {
+    let anthropic: [String: Any] = [
+        "model": "claude-haiku-4-5-20251001",
+        "messages": [["role": "user", "content": "Title this session"]],
+        "output_config": [
+            "format": [
+                "type": "json_schema",
+                "name": "session_title",
+                "schema": [
+                    "type": "object",
+                    "properties": [
+                        "title": ["type": "string"]
+                    ],
+                    "required": ["title"],
+                    "additionalProperties": false
+                ]
+            ]
+        ]
+    ]
+
+    let result = AnthropicTranslator.requestToOpenAI(
+        anthropic,
+        context: .init(upstreamProvider: .openRouter, resolvedUpstreamModel: "google/gemini-3.1-pro-preview:exacto")
+    )
+
+    let responseFormat = try #require(result.payload["response_format"] as? [String: Any])
+    #expect(responseFormat["type"] as? String == "json_schema")
+    let jsonSchema = try #require(responseFormat["json_schema"] as? [String: Any])
+    #expect(jsonSchema["name"] as? String == "session_title")
+    #expect(jsonSchema["strict"] as? Bool == true)
+    let schema = try #require(jsonSchema["schema"] as? [String: Any])
+    #expect(schema["type"] as? String == "object")
+    #expect(schema["additionalProperties"] as? Bool == false)
+}
+
+@Test func requestToOpenAIGoogleStripsEnumFromObjectAndArrayToolSchemas() throws {
+    try assertGoogleSchemaSanitized(provider: .google, model: "gemini-3.1-pro-preview")
+}
+
+@Test func requestToOpenAIOpenRouterGoogleModelStripsEnumFromObjectAndArrayToolSchemas() throws {
+    try assertGoogleSchemaSanitized(provider: .openRouter, model: "google/gemini-3.1-pro-preview:exacto")
+}
+
+@Test func requestToOpenAIOpenRouterNonGoogleModelPreservesObjectEnums() throws {
+    let anthropic: [String: Any] = [
+        "model": "claude-sonnet-4-5-20250514",
+        "messages": [["role": "user", "content": "Use a tool"]],
+        "tools": [
+            [
+                "name": "mcp__xcode_tools__XcodeMV",
+                "description": "Modify an Xcode project",
+                "input_schema": [
+                    "type": "object",
+                    "properties": [
+                        "operation": [
+                            "type": "object",
+                            "enum": [["kind": "read"]],
+                            "properties": [
+                                "kind": [
+                                    "type": "string",
+                                    "enum": ["read", "write"]
+                                ]
+                            ]
+                        ],
+                        "items": [
+                            "type": "array",
+                            "enum": [["bad"]],
+                            "items": [
+                                "type": "object",
+                                "enum": [["nested": true]],
+                                "properties": [:] as [String: Any]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+
+    let result = AnthropicTranslator.requestToOpenAI(
+        anthropic,
+        context: .init(upstreamProvider: .openRouter, resolvedUpstreamModel: "anthropic/claude-sonnet-4.5:exacto")
+    )
+
+    let tools = try #require(result.payload["tools"] as? [[String: Any]])
+    let function = try #require(tools.first?["function"] as? [String: Any])
+    let parameters = try #require(function["parameters"] as? [String: Any])
+    let properties = try #require(parameters["properties"] as? [String: Any])
+    let operation = try #require(properties["operation"] as? [String: Any])
+    let enumValue = try #require(operation["enum"] as? [[String: String]])
+    #expect(enumValue == [["kind": "read"]])
+}
+
+private func assertGoogleSchemaSanitized(provider: UpstreamProvider, model: String) throws {
+    let anthropic: [String: Any] = [
+        "model": "claude-sonnet-4-5-20250514",
+        "messages": [["role": "user", "content": "Use a tool"]],
+        "tools": [
+            [
+                "name": "mcp__xcode_tools__XcodeMV",
+                "description": "Modify an Xcode project",
+                "input_schema": [
+                    "type": "object",
+                    "properties": [
+                        "operation": [
+                            "type": "object",
+                            "enum": [["kind": "read"]],
+                            "properties": [
+                                "kind": [
+                                    "type": "string",
+                                    "enum": ["read", "write"]
+                                ]
+                            ]
+                        ],
+                        "items": [
+                            "type": "array",
+                            "enum": [["bad"]],
+                            "items": [
+                                "type": "object",
+                                "enum": [["nested": true]],
+                                "properties": [:] as [String: Any]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+
+    let result = AnthropicTranslator.requestToOpenAI(
+        anthropic,
+        context: .init(upstreamProvider: provider, resolvedUpstreamModel: model)
+    )
+
+    let tools = try #require(result.payload["tools"] as? [[String: Any]])
+    let function = try #require(tools.first?["function"] as? [String: Any])
+    let parameters = try #require(function["parameters"] as? [String: Any])
+    let properties = try #require(parameters["properties"] as? [String: Any])
+    let operation = try #require(properties["operation"] as? [String: Any])
+    #expect(operation["enum"] == nil)
+    let operationProperties = try #require(operation["properties"] as? [String: Any])
+    let kind = try #require(operationProperties["kind"] as? [String: Any])
+    #expect(kind["enum"] as? [String] == ["read", "write"])
+
+    let items = try #require(properties["items"] as? [String: Any])
+    #expect(items["enum"] == nil)
+    let itemSchema = try #require(items["items"] as? [String: Any])
+    #expect(itemSchema["enum"] == nil)
+}
+
 @Test func requestToOpenAIInjectsStoredGoogleThoughtSignature() throws {
     let store = GoogleThoughtSignatureStore()
     store.store(signature: "sig_123", for: "toolu_1")

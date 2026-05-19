@@ -237,6 +237,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         if isStreaming {
             openAIRequest["stream"] = true
+            if !config.upstreamProvider.unsupportedOpenAIParameters.contains("stream_options") {
+                openAIRequest["stream_options"] = ["include_usage": true]
+            }
         }
 
         guard let openAIBody = try? JSONSerialization.data(withJSONObject: openAIRequest) else {
@@ -757,7 +760,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         let isStreaming = HTTPRequestParser.isStreamingRequest(body: bodyData)
-        let sanitizedBody = sanitizedChatRequestBody(bodyData)
+        let sanitizedBody = withStreamingUsageInjected(sanitizedChatRequestBody(bodyData))
         let requestModel = HTTPRequestParser.extractModel(from: bodyData)
             ?? config.preferredAnthropicUpstreamModel
 
@@ -1052,23 +1055,24 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         status: HTTPResponseStatus,
         message: String
     ) {
-        let errorDict: [String: Any] = [
-            "error": [
-                "message": message,
-                "type": "error",
-                "code": status.code
-            ]
-        ]
-
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: errorDict),
-              let jsonString = String(data: jsonData, encoding: .utf8) else {
-            // Last resort: plain text error
-            let fallback = "{\"error\":{\"message\":\"\(message)\"}}"
-            sendJSONResponse(context: context, status: status, json: fallback)
-            return
-        }
-
+        let jsonString = ProxyErrorResponse.openAI(
+            message: message,
+            type: "error",
+            code: Int(status.code)
+        )
         sendJSONResponse(context: context, status: status, json: jsonString)
+    }
+
+    private func withStreamingUsageInjected(_ body: Data) -> Data {
+        let provider = config.upstreamProvider
+        guard !provider.unsupportedOpenAIParameters.contains("stream_options"),
+              var request = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              request["stream"] as? Bool == true,
+              request["stream_options"] == nil else {
+            return body
+        }
+        request["stream_options"] = ["include_usage": true]
+        return (try? JSONSerialization.data(withJSONObject: request)) ?? body
     }
 
     private func sanitizedChatRequestBody(_ body: Data) -> Data {

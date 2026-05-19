@@ -1,6 +1,6 @@
 import Foundation
 
-public struct UpstreamModel: Identifiable, Hashable, Sendable {
+public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
     public let id: String
     public let contextLength: Int?
     public let promptPricePer1M: Double?

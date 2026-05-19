@@ -1525,15 +1525,7 @@ final class LocalProxyServer: @unchecked Sendable {
         let ts = ISO8601DateFormatter().string(from: Date())
         let line = "[\(ts)] \(message)\n"
         guard let data = line.data(using: .utf8) else { return }
-        if FileManager.default.fileExists(atPath: logURL.path) {
-            if let fh = try? FileHandle(forWritingTo: logURL) {
-                _ = try? fh.seekToEnd()
-                try? fh.write(contentsOf: data)
-                try? fh.close()
-            }
-        } else {
-            try? data.write(to: logURL)
-        }
+        try? LocalProxyServerHelpers.appendPrivateLogData(data, to: logURL)
     }
 
     private func appendLogRequest(method: String, path: String, headers: [String: String]) {
@@ -1756,15 +1748,7 @@ final class LocalProxyServer: @unchecked Sendable {
         guard !lines.isEmpty else { return }
         let text = lines.joined(separator: "\n") + "\n"
         guard let data = text.data(using: .utf8) else { return }
-        if FileManager.default.fileExists(atPath: toolchainLogURL.path) {
-            if let fh = try? FileHandle(forWritingTo: toolchainLogURL) {
-                _ = try? fh.seekToEnd()
-                try? fh.write(contentsOf: data)
-                try? fh.close()
-            }
-        } else {
-            try? data.write(to: toolchainLogURL)
-        }
+        try? LocalProxyServerHelpers.appendPrivateLogData(data, to: toolchainLogURL)
     }
 }
 

@@ -624,6 +624,30 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertEqual(error["type"] as? String, "rate_limit_error")
     }
 
+    func testOpenAIErrorJSONEscapesMessageContent() throws {
+        let message = "quoted \"message\" with newline\nand backslash \\"
+        let json = H.openAIErrorJSON(message: message, type: "server_error")
+        let data = try XCTUnwrap(json.data(using: .utf8))
+        let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let error = try XCTUnwrap(parsed["error"] as? [String: Any])
+        XCTAssertEqual(error["message"] as? String, message)
+        XCTAssertEqual(error["type"] as? String, "server_error")
+    }
+
+    func testPrivateLogAppendCreates0600File() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("proxypilot-local-proxy-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let logURL = directory.appendingPathComponent("proxy.log")
+        try H.appendPrivateLogData(Data("test\n".utf8), to: logURL)
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: logURL.path)
+        let permissions = try XCTUnwrap(attributes[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(permissions.intValue & 0o777, 0o600)
+    }
+
     // MARK: - Config.isLocalhostUpstream (via the struct)
 
     func testBuiltInProxyRejectsNonLoopbackClients() async throws {

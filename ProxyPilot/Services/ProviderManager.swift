@@ -18,6 +18,7 @@ final class ProviderManager: ObservableObject {
     static let defaultModelsKeyPrefix = "proxypilot.defaultModels."
     static let xcodeAgentModelLegacyDefaultsKey = "proxypilot.xcodeAgentModel"
     static let xcodeAgentModelDefaultsKeyPrefix = "proxypilot.xcodeAgentModel."
+    static let upstreamModelCacheKeyPrefix = "proxypilot.upstreamModelCache."
     static let exactoFilterDefaultsKey = "proxypilot.openrouter.exactoFilter"
     static let verifiedFilterDefaultsKey = "proxypilot.openrouter.verifiedFilter"
     static let showModelMetadataDefaultsKey = "proxypilot.showModelMetadata"
@@ -32,6 +33,10 @@ final class ProviderManager: ObservableObject {
         xcodeAgentModelDefaultsKeyPrefix + provider.rawValue
     }
 
+    static func upstreamModelCacheKey(for provider: UpstreamProvider) -> String {
+        upstreamModelCacheKeyPrefix + provider.rawValue
+    }
+
     // MARK: - Dependencies
 
     let defaults: UserDefaults
@@ -44,9 +49,10 @@ final class ProviderManager: ObservableObject {
             defaults.set(upstreamProvider.rawValue, forKey: Self.upstreamProviderDefaultsKey)
             let savedURL = defaults.string(forKey: "proxypilot.upstreamAPIBaseURL.\(upstreamProvider.rawValue)")
             upstreamAPIBaseURLString = savedURL ?? upstreamProvider.defaultAPIBaseURL
-            upstreamModels = []
+            upstreamModels = Self.cachedUpstreamModels(from: defaults, provider: upstreamProvider)
             selectedUpstreamModels = []
             selectedXcodeAgentModel = storedXcodeAgentModel(for: upstreamProvider)
+            selectedUpstreamModels.formUnion(savedDefaultModelSet)
             reconcileXcodeAgentModelSelection()
             onClearIssue?()
             if upstreamProvider == .openRouter {
@@ -145,6 +151,9 @@ final class ProviderManager: ObservableObject {
            let mode = MiniMaxRoutingMode(rawValue: rawMode) {
             miniMaxRoutingMode = mode
         }
+
+        upstreamModels = Self.cachedUpstreamModels(from: defaults, provider: upstreamProvider)
+        selectedUpstreamModels.formUnion(savedDefaultModelSet)
     }
 
     // MARK: - Computed Properties
@@ -397,6 +406,7 @@ final class ProviderManager: ObservableObject {
 
     func applyFetchedUpstreamModels(_ models: [UpstreamModel]) {
         upstreamModels = models
+        cacheUpstreamModels(models)
         if upstreamProvider == .githubCopilot {
             let liveIDs = models.map(\.id)
             selectedUpstreamModels = Set(selectedUpstreamModels.compactMap {
@@ -541,7 +551,20 @@ final class ProviderManager: ObservableObject {
         }
     }
 
+    func cacheUpstreamModels(_ models: [UpstreamModel]) {
+        guard let data = try? JSONEncoder().encode(models) else { return }
+        defaults.set(data, forKey: Self.upstreamModelCacheKey(for: upstreamProvider))
+    }
+
     // MARK: - Internal Helpers
+
+    static func cachedUpstreamModels(from defaults: UserDefaults, provider: UpstreamProvider) -> [UpstreamModel] {
+        guard let data = defaults.data(forKey: upstreamModelCacheKey(for: provider)),
+              let models = try? JSONDecoder().decode([UpstreamModel].self, from: data) else {
+            return []
+        }
+        return models
+    }
 
     func upstreamAPIBaseURL(for provider: UpstreamProvider) -> URL? {
         let defaultBase = provider.defaultAPIBaseURL

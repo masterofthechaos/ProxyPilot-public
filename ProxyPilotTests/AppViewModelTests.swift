@@ -1637,6 +1637,51 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.sessionReportCard.requests.first?.wasStreaming, true)
     }
 
+    func testDoesNotImportOlderCLISessionWhenNewerGUISessionExists() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let reportURL = directory.appendingPathComponent("session-report.jsonl")
+        try SessionReportStore.append(
+            SessionReportEvent(
+                source: "cli",
+                sessionID: "older-cli-session",
+                record: RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 1_714_000_000),
+                    model: "glm-5",
+                    promptTokens: 4_500_000,
+                    completionTokens: 40_000,
+                    durationSeconds: 120,
+                    path: "/v1/messages",
+                    wasStreaming: true
+                )
+            ),
+            to: reportURL
+        )
+        try SessionReportStore.append(
+            SessionReportEvent(
+                source: "gui",
+                sessionID: "newer-gui-session",
+                record: RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 1_714_000_100),
+                    model: "google/gemini-3.1-pro-preview:exacto",
+                    promptTokens: 236,
+                    completionTokens: 96,
+                    durationSeconds: 2.95,
+                    path: "/v1/messages",
+                    wasStreaming: true
+                )
+            ),
+            to: reportURL
+        )
+
+        let vm = AppViewModel(defaults: defaults, sessionReportURL: reportURL)
+        vm.importExternalSessionReportEvents()
+
+        XCTAssertEqual(vm.sessionReportCard.totalRequests, 0)
+        XCTAssertEqual(vm.sessionReportCard.totalTokens, 0)
+    }
+
     func testHasKeyForProviderReturnsFalseWhenNoKeyStored() {
         let vm = AppViewModel(defaults: defaults)
         let result = vm.hasKey(for: .openRouter)
@@ -1753,6 +1798,37 @@ final class AppViewModelTests: XCTestCase {
         let cost = try XCTUnwrap(vm.sessionEstimatedCostUSD)
         XCTAssertEqual(cost, 0.005, accuracy: 0.000001)
         XCTAssertEqual(vm.sessionPricedRequestCount, 1)
+    }
+
+    func testSessionEstimatedCostUsesCachedFetchedPricingAfterRelaunch() throws {
+        defaults.set(UpstreamProvider.openRouter.rawValue, forKey: ProviderManager.upstreamProviderDefaultsKey)
+
+        var firstLaunch: AppViewModel? = AppViewModel(defaults: defaults)
+        firstLaunch?.providerManager.applyFetchedUpstreamModels([
+            UpstreamModel(
+                id: "google/gemini-3.1-pro-preview",
+                contextLength: 1_000_000,
+                promptPricePer1M: 2.0,
+                completionPricePer1M: 8.0,
+                supportedParameters: ["tools"]
+            )
+        ])
+        firstLaunch = nil
+
+        let relaunched = AppViewModel(defaults: defaults)
+        relaunched.sessionReportCard.record(.init(
+            timestamp: Date(),
+            model: "google/gemini-3.1-pro-preview",
+            promptTokens: 1_000,
+            completionTokens: 500,
+            durationSeconds: 0.2,
+            path: "/v1/messages",
+            wasStreaming: true
+        ))
+
+        let cost = try XCTUnwrap(relaunched.sessionEstimatedCostUSD)
+        XCTAssertEqual(cost, 0.006, accuracy: 0.000001)
+        XCTAssertEqual(relaunched.sessionPricedRequestCount, 1)
     }
 
     func testEstimatedRequestCostUsesSessionAverageTokens() throws {

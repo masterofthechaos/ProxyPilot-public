@@ -129,8 +129,12 @@ public enum AnthropicTranslator {
         }
 
         if let tools = anthropic["tools"] as? [[String: Any]] {
-            openAI["tools"] = tools.map { convertToolToOpenAI($0) }
+            openAI["tools"] = tools.map { convertToolToOpenAI($0, context: context) }
             openAI["tool_choice"] = "auto"
+        }
+
+        if let responseFormat = convertOutputConfigToOpenAIResponseFormat(anthropic["output_config"]) {
+            openAI["response_format"] = responseFormat
         }
 
         stripUnsupportedParameters(&openAI, for: context.upstreamProvider)
@@ -640,15 +644,114 @@ public enum AnthropicTranslator {
         return parts.joined()
     }
 
-    private static func convertToolToOpenAI(_ tool: [String: Any]) -> [String: Any] {
-        [
+    private static func convertToolToOpenAI(_ tool: [String: Any], context: TranslationContext) -> [String: Any] {
+        let rawParameters = tool["input_schema"] ?? [:]
+        let parameters = shouldSanitizeGoogleSchema(context: context)
+            ? sanitizeGoogleSchema(rawParameters)
+            : rawParameters
+
+        return [
             "type": "function",
             "function": [
                 "name": tool["name"] as? String ?? "",
                 "description": tool["description"] as? String ?? "",
-                "parameters": tool["input_schema"] ?? [:]
+                "parameters": parameters
             ]
         ]
+    }
+
+    private static func shouldSanitizeGoogleSchema(context: TranslationContext) -> Bool {
+        if context.upstreamProvider == .google {
+            return true
+        }
+
+        if context.upstreamProvider == .openRouter {
+            let model = context.resolvedUpstreamModel.lowercased()
+            return model.hasPrefix("google/")
+                || model.contains("/google/")
+        }
+
+        return false
+    }
+
+    private static func convertOutputConfigToOpenAIResponseFormat(_ value: Any?) -> [String: Any]? {
+        guard let outputConfig = value as? [String: Any],
+              let format = outputConfig["format"] as? [String: Any],
+              let type = (format["type"] as? String)?.lowercased() else {
+            return nil
+        }
+
+        switch type {
+        case "json_schema":
+            guard let schema = format["schema"] else { return nil }
+            let rawName = (format["name"] as? String)
+                ?? ((schema as? [String: Any])?["title"] as? String)
+                ?? "proxypilot_output"
+            var jsonSchema: [String: Any] = [
+                "name": sanitizedResponseFormatName(rawName),
+                "strict": true,
+                "schema": schema
+            ]
+            if let strict = format["strict"] as? Bool {
+                jsonSchema["strict"] = strict
+            }
+            return [
+                "type": "json_schema",
+                "json_schema": jsonSchema
+            ]
+
+        case "json_object":
+            return ["type": "json_object"]
+
+        default:
+            return nil
+        }
+    }
+
+    private static func sanitizedResponseFormatName(_ rawName: String) -> String {
+        var result = rawName.map { character -> Character in
+            if character.isLetter || character.isNumber || character == "_" || character == "-" {
+                return character
+            }
+            return "_"
+        }
+        if result.isEmpty || !(result.first?.isLetter == true || result.first == "_") {
+            result.insert("_", at: result.startIndex)
+        }
+        if result.count > 64 {
+            result = Array(result.prefix(64))
+        }
+        return String(result)
+    }
+
+    private static func sanitizeGoogleSchema(_ value: Any) -> Any {
+        if var dict = value as? [String: Any] {
+            let schemaType = schemaTypeStrings(from: dict["type"])
+            if schemaType.contains("object") || schemaType.contains("array") {
+                dict.removeValue(forKey: "enum")
+            }
+
+            for (key, child) in dict {
+                dict[key] = sanitizeGoogleSchema(child)
+            }
+            return dict
+        }
+
+        if let array = value as? [Any] {
+            return array.map { sanitizeGoogleSchema($0) }
+        }
+
+        return value
+    }
+
+    private static func schemaTypeStrings(from value: Any?) -> Set<String> {
+        if let type = value as? String {
+            return [type.lowercased()]
+        }
+        if let types = value as? [String] {
+            return Set(types.map { $0.lowercased() })
+        }
+        return []
     }
 
     // MARK: - Response: OpenAI → Anthropic (non-streaming)

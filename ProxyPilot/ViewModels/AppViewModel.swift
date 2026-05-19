@@ -264,10 +264,21 @@ final class AppViewModel: ObservableObject {
 
     func importExternalSessionReportEvents() {
         guard let events = try? SessionReportStore.readEvents(from: sessionReportURL) else { return }
+        let latestGUIEventTimestamp = events
+            .filter { $0.source == "gui" }
+            .map(\.record.timestamp)
+            .max()
         let externalEvents = events.filter { $0.source != "gui" && !suppressedExternalSessionIDs.contains($0.sessionID) }
-        guard let latestSessionID = externalEvents.max(by: {
+        guard let latestExternalEvent = externalEvents.max(by: {
             $0.record.timestamp < $1.record.timestamp
-        })?.sessionID else { return }
+        }) else { return }
+
+        if let latestGUIEventTimestamp,
+           latestExternalEvent.record.timestamp < latestGUIEventTimestamp {
+            return
+        }
+
+        let latestSessionID = latestExternalEvent.sessionID
 
         for event in externalEvents where event.sessionID == latestSessionID && !importedExternalSessionEventIDs.contains(event.id) {
             importedExternalSessionEventIDs.insert(event.id)
@@ -587,6 +598,7 @@ final class AppViewModel: ObservableObject {
             defaults.removeObject(forKey: "proxypilot.upstreamAPIBaseURL.\(provider.rawValue)")
             defaults.removeObject(forKey: ProviderManager.xcodeAgentModelDefaultsKey(for: provider))
             defaults.removeObject(forKey: ProviderManager.defaultModelsKey(for: provider))
+            defaults.removeObject(forKey: ProviderManager.upstreamModelCacheKey(for: provider))
         }
 
         if launchAtLogin {
@@ -1903,6 +1915,7 @@ final class AppViewModel: ObservableObject {
         if upstreamProvider == .openRouter {
             Task { await providerManager.loadVerifiedModels() }
         }
+        Task { await hydrateCurrentProviderModelCacheIfNeeded() }
     }
 
     func applicationWillTerminate() {
@@ -2454,6 +2467,31 @@ final class AppViewModel: ObservableObject {
                 path: upstreamProvider.modelsPath,
                 operation: .modelFetch
             ))
+        }
+    }
+
+    func hydrateCurrentProviderModelCacheIfNeeded() async {
+        guard upstreamModels.isEmpty else { return }
+        let provider = upstreamProvider
+        guard provider.requiresAPIKey,
+              let keychainKey = provider.keychainKey,
+              let apiKey = KeychainService.get(key: keychainKey),
+              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let apiBase = providerManager.upstreamAPIBaseURL(for: provider) else {
+            return
+        }
+
+        do {
+            let models = try await proxyService.fetchUpstreamModels(
+                apiBase: apiBase,
+                apiKey: apiKey,
+                provider: provider
+            )
+            guard upstreamProvider == provider, upstreamModels.isEmpty else { return }
+            providerManager.applyFetchedUpstreamModels(models)
+            providerManager.reconcileXcodeAgentModelSelection()
+        } catch {
+            // Pricing cache hydration is opportunistic; explicit Fetch Live Models remains user-visible.
         }
     }
 

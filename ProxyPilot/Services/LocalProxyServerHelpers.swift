@@ -327,6 +327,23 @@ enum LocalProxyServerHelpers {
 
     /// Build an OpenAI-style error JSON string.
     static func openAIErrorJSON(message: String, type: String = "invalid_request_error") -> String {
-        #"{"error":{"message":"\#(message)","type":"\#(type)"}}"#
+        ProxyErrorResponse.openAI(message: message, type: type)
+    }
+
+    static func appendPrivateLogData(_ data: Data, to url: URL) throws {
+        let permissions = 0o600
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: url.path) {
+            fileManager.createFile(
+                atPath: url.path,
+                contents: nil,
+                attributes: [.posixPermissions: permissions]
+            )
+        }
+        try fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: url.path)
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
     }
 }

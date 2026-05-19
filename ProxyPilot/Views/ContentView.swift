@@ -18,7 +18,43 @@ struct ContentView: View {
     @State private var highlightedProxySection: ProxySectionFocus?
     @State private var proxyFocusRequestID: Int = 0
     @State private var windowWidth: CGFloat = 0
+    @State private var modelSearchText = ""
+    @State private var modelProviderFilter = ""
+    @State private var modelTierFilter = PricingTier.unknown
     private let copilotSidecarInstallCommand = "npm install -g xcode-copilot-server"
+
+    private var availableModelOrgs: [String] {
+        let orgs = vm.modelSelectionRows.compactMap { row -> String? in
+            let slash = row.id.firstIndex(of: "/")
+            guard let slash else { return nil }
+            return String(row.id[..<slash])
+        }
+        return Array(Set(orgs)).sorted()
+    }
+
+    private var filteredModelRows: [ProviderManager.ModelSelectionRow] {
+        var rows = vm.modelSelectionRows
+        if !modelProviderFilter.isEmpty {
+            rows = rows.filter { $0.id.hasPrefix(modelProviderFilter + "/") || $0.isDefault }
+        }
+        if modelTierFilter != .unknown {
+            rows = rows.filter { ($0.model?.pricingTier ?? .unknown) == modelTierFilter || $0.isDefault }
+        }
+        if !modelSearchText.isEmpty {
+            let q = modelSearchText.lowercased()
+            rows = rows.filter { $0.id.lowercased().contains(q) || $0.isDefault }
+        }
+        return rows
+    }
+
+    private var allFilteredModelsSelected: Bool {
+        let rows = filteredModelRows
+        return !rows.isEmpty && rows.allSatisfy { vm.isModelSelected($0.id) }
+    }
+
+    private var isFiltering: Bool {
+        !modelProviderFilter.isEmpty || !modelSearchText.isEmpty || modelTierFilter != .unknown
+    }
 
     private var liquidGlassAppearanceAvailable: Bool {
         if #available(macOS 26.0, *) {
@@ -637,9 +673,17 @@ struct ContentView: View {
 
                 if !vm.modelSelectionRows.isEmpty {
                     HStack(spacing: 12) {
-                        Button("Select All") { vm.selectAllUpstreamModels() }
-                            .font(.caption)
-                            .disabled(vm.allVisibleModelsSelected)
+                        Button("Select All") {
+                            if isFiltering {
+                                for row in filteredModelRows where !row.isDefault {
+                                    vm.setModelSelected(row.id, isSelected: true)
+                                }
+                            } else {
+                                vm.selectAllUpstreamModels()
+                            }
+                        }
+                        .font(.caption)
+                        .disabled(allFilteredModelsSelected)
                         Button("Clear Selection") { vm.clearUpstreamModelSelection() }
                             .font(.caption)
                             .disabled(!vm.canClearModelSelection)
@@ -647,36 +691,47 @@ struct ContentView: View {
                     }
                 }
 
-                if vm.modelSelectionRows.isEmpty {
-                    Text("Fetch models from your provider, select the ones you want, then save as defaults.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    if vm.hasSavedDefaultModels {
-                        Text("Saved defaults stay selected and protected. Use Remove Default to unpin one.")
+                if !vm.modelSelectionRows.isEmpty {
+                    modelFilterBar()
+                }
+
+                Group {
+                    if vm.modelSelectionRows.isEmpty {
+                        Text("Fetch models from your provider, select the ones you want, then save as defaults.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                    }
-
-                    List(vm.modelSelectionRows) { row in
-                        HStack(spacing: 10) {
-                            Toggle(isOn: Binding(
-                                get: { vm.isModelSelected(row.id) },
-                                set: { vm.setModelSelected(row.id, isSelected: $0) }
-                            )) {
-                                modelSelectionRowLabel(row)
-                            }
-                            .disabled(row.isDefault)
-
-                            if row.isDefault {
-                                Button("Remove Default") {
-                                    vm.removeDefaultModel(row.id)
-                                }
+                    } else {
+                        if vm.hasSavedDefaultModels {
+                            Text("Saved defaults stay selected and protected. Use Remove Default to unpin one.")
                                 .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        List(filteredModelRows) { row in
+                            HStack(spacing: 10) {
+                                Toggle(isOn: Binding(
+                                    get: { vm.isModelSelected(row.id) },
+                                    set: { vm.setModelSelected(row.id, isSelected: $0) }
+                                )) {
+                                    modelSelectionRowLabel(row)
+                                }
+                                .disabled(row.isDefault)
+
+                                if row.isDefault {
+                                    Button("Remove Default") {
+                                        vm.removeDefaultModel(row.id)
+                                    }
+                                    .font(.caption)
+                                }
                             }
                         }
+                        .frame(minHeight: 120)
                     }
-                    .frame(minHeight: 120)
+                }
+                .onChange(of: vm.upstreamProvider) { _, _ in
+                    modelSearchText = ""
+                    modelProviderFilter = ""
+                    modelTierFilter = .unknown
                 }
             }
             .id(ProxySectionFocus.models)
@@ -1930,6 +1985,69 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private func modelFilterBar() -> some View {
+        let orgs = availableModelOrgs
+        let hasOrgs = orgs.count > 1
+        let hasTiers = vm.modelSelectionRows.contains { ($0.model?.pricingTier ?? .unknown) != .unknown }
+        if hasOrgs || hasTiers {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                            .font(.caption2)
+                        TextField("Filter models", text: $modelSearchText)
+                            .textFieldStyle(.plain)
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.1)))
+
+                    if hasOrgs {
+                        Picker("Provider", selection: $modelProviderFilter) {
+                            Text("All Providers").tag("")
+                            ForEach(orgs, id: \.self) { org in
+                                Text(org).tag(org)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .font(.caption)
+                        .labelsHidden()
+                    }
+
+                    if hasTiers {
+                        Picker("Tier", selection: $modelTierFilter) {
+                            Text("All Tiers").tag(PricingTier.unknown)
+                            Text("Free").tag(PricingTier.free)
+                            Text("Budget ($)").tag(PricingTier.budget)
+                            Text("Standard ($$)").tag(PricingTier.standard)
+                            Text("Premium ($$$)").tag(PricingTier.premium)
+                        }
+                        .pickerStyle(.menu)
+                        .font(.caption)
+                        .labelsHidden()
+                    }
+
+                    if isFiltering {
+                        Button("Clear") {
+                            modelSearchText = ""
+                            modelProviderFilter = ""
+                            modelTierFilter = .unknown
+                        }
+                        .font(.caption)
+                        Spacer()
+                        Text("\(filteredModelRows.count) of \(vm.modelSelectionRows.count)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Spacer()
+                    }
+                }
+            }
+        }
+    }
+
     private func modelSelectionRowLabel(_ row: ProviderManager.ModelSelectionRow) -> some View {
         HStack(spacing: 6) {
             Text(row.id)
