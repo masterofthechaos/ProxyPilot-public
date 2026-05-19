@@ -6,6 +6,8 @@ public struct RequestRecord: Sendable, Codable, Equatable {
     public let model: String
     public let promptTokens: Int
     public let completionTokens: Int
+    public let promptCacheHitTokens: Int?
+    public let promptCacheMissTokens: Int?
     public let durationSeconds: TimeInterval
     public let path: String
     public let wasStreaming: Bool
@@ -15,6 +17,8 @@ public struct RequestRecord: Sendable, Codable, Equatable {
         model: String,
         promptTokens: Int,
         completionTokens: Int,
+        promptCacheHitTokens: Int? = nil,
+        promptCacheMissTokens: Int? = nil,
         durationSeconds: TimeInterval,
         path: String,
         wasStreaming: Bool
@@ -23,6 +27,8 @@ public struct RequestRecord: Sendable, Codable, Equatable {
         self.model = model
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
+        self.promptCacheHitTokens = promptCacheHitTokens
+        self.promptCacheMissTokens = promptCacheMissTokens
         self.durationSeconds = durationSeconds
         self.path = path
         self.wasStreaming = wasStreaming

@@ -12,6 +12,28 @@ public enum AnthropicTranslator {
         }
     }
 
+    public struct AnthropicUsageSnapshot: Sendable, Equatable {
+        public let model: String?
+        public let promptTokens: Int?
+        public let completionTokens: Int?
+        public let promptCacheHitTokens: Int?
+        public let promptCacheMissTokens: Int?
+
+        public init(
+            model: String?,
+            promptTokens: Int?,
+            completionTokens: Int?,
+            promptCacheHitTokens: Int? = nil,
+            promptCacheMissTokens: Int? = nil
+        ) {
+            self.model = model
+            self.promptTokens = promptTokens
+            self.completionTokens = completionTokens
+            self.promptCacheHitTokens = promptCacheHitTokens
+            self.promptCacheMissTokens = promptCacheMissTokens
+        }
+    }
+
     public struct TranslationContext: Sendable {
         public let upstreamProvider: UpstreamProvider
         public let resolvedUpstreamModel: String
@@ -343,6 +365,31 @@ public enum AnthropicTranslator {
         return "data: \(normalizedString)"
     }
 
+    /// Extracts model and usage fields from an Anthropic-format response.
+    /// Handles both Anthropic-native `input_tokens`/`output_tokens` and
+    /// OpenAI-compatible `prompt_tokens`/`completion_tokens` aliases.
+    public static func anthropicPassthroughUsage(from data: Data) -> AnthropicUsageSnapshot? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return anthropicPassthroughUsage(fromRoot: root)
+    }
+
+    /// Extracts model and usage fields from a single Anthropic SSE `data:` line.
+    public static func anthropicPassthroughUsage(fromStreamingLine line: String) -> AnthropicUsageSnapshot? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("data:") else { return nil }
+
+        let payload = String(trimmed.dropFirst("data:".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard payload != "[DONE]",
+              let data = payload.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return anthropicPassthroughUsage(fromRoot: root)
+    }
+
     // MARK: - OpenAI-Compatible Normalization
 
     /// Normalizes provider-specific buffered chat responses back into an
@@ -526,6 +573,47 @@ public enum AnthropicTranslator {
         }
     }
 
+    private static func anthropicPassthroughUsage(fromRoot root: [String: Any]) -> AnthropicUsageSnapshot? {
+        let message = root["message"] as? [String: Any]
+        let usage = (root["usage"] as? [String: Any]) ?? (message?["usage"] as? [String: Any])
+        let model = nonEmptyString(root["model"]) ?? nonEmptyString(message?["model"])
+        let promptCacheHitTokens = intValue(from: usage?["prompt_cache_hit_tokens"])
+            ?? intValue(from: (usage?["prompt_tokens_details"] as? [String: Any])?["cached_tokens"])
+            ?? intValue(from: usage?["cache_read_input_tokens"])
+        // Anthropic-format DeepSeek usage reports uncached input as input_tokens,
+        // cache writes as cache_creation_input_tokens, and cache hits separately.
+        let anthropicCacheMissTokens = intValue(from: usage?["input_tokens"]).map {
+            $0 + (intValue(from: usage?["cache_creation_input_tokens"]) ?? 0)
+        }
+        let promptCacheMissTokens = intValue(from: usage?["prompt_cache_miss_tokens"])
+            ?? anthropicCacheMissTokens
+        let splitPromptTokens: Int?
+        if promptCacheHitTokens != nil || promptCacheMissTokens != nil {
+            splitPromptTokens = (promptCacheHitTokens ?? 0) + (promptCacheMissTokens ?? 0)
+        } else {
+            splitPromptTokens = nil
+        }
+        let promptTokens = intValue(from: usage?["prompt_tokens"])
+            ?? splitPromptTokens
+            ?? intValue(from: usage?["input_tokens"])
+        let completionTokens = intValue(from: usage?["completion_tokens"]) ?? intValue(from: usage?["output_tokens"])
+
+        guard model != nil
+            || promptTokens != nil
+            || completionTokens != nil
+            || promptCacheHitTokens != nil
+            || promptCacheMissTokens != nil else {
+            return nil
+        }
+        return AnthropicUsageSnapshot(
+            model: model,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            promptCacheHitTokens: promptCacheHitTokens,
+            promptCacheMissTokens: promptCacheMissTokens
+        )
+    }
+
     private static func intValue(from value: Any?) -> Int? {
         switch value {
         case let int as Int:
@@ -537,6 +625,12 @@ public enum AnthropicTranslator {
         default:
             return nil
         }
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String else { return nil }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func convertMessage(
@@ -1226,8 +1320,4 @@ public enum AnthropicTranslator {
         return signature
     }
 
-    private static func nonEmptyString(_ value: Any?) -> String? {
-        guard let string = value as? String, !string.isEmpty else { return nil }
-        return string
-    }
 }

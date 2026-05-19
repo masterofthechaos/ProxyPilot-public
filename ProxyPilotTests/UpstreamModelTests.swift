@@ -91,6 +91,26 @@ final class UpstreamModelTests: XCTestCase {
         XCTAssertNil(model.estimatedCostUSD(promptTokens: 100, completionTokens: 100))
     }
 
+    func testEstimatedCostUSDUsesExplicitCacheSplitWhenPricingRequiresIt() throws {
+        let model = UpstreamModel(
+            id: "m",
+            contextLength: nil,
+            promptPricePer1M: 0.14,
+            completionPricePer1M: 0.28,
+            promptCacheHitPricePer1M: 0.0028,
+            promptCacheMissPricePer1M: 0.14
+        )
+
+        let cost = try XCTUnwrap(model.estimatedCostUSD(
+            promptTokens: 1_000_000,
+            completionTokens: 1_000_000,
+            promptCacheHitTokens: 250_000,
+            promptCacheMissTokens: 750_000
+        ))
+        XCTAssertEqual(cost, 0.3857, accuracy: 0.000001)
+        XCTAssertNil(model.estimatedCostUSD(promptTokens: 1_000_000, completionTokens: 1_000_000))
+    }
+
     func testPricingPerMillionLabelFormatsPromptAndCompletion() {
         let model = UpstreamModel(id: "m", contextLength: nil, promptPricePer1M: 0.5, completionPricePer1M: 2.0)
         XCTAssertEqual(model.pricingPerMillionLabel, "In $0.500/M · Out $2.00/M")

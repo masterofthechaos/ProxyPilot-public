@@ -4,6 +4,7 @@ private struct SessionStatsView: View {
     @ObservedObject var state: LocalProxyState
     @ObservedObject var reportCard: SessionReportCard
     let upstreamProviderTitle: String
+    let estimatedCostText: String?
 
     var body: some View {
         if state.sessionRequestCount > 0 {
@@ -16,6 +17,14 @@ private struct SessionStatsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("\(reportCard.totalTokensFormatted) tok")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let estimatedCostText {
+                    Text("·")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(estimatedCostText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -117,7 +126,12 @@ struct MenuBarView: View {
             }
         case .sessionStats:
             if vm.isRunning || vm.localProxyState.sessionRequestCount > 0 {
-                SessionStatsView(state: vm.localProxyState, reportCard: vm.sessionReportCard, upstreamProviderTitle: vm.upstreamProvider.title)
+                SessionStatsView(
+                    state: vm.localProxyState,
+                    reportCard: vm.sessionReportCard,
+                    upstreamProviderTitle: vm.upstreamProvider.title,
+                    estimatedCostText: vm.sessionMenuCostText
+                )
             } else {
                 Text("No session activity")
                     .font(.caption)

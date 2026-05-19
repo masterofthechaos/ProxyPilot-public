@@ -102,7 +102,8 @@ final class LocalProxyServer: @unchecked Sendable {
         }
 
         var isAnthropicPassthroughActive: Bool {
-            miniMaxRoutingMode == .anthropicPassthrough && upstreamProvider.isMiniMax
+            upstreamProvider.usesAnthropicPassthroughByDefault
+                || (miniMaxRoutingMode == .anthropicPassthrough && upstreamProvider.supportsAnthropicPassthrough)
         }
     }
 
@@ -551,7 +552,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
             if normalized.statusCode == 200,
                let json = try? JSONSerialization.jsonObject(with: normalized.data) as? [String: Any],
-               let usage = json["usage"] as? [String: Any] {
+               let usage = passthroughUsage(from: normalized.data) {
                 let resolvedModel = (json["model"] as? String).flatMap { value in
                     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                     return trimmed.isEmpty ? nil : trimmed
@@ -559,8 +560,10 @@ final class LocalProxyServer: @unchecked Sendable {
                 let record = SessionReportCard.RequestRecord(
                     timestamp: requestStartTime,
                     model: resolvedModel,
-                    promptTokens: usage["prompt_tokens"] as? Int ?? 0,
-                    completionTokens: usage["completion_tokens"] as? Int ?? 0,
+                    promptTokens: usage.promptTokens ?? 0,
+                    completionTokens: usage.completionTokens ?? 0,
+                    promptCacheHitTokens: usage.promptCacheHitTokens,
+                    promptCacheMissTokens: usage.promptCacheMissTokens,
                     durationSeconds: Date().timeIntervalSince(requestStartTime),
                     path: "/v1/chat/completions",
                     wasStreaming: false
@@ -651,6 +654,8 @@ final class LocalProxyServer: @unchecked Sendable {
             // Stream lines from upstream to client
             var lastSeenPromptTokens = 0
             var lastSeenCompletionTokens = 0
+            var lastSeenPromptCacheHitTokens: Int?
+            var lastSeenPromptCacheMissTokens: Int?
             var lastSeenModel = requestModel
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
@@ -664,21 +669,12 @@ final class LocalProxyServer: @unchecked Sendable {
                 await sendData(sseData, on: connection)
 
                 // Extract usage from SSE chunks (best-effort, provider-dependent)
-                if normalizedLine.hasPrefix("data: ") && normalizedLine != "data: [DONE]" {
-                    let payload = String(normalizedLine.dropFirst(6))
-                    if let chunkData = payload.data(using: .utf8),
-                       let chunk = try? JSONSerialization.jsonObject(with: chunkData) as? [String: Any] {
-                        if let chunkModel = chunk["model"] as? String {
-                            let trimmed = chunkModel.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !trimmed.isEmpty {
-                                lastSeenModel = trimmed
-                            }
-                        }
-                        if let usage = chunk["usage"] as? [String: Any] {
-                            lastSeenPromptTokens = usage["prompt_tokens"] as? Int ?? lastSeenPromptTokens
-                            lastSeenCompletionTokens = usage["completion_tokens"] as? Int ?? lastSeenCompletionTokens
-                        }
-                    }
+                if let usage = AnthropicTranslator.anthropicPassthroughUsage(fromStreamingLine: normalizedLine) {
+                    lastSeenModel = usage.model ?? lastSeenModel
+                    lastSeenPromptTokens = usage.promptTokens ?? lastSeenPromptTokens
+                    lastSeenCompletionTokens = usage.completionTokens ?? lastSeenCompletionTokens
+                    lastSeenPromptCacheHitTokens = usage.promptCacheHitTokens ?? lastSeenPromptCacheHitTokens
+                    lastSeenPromptCacheMissTokens = usage.promptCacheMissTokens ?? lastSeenPromptCacheMissTokens
                 }
 
                 if normalizedLine == "data: [DONE]" {
@@ -689,6 +685,8 @@ final class LocalProxyServer: @unchecked Sendable {
                         model: lastSeenModel,
                         promptTokens: lastSeenPromptTokens,
                         completionTokens: lastSeenCompletionTokens,
+                        promptCacheHitTokens: lastSeenPromptCacheHitTokens,
+                        promptCacheMissTokens: lastSeenPromptCacheMissTokens,
                         durationSeconds: Date().timeIntervalSince(requestStartTime),
                         path: "/v1/chat/completions",
                         wasStreaming: true
@@ -716,6 +714,8 @@ final class LocalProxyServer: @unchecked Sendable {
                 model: lastSeenModel,
                 promptTokens: lastSeenPromptTokens,
                 completionTokens: lastSeenCompletionTokens,
+                promptCacheHitTokens: lastSeenPromptCacheHitTokens,
+                promptCacheMissTokens: lastSeenPromptCacheMissTokens,
                 durationSeconds: Date().timeIntervalSince(requestStartTime),
                 path: "/v1/chat/completions",
                 wasStreaming: true
@@ -778,7 +778,7 @@ final class LocalProxyServer: @unchecked Sendable {
             allowedModels: config.allowedModels
         )
 
-        // --- Anthropic Passthrough: forward directly to MiniMax /anthropic endpoint ---
+        // --- Anthropic Passthrough: forward directly to the provider /anthropic endpoint ---
         if config.isAnthropicPassthroughActive,
            let passthroughBase = config.upstreamProvider.anthropicPassthroughBaseURL(from: config.upstreamAPIBaseURL) {
 
@@ -963,11 +963,14 @@ final class LocalProxyServer: @unchecked Sendable {
             logUpstreamResponse(openAIResponse, requestID: requestID, mode: mode, streaming: false)
 
             if let usage = openAIResponse["usage"] as? [String: Any] {
+                let usageSnapshot = AnthropicTranslator.anthropicPassthroughUsage(from: data)
                 let record = SessionReportCard.RequestRecord(
                     timestamp: requestStartTime,
                     model: reportModel,
                     promptTokens: usage["prompt_tokens"] as? Int ?? 0,
                     completionTokens: usage["completion_tokens"] as? Int ?? 0,
+                    promptCacheHitTokens: usageSnapshot?.promptCacheHitTokens,
+                    promptCacheMissTokens: usageSnapshot?.promptCacheMissTokens,
                     durationSeconds: Date().timeIntervalSince(requestStartTime),
                     path: "/v1/messages",
                     wasStreaming: false
@@ -1056,6 +1059,8 @@ final class LocalProxyServer: @unchecked Sendable {
             var chunkIndex = 0
             var lastSeenPromptTokens = 0
             var lastSeenCompletionTokens = 0
+            var lastSeenPromptCacheHitTokens: Int?
+            var lastSeenPromptCacheMissTokens: Int?
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             for try await line in bytes.lines {
@@ -1073,6 +1078,8 @@ final class LocalProxyServer: @unchecked Sendable {
                     let record = SessionReportCard.RequestRecord(
                         timestamp: requestStartTime, model: reportModel,
                         promptTokens: lastSeenPromptTokens, completionTokens: lastSeenCompletionTokens,
+                        promptCacheHitTokens: lastSeenPromptCacheHitTokens,
+                        promptCacheMissTokens: lastSeenPromptCacheMissTokens,
                         durationSeconds: Date().timeIntervalSince(requestStartTime),
                         path: "/v1/messages", wasStreaming: true
                     )
@@ -1103,6 +1110,9 @@ final class LocalProxyServer: @unchecked Sendable {
                 if let usage = chunk["usage"] as? [String: Any] {
                     lastSeenPromptTokens = usage["prompt_tokens"] as? Int ?? lastSeenPromptTokens
                     lastSeenCompletionTokens = usage["completion_tokens"] as? Int ?? lastSeenCompletionTokens
+                    let usageSnapshot = AnthropicTranslator.anthropicPassthroughUsage(fromStreamingLine: line)
+                    lastSeenPromptCacheHitTokens = usageSnapshot?.promptCacheHitTokens ?? lastSeenPromptCacheHitTokens
+                    lastSeenPromptCacheMissTokens = usageSnapshot?.promptCacheMissTokens ?? lastSeenPromptCacheMissTokens
                 }
 
                 if isFirstChunk {
@@ -1143,6 +1153,8 @@ final class LocalProxyServer: @unchecked Sendable {
             let record = SessionReportCard.RequestRecord(
                 timestamp: requestStartTime, model: reportModel,
                 promptTokens: lastSeenPromptTokens, completionTokens: lastSeenCompletionTokens,
+                promptCacheHitTokens: lastSeenPromptCacheHitTokens,
+                promptCacheMissTokens: lastSeenPromptCacheMissTokens,
                 durationSeconds: Date().timeIntervalSince(requestStartTime),
                 path: "/v1/messages", wasStreaming: true
             )
@@ -1306,20 +1318,36 @@ final class LocalProxyServer: @unchecked Sendable {
             )
 
             let text = String(decoding: validated.data, as: UTF8.self)
+            let usage = passthroughUsage(from: validated.data)
+            let responseModel = usage?.model ?? modelFromResponse(validated.data) ?? reportModel
             respond(connection: connection, status: validated.statusCode, body: text, contentType: "application/json")
+            if (200..<300).contains(validated.statusCode) {
+                let record = SessionReportCard.RequestRecord(
+                    timestamp: requestStartTime,
+                    model: responseModel,
+                    promptTokens: usage?.promptTokens ?? 0,
+                    completionTokens: usage?.completionTokens ?? 0,
+                    promptCacheHitTokens: usage?.promptCacheHitTokens,
+                    promptCacheMissTokens: usage?.promptCacheMissTokens,
+                    durationSeconds: Date().timeIntervalSince(requestStartTime),
+                    path: "/v1/messages",
+                    wasStreaming: false
+                )
+                recordSessionReport(record)
+            }
             await recordInputOutputLog(
                 inputBody: inputBody,
                 outputBody: validated.data,
-                model: reportModel,
+                model: responseModel,
                 path: "/v1/messages",
                 wasStreaming: false,
                 statusCode: validated.statusCode,
                 startedAt: requestStartTime,
                 config: config
             )
-            recordXcodeAgentRequest(model: reportModel, status: validated.statusCode)
+            recordXcodeAgentRequest(model: responseModel, status: validated.statusCode)
 
-            appendLog("passthrough buffered response: status=\(validated.statusCode) model=\(reportModel)")
+            appendLog("passthrough buffered response: status=\(validated.statusCode) model=\(responseModel)")
         } catch {
             appendLog("passthrough error: \(error.localizedDescription)")
             respond(
@@ -1343,6 +1371,12 @@ final class LocalProxyServer: @unchecked Sendable {
         config: Config
     ) async {
         let requestStartTime = Date()
+        var lastSeenModel = reportModel
+        var lastSeenPromptTokens = 0
+        var lastSeenCompletionTokens = 0
+        var lastSeenPromptCacheHitTokens: Int?
+        var lastSeenPromptCacheMissTokens: Int?
+        var didReceiveStreamData = false
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 502
@@ -1373,27 +1407,50 @@ final class LocalProxyServer: @unchecked Sendable {
                     line,
                     provider: provider
                 )
+                updatePassthroughStreamingUsage(
+                    from: validatedLine,
+                    model: &lastSeenModel,
+                    promptTokens: &lastSeenPromptTokens,
+                    completionTokens: &lastSeenCompletionTokens,
+                    promptCacheHitTokens: &lastSeenPromptCacheHitTokens,
+                    promptCacheMissTokens: &lastSeenPromptCacheMissTokens
+                )
                 let sseData = Data((validatedLine + "\n").utf8)
                 outputCapture.append(sseData)
                 await sendData(sseData, on: connection)
+                didReceiveStreamData = true
             }
 
             // Send final newline and close.
             await sendData(Data("\n".utf8), on: connection)
             connection.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
-            appendLog("passthrough streaming complete: model=\(reportModel)")
+            if didReceiveStreamData {
+                let record = SessionReportCard.RequestRecord(
+                    timestamp: requestStartTime,
+                    model: lastSeenModel,
+                    promptTokens: lastSeenPromptTokens,
+                    completionTokens: lastSeenCompletionTokens,
+                    promptCacheHitTokens: lastSeenPromptCacheHitTokens,
+                    promptCacheMissTokens: lastSeenPromptCacheMissTokens,
+                    durationSeconds: Date().timeIntervalSince(requestStartTime),
+                    path: "/v1/messages",
+                    wasStreaming: true
+                )
+                recordSessionReport(record)
+            }
+            appendLog("passthrough streaming complete: model=\(lastSeenModel)")
             await recordInputOutputLog(
                 inputBody: inputBody,
                 outputBody: outputCapture.capturedOutput,
                 outputTruncated: outputCapture.isTruncated,
-                model: reportModel,
+                model: lastSeenModel,
                 path: "/v1/messages",
                 wasStreaming: true,
                 statusCode: 200,
                 startedAt: requestStartTime,
                 config: config
             )
-            recordXcodeAgentRequest(model: reportModel, status: 200)
+            recordXcodeAgentRequest(model: lastSeenModel, status: 200)
         } catch {
             appendLog("passthrough streaming error: \(error.localizedDescription)")
             respond(
@@ -1453,6 +1510,8 @@ final class LocalProxyServer: @unchecked Sendable {
             model: record.model,
             promptTokens: record.promptTokens,
             completionTokens: record.completionTokens,
+            promptCacheHitTokens: record.promptCacheHitTokens,
+            promptCacheMissTokens: record.promptCacheMissTokens,
             durationSeconds: record.durationSeconds,
             path: record.path,
             wasStreaming: record.wasStreaming
@@ -1471,6 +1530,26 @@ final class LocalProxyServer: @unchecked Sendable {
             return nil
         }
         return json["model"] as? String
+    }
+
+    private func passthroughUsage(from data: Data) -> AnthropicTranslator.AnthropicUsageSnapshot? {
+        AnthropicTranslator.anthropicPassthroughUsage(from: data)
+    }
+
+    private func updatePassthroughStreamingUsage(
+        from line: String,
+        model: inout String,
+        promptTokens: inout Int,
+        completionTokens: inout Int,
+        promptCacheHitTokens: inout Int?,
+        promptCacheMissTokens: inout Int?
+    ) {
+        guard let usage = AnthropicTranslator.anthropicPassthroughUsage(fromStreamingLine: line) else { return }
+        model = usage.model ?? model
+        promptTokens = usage.promptTokens ?? promptTokens
+        completionTokens = usage.completionTokens ?? completionTokens
+        promptCacheHitTokens = usage.promptCacheHitTokens ?? promptCacheHitTokens
+        promptCacheMissTokens = usage.promptCacheMissTokens ?? promptCacheMissTokens
     }
 
     private func recordXcodeAgentRequest(model: String, status: Int) {

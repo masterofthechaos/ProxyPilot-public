@@ -458,21 +458,37 @@ final class ProviderManager: ObservableObject {
 
     func upstreamModel(for id: String) -> UpstreamModel? {
         if let direct = upstreamModels.first(where: { $0.id == id }) {
-            return direct
+            return mergedKnownMetadata(for: direct)
         }
         if id.hasSuffix(":exacto"),
            let base = upstreamModels.first(where: { $0.id == String(id.dropLast(":exacto".count)) }) {
-            return base.exactoVariant
+            return mergedKnownMetadata(for: base).exactoVariant
         }
         let lower = id.lowercased()
         if let caseInsensitive = upstreamModels.first(where: { $0.id.lowercased() == lower }) {
-            return caseInsensitive
+            return mergedKnownMetadata(for: caseInsensitive)
         }
         if lower.hasSuffix(":exacto") {
             let baseLower = String(lower.dropLast(":exacto".count))
-            return upstreamModels.first { $0.id.lowercased() == baseLower }?.exactoVariant
+            return upstreamModels.first { $0.id.lowercased() == baseLower }
+                .map { mergedKnownMetadata(for: $0).exactoVariant }
         }
-        return nil
+        return upstreamProvider.knownModelMetadata(for: id)
+    }
+
+    private func mergedKnownMetadata(for model: UpstreamModel) -> UpstreamModel {
+        guard let known = upstreamProvider.knownModelMetadata(for: model.id) else {
+            return model
+        }
+        return UpstreamModel(
+            id: model.id,
+            contextLength: model.contextLength ?? known.contextLength,
+            promptPricePer1M: model.promptPricePer1M ?? known.promptPricePer1M,
+            completionPricePer1M: model.completionPricePer1M ?? known.completionPricePer1M,
+            promptCacheHitPricePer1M: model.promptCacheHitPricePer1M ?? known.promptCacheHitPricePer1M,
+            promptCacheMissPricePer1M: model.promptCacheMissPricePer1M ?? known.promptCacheMissPricePer1M,
+            supportedParameters: model.supportedParameters.isEmpty ? known.supportedParameters : model.supportedParameters
+        )
     }
 
     func preferredXcodeAgentModel(from models: [String], provider: UpstreamProvider? = nil) -> String {

@@ -161,7 +161,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let ctxBox = UnsafeSendableBox(value: context)
         let eventLoop = context.eventLoop
 
-        // --- Anthropic Passthrough: forward directly to MiniMax /anthropic endpoint ---
+        // --- Anthropic Passthrough: forward directly to the provider /anthropic endpoint ---
         if config.isAnthropicPassthroughActive {
             // Remap model to the preferred upstream model.
             if !config.preferredAnthropicUpstreamModel.isEmpty {
@@ -367,6 +367,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             var lastSeenModel = HTTPRequestParser.extractModel(from: body) ?? config.preferredAnthropicUpstreamModel
             var lastSeenPromptTokens = 0
             var lastSeenCompletionTokens = 0
+            var lastSeenPromptCacheHitTokens: Int?
+            var lastSeenPromptCacheMissTokens: Int?
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             do {
@@ -392,7 +394,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         from: validatedLine,
                         model: &lastSeenModel,
                         promptTokens: &lastSeenPromptTokens,
-                        completionTokens: &lastSeenCompletionTokens
+                        completionTokens: &lastSeenCompletionTokens,
+                        promptCacheHitTokens: &lastSeenPromptCacheHitTokens,
+                        promptCacheMissTokens: &lastSeenPromptCacheMissTokens
                     )
 
                     let lineData = Data((validatedLine + "\n").utf8)
@@ -428,6 +432,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         startedAt: requestStart,
                         promptTokens: lastSeenPromptTokens,
                         completionTokens: lastSeenCompletionTokens,
+                        promptCacheHitTokens: lastSeenPromptCacheHitTokens,
+                        promptCacheMissTokens: lastSeenPromptCacheMissTokens,
                         config: config
                     )
                     await recordInputOutputLog(
@@ -886,6 +892,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let requestStart = Date()
             var lastSeenPromptTokens = 0
             var lastSeenCompletionTokens = 0
+            var lastSeenPromptCacheHitTokens: Int?
+            var lastSeenPromptCacheMissTokens: Int?
             var lastSeenModel = requestModel ?? config.preferredAnthropicUpstreamModel
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
@@ -904,7 +912,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         from: rawLine,
                         model: &lastSeenModel,
                         promptTokens: &lastSeenPromptTokens,
-                        completionTokens: &lastSeenCompletionTokens
+                        completionTokens: &lastSeenCompletionTokens,
+                        promptCacheHitTokens: &lastSeenPromptCacheHitTokens,
+                        promptCacheMissTokens: &lastSeenPromptCacheMissTokens
                     )
                     let normalizedLine = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
                         rawLine,
@@ -949,6 +959,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         startedAt: requestStart,
                         promptTokens: lastSeenPromptTokens,
                         completionTokens: lastSeenCompletionTokens,
+                        promptCacheHitTokens: lastSeenPromptCacheHitTokens,
+                        promptCacheMissTokens: lastSeenPromptCacheMissTokens,
                         config: config
                     )
                     await recordInputOutputLog(
@@ -1099,6 +1111,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         responseData: Data? = nil,
         promptTokens: Int? = nil,
         completionTokens: Int? = nil,
+        promptCacheHitTokens: Int? = nil,
+        promptCacheMissTokens: Int? = nil,
         config: ProxyConfiguration
     ) async {
         guard let sessionStats = config.sessionStats else { return }
@@ -1115,6 +1129,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             model: resolvedModel.isEmpty ? "unknown" : resolvedModel,
             promptTokens: promptTokens ?? responseUsage?.prompt ?? 0,
             completionTokens: completionTokens ?? responseUsage?.completion ?? 0,
+            promptCacheHitTokens: promptCacheHitTokens ?? responseUsage?.promptCacheHit,
+            promptCacheMissTokens: promptCacheMissTokens ?? responseUsage?.promptCacheMiss,
             durationSeconds: Date().timeIntervalSince(startedAt),
             path: path,
             wasStreaming: wasStreaming
@@ -1154,54 +1170,39 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return json["model"] as? String
     }
 
-    private func usageTokens(from data: Data) -> (prompt: Int, completion: Int)? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let usage = json["usage"] as? [String: Any] else {
+    private func usageTokens(from data: Data) -> (
+        prompt: Int,
+        completion: Int,
+        promptCacheHit: Int?,
+        promptCacheMiss: Int?
+    )? {
+        guard let usage = AnthropicTranslator.anthropicPassthroughUsage(from: data) else {
             return nil
         }
-
-        let prompt = intValue(usage["prompt_tokens"])
-            ?? intValue(usage["input_tokens"])
-            ?? 0
-        let completion = intValue(usage["completion_tokens"])
-            ?? intValue(usage["output_tokens"])
-            ?? 0
-        return (prompt, completion)
+        return (
+            usage.promptTokens ?? 0,
+            usage.completionTokens ?? 0,
+            usage.promptCacheHitTokens,
+            usage.promptCacheMissTokens
+        )
     }
 
     private func updateStreamingUsage(
         from line: String,
         model: inout String,
         promptTokens: inout Int,
-        completionTokens: inout Int
+        completionTokens: inout Int,
+        promptCacheHitTokens: inout Int?,
+        promptCacheMissTokens: inout Int?
     ) {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("data: ") else { return }
-        let payload = String(trimmed.dropFirst("data: ".count))
-        guard payload != "[DONE]",
-              let data = payload.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return
-        }
-
-        if let responseModel = json["model"] as? String,
-           !responseModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        guard let usage = AnthropicTranslator.anthropicPassthroughUsage(fromStreamingLine: line) else { return }
+        if let responseModel = usage.model {
             model = responseModel
         }
-
-        guard let usage = json["usage"] as? [String: Any] else { return }
-        promptTokens = intValue(usage["prompt_tokens"])
-            ?? intValue(usage["input_tokens"])
-            ?? promptTokens
-        completionTokens = intValue(usage["completion_tokens"])
-            ?? intValue(usage["output_tokens"])
-            ?? completionTokens
-    }
-
-    private func intValue(_ value: Any?) -> Int? {
-        if let value = value as? Int { return value }
-        if let value = value as? NSNumber { return value.intValue }
-        return nil
+        promptTokens = usage.promptTokens ?? promptTokens
+        completionTokens = usage.completionTokens ?? completionTokens
+        promptCacheHitTokens = usage.promptCacheHitTokens ?? promptCacheHitTokens
+        promptCacheMissTokens = usage.promptCacheMissTokens ?? promptCacheMissTokens
     }
 
     private func upstreamErrorMessage(

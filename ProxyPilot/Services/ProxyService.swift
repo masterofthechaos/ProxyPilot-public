@@ -178,13 +178,19 @@ final class ProxyService {
             return decoded.data.map { model in
                 let promptPer1M = model.pricing?.prompt.flatMap(Double.init).map { $0 * 1_000_000 }
                 let completionPer1M = model.pricing?.completion.flatMap(Double.init).map { $0 * 1_000_000 }
-                return UpstreamModel(
+                let discovered = UpstreamModel(
                     id: model.id,
                     contextLength: model.contextLength,
                     promptPricePer1M: promptPer1M,
                     completionPricePer1M: completionPer1M,
                     supportedParameters: Set(model.supportedParameters ?? [])
                 )
+                guard discovered.promptPricePer1M == nil,
+                      discovered.completionPricePer1M == nil,
+                      let known = provider.knownModelMetadata(for: model.id) else {
+                    return discovered
+                }
+                return known
             }.sorted { $0.id < $1.id }
         } catch {
             if let fallback = provider.fallbackModelIDs {

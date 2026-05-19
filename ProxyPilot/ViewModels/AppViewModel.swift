@@ -1576,25 +1576,83 @@ final class AppViewModel: ObservableObject {
         sessionReportCard.requests.filter { estimatedCostUSD(for: $0) != nil }.count
     }
 
+    private enum SessionCostSource {
+        case calculated
+        case openRouterEstimate
+    }
+
+    private var sessionCostSource: SessionCostSource? {
+        guard sessionPricedRequestCount > 0 else { return nil }
+        return upstreamProvider == .openRouter ? .openRouterEstimate : .calculated
+    }
+
+    var sessionCostMetricLabel: String {
+        switch sessionCostSource {
+        case .openRouterEstimate:
+            return String(localized: "OpenRouter Est.")
+        case .calculated:
+            return String(localized: "Calculated Cost")
+        case nil:
+            return String(localized: "Cost")
+        }
+    }
+
+    var sessionRequestCostLabel: String {
+        switch sessionCostSource {
+        case .openRouterEstimate:
+            return String(localized: "OpenRouter Estimate")
+        case .calculated:
+            return String(localized: "Calculated Cost")
+        case nil:
+            return String(localized: "Cost")
+        }
+    }
+
+    var sessionMenuCostText: String? {
+        guard let amount = sessionEstimatedCostUSD else { return nil }
+        switch sessionCostSource {
+        case .openRouterEstimate:
+            return "OR est \(formatUSD(amount))"
+        case .calculated:
+            return "calc \(formatUSD(amount))"
+        case nil:
+            return formatUSD(amount)
+        }
+    }
+
     var sessionCostCoverageText: String {
         let total = sessionReportCard.totalRequests
         guard total > 0 else { return "" }
 
         let priced = sessionPricedRequestCount
+        let dashboardNote = String(localized: "Check your API account dashboard for authoritative billing.")
         if priced == 0 {
-            return String(localized: "No priced requests in current model catalog.")
+            return String(localized: "No priced requests in current model catalog.") + " " + dashboardNote
         }
+
+        let sourceText: String
+        switch sessionCostSource {
+        case .openRouterEstimate:
+            sourceText = String(localized: "OpenRouter estimate extrapolated from response token usage and catalog pricing")
+        case .calculated:
+            sourceText = String(localized: "Calculated from response token usage and model pricing")
+        case nil:
+            sourceText = String(localized: "Cost unavailable")
+        }
+
         if priced < total {
-            return String(localized: "Estimated from") + " \(priced)/\(total) " + String(localized: "requests with pricing metadata.")
+            return sourceText + " " + String(localized: "for") + " \(priced)/\(total) " + String(localized: "requests with pricing metadata.") + " " + dashboardNote
         }
-        return String(localized: "Estimated from all") + " \(total) " + String(localized: "requests.")
+        return sourceText + " " + String(localized: "for all") + " \(total) " + String(localized: "requests.") + " " + dashboardNote
     }
 
     func estimatedCostUSD(for record: SessionReportCard.RequestRecord) -> Double? {
         guard let model = upstreamModel(for: record.model) else { return nil }
         return model.estimatedCostUSD(
             promptTokens: record.promptTokens,
-            completionTokens: record.completionTokens
+            completionTokens: record.completionTokens,
+            promptCacheHitTokens: record.promptCacheHitTokens,
+            promptCacheMissTokens: record.promptCacheMissTokens
         )
     }
 

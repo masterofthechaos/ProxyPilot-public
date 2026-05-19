@@ -1,7 +1,94 @@
 import XCTest
 import Darwin
+import Network
 import ProxyPilotCore
 @testable import ProxyPilot
+
+private final class LocalHTTPStubServer: @unchecked Sendable {
+    private final class OneShotGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var claimed = false
+
+        func claim() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !claimed else { return false }
+            claimed = true
+            return true
+        }
+    }
+
+    private let body: String
+    private let contentType: String
+    private let statusCode: Int
+    private let queue = DispatchQueue(label: "proxypilot.local-http-stub")
+    private var listener: NWListener?
+
+    init(statusCode: Int = 200, body: String, contentType: String = "application/json") {
+        self.statusCode = statusCode
+        self.body = body
+        self.contentType = contentType
+    }
+
+    func start() async throws -> UInt16 {
+        let listener = try NWListener(using: .tcp, on: .any)
+        self.listener = listener
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let gate = OneShotGate()
+
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    guard let port = listener.port else { return }
+                    if gate.claim() {
+                        continuation.resume(returning: port.rawValue)
+                    }
+                case .failed(let error):
+                    if gate.claim() {
+                        continuation.resume(throwing: error)
+                    }
+                default:
+                    break
+                }
+            }
+
+            listener.newConnectionHandler = { [weak self] connection in
+                guard let self else {
+                    connection.cancel()
+                    return
+                }
+                connection.start(queue: self.queue)
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { _, _, _, _ in
+                    self.respond(on: connection)
+                }
+            }
+
+            listener.start(queue: queue)
+        }
+    }
+
+    func stop() {
+        listener?.cancel()
+        listener = nil
+    }
+
+    private func respond(on connection: NWConnection) {
+        let reason = statusCode == 200 ? "OK" : "Error"
+        let response = """
+        HTTP/1.1 \(statusCode) \(reason)\r
+        Content-Type: \(contentType)\r
+        Content-Length: \(body.utf8.count)\r
+        Connection: close\r
+        \r
+        \(body)
+        """
+
+        connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+}
 
 final class LocalProxyServerTests: XCTestCase {
 
@@ -49,6 +136,15 @@ final class LocalProxyServerTests: XCTestCase {
             if isRunning { return }
             try? await Task.sleep(for: .milliseconds(100))
         }
+    }
+
+    private func waitForReportCard(_ server: LocalProxyServer, requestCount: Int) async -> Bool {
+        for _ in 0..<30 {
+            let totalRequests = await MainActor.run { server.reportCard.totalRequests }
+            if totalRequests >= requestCount { return true }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return false
     }
 
     private func nonLoopbackIPv4Address() -> String? {
@@ -766,6 +862,154 @@ final class LocalProxyServerTests: XCTestCase {
             googleThoughtSignatureStore: nil
         )
         XCTAssertTrue(config.requiresUpstreamAPIKey)
+    }
+
+    func testDeepSeekUsesAnthropicPassthroughByDefault() {
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: 4000,
+            masterKey: "test",
+            upstreamProvider: .deepSeek,
+            upstreamAPIBase: URL(string: "https://api.deepseek.com/v1")!,
+            upstreamAPIKey: "sk-test",
+            allowedModels: ["deepseek-v4-pro"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "deepseek-v4-pro",
+            googleThoughtSignatureStore: nil
+        )
+        XCTAssertTrue(config.isAnthropicPassthroughActive)
+    }
+
+    func testDeepSeekBufferedPassthroughRecordsNativeAnthropicUsage() async throws {
+        let upstream = LocalHTTPStubServer(body: """
+        {"id":"msg_deepseek_test","type":"message","role":"assistant","model":"deepseek-v4-flash","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":32,"service_tier":"standard"}}
+        """)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "test",
+            upstreamProvider: .deepSeek,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: "sk-test",
+            allowedModels: ["deepseek-v4-flash"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "deepseek-v4-flash",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonBody([
+            "model": "claude-opus-4-7",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let didRecord = await waitForReportCard(server, requestCount: 1)
+        XCTAssertTrue(didRecord)
+
+        let record = try await MainActor.run {
+            try XCTUnwrap(server.reportCard.requests.last)
+        }
+        XCTAssertEqual(record.model, "deepseek-v4-flash")
+        XCTAssertEqual(record.promptTokens, 10)
+        XCTAssertEqual(record.completionTokens, 32)
+        XCTAssertEqual(record.promptCacheHitTokens, 0)
+        XCTAssertEqual(record.promptCacheMissTokens, 10)
+        XCTAssertEqual(record.path, "/v1/messages")
+        XCTAssertFalse(record.wasStreaming)
+    }
+
+    func testDeepSeekStreamingPassthroughRecordsNativeAnthropicUsage() async throws {
+        let upstream = LocalHTTPStubServer(
+            body: """
+            event: message_start
+            data: {"type":"message_start","message":{"id":"msg_deepseek_stream","type":"message","role":"assistant","model":"deepseek-v4-flash","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"cache_creation_input_tokens":0,"cache_read_input_tokens":2,"output_tokens":1}}}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+            event: content_block_stop
+            data: {"type":"content_block_stop","index":0}
+
+            event: message_delta
+            data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+
+            """,
+            contentType: "text/event-stream"
+        )
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "test",
+            upstreamProvider: .deepSeek,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: "sk-test",
+            allowedModels: ["deepseek-v4-flash"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "deepseek-v4-flash",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonBody([
+            "model": "claude-opus-4-7",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let didRecord = await waitForReportCard(server, requestCount: 1)
+        XCTAssertTrue(didRecord)
+
+        let record = try await MainActor.run {
+            try XCTUnwrap(server.reportCard.requests.last)
+        }
+        XCTAssertEqual(record.model, "deepseek-v4-flash")
+        XCTAssertEqual(record.promptTokens, 10)
+        XCTAssertEqual(record.completionTokens, 4)
+        XCTAssertEqual(record.promptCacheHitTokens, 2)
+        XCTAssertEqual(record.promptCacheMissTokens, 8)
+        XCTAssertEqual(record.path, "/v1/messages")
+        XCTAssertTrue(record.wasStreaming)
     }
 
     // MARK: - Static limitStatusCode (existing on LocalProxyServer)

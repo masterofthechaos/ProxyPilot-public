@@ -230,6 +230,14 @@ struct UpstreamProviderTests {
         let url = UpstreamProvider.miniMaxCN.anthropicPassthroughBaseURL(from: "https://api.minimaxi.com/v1")
         #expect(url == "https://api.minimaxi.com/anthropic")
     }
+    @Test func anthropicPassthroughURLForDeepSeek() {
+        let url = UpstreamProvider.deepSeek.anthropicPassthroughBaseURL(from: "https://api.deepseek.com/v1")
+        #expect(url == "https://api.deepseek.com/anthropic")
+    }
+    @Test func anthropicPassthroughURLLeavesExistingAnthropicBaseUntouched() {
+        let url = UpstreamProvider.deepSeek.anthropicPassthroughBaseURL(from: "https://api.deepseek.com/anthropic")
+        #expect(url == "https://api.deepseek.com/anthropic")
+    }
     @Test func anthropicPassthroughURLReturnsNilForNonMiniMax() {
         #expect(UpstreamProvider.openAI.anthropicPassthroughBaseURL(from: "https://api.openai.com/v1") == nil)
     }
@@ -242,6 +250,10 @@ struct UpstreamProviderTests {
             upstreamProvider: .miniMax,
             miniMaxRoutingMode: .anthropicPassthrough
         )
+        #expect(config.isAnthropicPassthroughActive == true)
+    }
+    @Test func isAnthropicPassthroughActiveForDeepSeekByDefault() {
+        let config = ProxyConfiguration(upstreamProvider: .deepSeek)
         #expect(config.isAnthropicPassthroughActive == true)
     }
     @Test func isAnthropicPassthroughInactiveForNonMiniMax() {

@@ -8,9 +8,16 @@ import NIOConcurrencyHelpers
 
 /// A tiny HTTP server that returns a fixed status code for any request.
 /// Used as a fake upstream in tests so we don't depend on real network timeouts.
+private struct StubRequestRecord: Sendable {
+    let method: String
+    let uri: String
+    let body: String
+}
+
 private final class StubUpstream: Sendable {
     private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     private let channel: NIOLockedValueBox<Channel?> = NIOLockedValueBox(nil)
+    private let records = NIOLockedValueBox<[StubRequestRecord]>([])
 
     /// Starts the stub and returns the bound port.
     func start(statusCode: Int = 500, body: String = "{\"error\":\"stub\"}") async throws -> UInt16 {
@@ -20,13 +27,17 @@ private final class StubUpstream: Sendable {
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(StubHandler(statusCode: sc, body: b))
+                    channel.pipeline.addHandler(StubHandler(statusCode: sc, body: b, records: self.records))
                 }
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
         channel.withLockedValue { $0 = ch }
         return UInt16(ch.localAddress!.port!)
+    }
+
+    func requests() -> [StubRequestRecord] {
+        records.withLockedValue { $0 }
     }
 
     func stop() async throws {
@@ -43,15 +54,45 @@ private final class StubHandler: ChannelInboundHandler, @unchecked Sendable {
 
     let statusCode: Int
     let body: String
+    let records: NIOLockedValueBox<[StubRequestRecord]>
+    var requestHead: HTTPRequestHead?
+    var requestBody: ByteBuffer?
 
-    init(statusCode: Int, body: String) {
+    init(statusCode: Int, body: String, records: NIOLockedValueBox<[StubRequestRecord]>) {
         self.statusCode = statusCode
         self.body = body
+        self.records = records
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
-        guard case .end = part else { return }
+
+        switch part {
+        case .head(let head):
+            requestHead = head
+            requestBody = context.channel.allocator.buffer(capacity: 0)
+            return
+        case .body(var body):
+            requestBody?.writeBuffer(&body)
+            return
+        case .end:
+            if let requestHead {
+                var capturedBody = ""
+                if var buffer = requestBody,
+                   let bytes = buffer.readBytes(length: buffer.readableBytes) {
+                    capturedBody = String(decoding: bytes, as: UTF8.self)
+                }
+                records.withLockedValue {
+                    $0.append(StubRequestRecord(
+                        method: requestHead.method.rawValue,
+                        uri: requestHead.uri,
+                        body: capturedBody
+                    ))
+                }
+            }
+            requestHead = nil
+            requestBody = nil
+        }
 
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
@@ -456,6 +497,61 @@ struct NIOProxyServerTests {
         let httpResponse = response as! HTTPURLResponse
         // Streaming path: upstream 500 → UpstreamClient throws httpError → proxy returns 502
         #expect(httpResponse.statusCode == 502)
+
+        try await server.stop()
+        try await stub.stop()
+    }
+
+    @Test func anthropicMessagesPassthroughsDeepSeekToAnthropicEndpoint() async throws {
+        let anthropicResponse: [String: Any] = [
+            "id": "msg_deepseek_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "deepseek-v4-pro",
+            "content": [["type": "text", "text": "ok"]],
+            "stop_reason": "end_turn",
+            "usage": ["input_tokens": 10, "output_tokens": 2]
+        ]
+        let stubBodyData = try JSONSerialization.data(withJSONObject: anthropicResponse)
+        let stubBody = String(data: stubBodyData, encoding: .utf8)!
+
+        let stub = StubUpstream()
+        let stubPort = try await stub.start(statusCode: 200, body: stubBody)
+
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamProvider: .deepSeek,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(stubPort)/v1",
+            upstreamAPIKey: "sk-test",
+            requiresAuth: false,
+            preferredAnthropicUpstreamModel: "deepseek-v4-pro"
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-sonnet-4-5-20250514",
+            "max_tokens": 100,
+            "stream": false,
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        let httpResponse = response as! HTTPURLResponse
+        #expect(httpResponse.statusCode == 200)
+
+        let capturedRequest = try #require(stub.requests().first)
+        #expect(capturedRequest.method == "POST")
+        #expect(capturedRequest.uri == "/anthropic/v1/messages")
+
+        let capturedBodyData = Data(capturedRequest.body.utf8)
+        let capturedBody = try #require(JSONSerialization.jsonObject(with: capturedBodyData) as? [String: Any])
+        #expect(capturedBody["model"] as? String == "deepseek-v4-pro")
+        #expect(capturedBody["max_tokens"] as? Int == 100)
+        #expect(capturedBody["messages"] != nil)
 
         try await server.stop()
         try await stub.stop()

@@ -66,14 +66,14 @@ struct HomeDashboardView: View {
                     HStack(spacing: 12) {
                         heroMetric("Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right")
                         heroMetric("Tokens", vm.sessionReportCard.totalTokensFormatted, systemImage: "number")
-                        heroMetric("Cost", vm.formatUSD(vm.sessionEstimatedCostUSD), systemImage: "dollarsign.circle")
+                        heroMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD), systemImage: "dollarsign.circle")
                         heroMetric("Latency", sessionLatencyText, systemImage: "timer")
                     }
 
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 12)], spacing: 12) {
                         heroMetric("Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right")
                         heroMetric("Tokens", vm.sessionReportCard.totalTokensFormatted, systemImage: "number")
-                        heroMetric("Cost", vm.formatUSD(vm.sessionEstimatedCostUSD), systemImage: "dollarsign.circle")
+                        heroMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD), systemImage: "dollarsign.circle")
                         heroMetric("Latency", sessionLatencyText, systemImage: "timer")
                     }
                 }
@@ -434,7 +434,7 @@ struct HomeDashboardView: View {
                 smallMetric("Prompt", "\(vm.sessionReportCard.totalPromptTokens)")
                 smallMetric("Completion", "\(vm.sessionReportCard.totalCompletionTokens)")
                 smallMetric("Total", vm.sessionReportCard.totalTokensFormatted)
-                smallMetric("Cost", vm.formatUSD(vm.sessionEstimatedCostUSD))
+                smallMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD))
                 if let latency = vm.sessionLatencySummary {
                     smallMetric("P95", formatLatency(latency.p95))
                 }
@@ -444,7 +444,7 @@ struct HomeDashboardView: View {
                 smallMetric("Prompt", "\(vm.sessionReportCard.totalPromptTokens)")
                 smallMetric("Completion", "\(vm.sessionReportCard.totalCompletionTokens)")
                 smallMetric("Total", vm.sessionReportCard.totalTokensFormatted)
-                smallMetric("Cost", vm.formatUSD(vm.sessionEstimatedCostUSD))
+                smallMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD))
                 if let latency = vm.sessionLatencySummary {
                     smallMetric("P95", formatLatency(latency.p95))
                 }
@@ -517,7 +517,7 @@ struct HomeDashboardView: View {
                                 requestDetailRow(label: "Completion", value: "\(request.completionTokens)")
                                 requestDetailRow(label: "Total", value: "\(request.totalTokens)")
                                 requestDetailRow(label: "Latency", value: formatLatency(request.durationSeconds))
-                                requestDetailRow(label: "Estimated Cost", value: vm.formatUSD(vm.estimatedCostUSD(for: request)))
+                                requestDetailRow(label: vm.sessionRequestCostLabel, value: vm.formatUSD(vm.estimatedCostUSD(for: request)))
 
                                 HStack {
                                     Spacer()

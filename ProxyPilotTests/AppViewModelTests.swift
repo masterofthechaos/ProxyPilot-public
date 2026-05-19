@@ -1800,6 +1800,94 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.sessionPricedRequestCount, 1)
     }
 
+    func testSessionEstimatedCostUsesDeepSeekKnownPricingWithExplicitCacheSplit() throws {
+        defaults.set(UpstreamProvider.deepSeek.rawValue, forKey: ProviderManager.upstreamProviderDefaultsKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.upstreamModels = [
+            .idOnly("deepseek-v4-flash")
+        ]
+        vm.sessionReportCard.record(.init(
+            timestamp: Date(),
+            model: "deepseek-v4-flash",
+            promptTokens: 1_000_000,
+            completionTokens: 1_000_000,
+            promptCacheHitTokens: 250_000,
+            promptCacheMissTokens: 750_000,
+            durationSeconds: 0.2,
+            path: "/v1/messages",
+            wasStreaming: false
+        ))
+
+        let cost = try XCTUnwrap(vm.sessionEstimatedCostUSD)
+        XCTAssertEqual(cost, 0.3857, accuracy: 0.000001)
+        XCTAssertEqual(vm.sessionPricedRequestCount, 1)
+    }
+
+    func testSessionCostCopyDescribesCalculatedProviderPricing() {
+        defaults.set(UpstreamProvider.deepSeek.rawValue, forKey: ProviderManager.upstreamProviderDefaultsKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.upstreamModels = [
+            .idOnly("deepseek-v4-flash")
+        ]
+        vm.sessionReportCard.record(.init(
+            timestamp: Date(),
+            model: "deepseek-v4-flash",
+            promptTokens: 1_000,
+            completionTokens: 500,
+            promptCacheHitTokens: 100,
+            promptCacheMissTokens: 900,
+            durationSeconds: 0.2,
+            path: "/v1/messages",
+            wasStreaming: false
+        ))
+
+        XCTAssertEqual(vm.sessionCostMetricLabel, "Calculated Cost")
+        XCTAssertEqual(vm.sessionRequestCostLabel, "Calculated Cost")
+        XCTAssertTrue(vm.sessionMenuCostText?.hasPrefix("calc ") == true)
+        XCTAssertTrue(vm.sessionCostCoverageText.contains("Calculated from response token usage and model pricing"))
+        XCTAssertTrue(vm.sessionCostCoverageText.contains("Check your API account dashboard"))
+    }
+
+    func testSessionCostCopyDescribesOpenRouterEstimate() {
+        defaults.set(UpstreamProvider.openRouter.rawValue, forKey: ProviderManager.upstreamProviderDefaultsKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.upstreamModels = [
+            UpstreamModel(id: "openrouter/test-model", contextLength: nil, promptPricePer1M: 2.0, completionPricePer1M: 6.0)
+        ]
+        vm.sessionReportCard.record(.init(
+            timestamp: Date(),
+            model: "openrouter/test-model",
+            promptTokens: 1_000,
+            completionTokens: 500,
+            durationSeconds: 0.2,
+            path: "/v1/chat/completions",
+            wasStreaming: false
+        ))
+
+        XCTAssertEqual(vm.sessionCostMetricLabel, "OpenRouter Est.")
+        XCTAssertEqual(vm.sessionRequestCostLabel, "OpenRouter Estimate")
+        XCTAssertTrue(vm.sessionMenuCostText?.hasPrefix("OR est ") == true)
+        XCTAssertTrue(vm.sessionCostCoverageText.contains("OpenRouter estimate extrapolated from response token usage and catalog pricing"))
+        XCTAssertTrue(vm.sessionCostCoverageText.contains("Check your API account dashboard"))
+    }
+
+    func testSessionEstimatedCostDoesNotGuessDeepSeekCacheSplit() {
+        defaults.set(UpstreamProvider.deepSeek.rawValue, forKey: ProviderManager.upstreamProviderDefaultsKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.sessionReportCard.record(.init(
+            timestamp: Date(),
+            model: "deepseek-v4-flash",
+            promptTokens: 1_000_000,
+            completionTokens: 1_000_000,
+            durationSeconds: 0.2,
+            path: "/v1/messages",
+            wasStreaming: false
+        ))
+
+        XCTAssertNil(vm.sessionEstimatedCostUSD)
+        XCTAssertEqual(vm.sessionPricedRequestCount, 0)
+    }
+
     func testSessionEstimatedCostUsesCachedFetchedPricingAfterRelaunch() throws {
         defaults.set(UpstreamProvider.openRouter.rawValue, forKey: ProviderManager.upstreamProviderDefaultsKey)
 

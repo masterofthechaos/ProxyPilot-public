@@ -143,6 +143,60 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// Provider-published metadata for models whose `/models` response only
+    /// returns ids. Pricing is used for local session-cost estimates.
+    public func knownModelMetadata(for id: String, now: Date = Date()) -> UpstreamModel? {
+        let hasExactoSuffix = id.lowercased().hasSuffix(":exacto")
+        let baseID = hasExactoSuffix ? String(id.dropLast(":exacto".count)) : id
+        let lower = baseID.lowercased()
+
+        guard self == .deepSeek else { return nil }
+
+        let model: UpstreamModel?
+        switch lower {
+        case "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner":
+            model = UpstreamModel(
+                id: baseID,
+                contextLength: 1_000_000,
+                promptPricePer1M: 0.14,
+                completionPricePer1M: 0.28,
+                promptCacheHitPricePer1M: 0.0028,
+                promptCacheMissPricePer1M: 0.14,
+                supportedParameters: ["tools", "tool_choice", "response_format"]
+            )
+        case "deepseek-v4-pro":
+            let discounted = Self.isDeepSeekV4ProDiscountActive(now: now)
+            model = UpstreamModel(
+                id: baseID,
+                contextLength: 1_000_000,
+                promptPricePer1M: discounted ? 0.435 : 1.74,
+                completionPricePer1M: discounted ? 0.87 : 3.48,
+                promptCacheHitPricePer1M: discounted ? 0.003625 : 0.0145,
+                promptCacheMissPricePer1M: discounted ? 0.435 : 1.74,
+                supportedParameters: ["tools", "tool_choice", "response_format"]
+            )
+        default:
+            model = nil
+        }
+
+        guard let model else { return nil }
+        return hasExactoSuffix ? model.exactoVariant : model
+    }
+
+    private static func isDeepSeekV4ProDiscountActive(now: Date) -> Bool {
+        var components = DateComponents()
+        components.calendar = Calendar(identifier: .gregorian)
+        components.timeZone = TimeZone(secondsFromGMT: 0)
+        components.year = 2026
+        components.month = 5
+        components.day = 31
+        components.hour = 15
+        components.minute = 59
+        components.second = 0
+        guard let discountEnd = components.date else { return false }
+        return now <= discountEnd
+    }
+
     /// Alternate API base URLs that are officially supported for the provider.
     public var alternateAPIBaseURLs: [String] {
         switch self {
@@ -189,6 +243,18 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         self == .miniMax || self == .miniMaxCN
     }
 
+    /// Whether this provider has an official Anthropic-compatible endpoint that
+    /// can receive `/v1/messages` requests directly.
+    public var supportsAnthropicPassthrough: Bool {
+        isMiniMax || self == .deepSeek
+    }
+
+    /// Whether `/v1/messages` should use the provider's Anthropic-compatible
+    /// endpoint without requiring a user-facing routing-mode toggle.
+    public var usesAnthropicPassthroughByDefault: Bool {
+        self == .deepSeek
+    }
+
     /// Derives the Anthropic passthrough base URL from the OpenAI-compat base URL.
     /// Returns nil for providers that don't support Anthropic passthrough.
     ///
@@ -197,7 +263,10 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         var base = openAIBaseURL
         while base.hasSuffix("/") { base.removeLast() }
 
-        guard isMiniMax else { return nil }
+        guard supportsAnthropicPassthrough else { return nil }
+        if base.hasSuffix("/anthropic") {
+            return base
+        }
         if base.hasSuffix("/v1") {
             return String(base.dropLast(3)) + "/anthropic"
         }
@@ -206,16 +275,29 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     }
 
     /// Parameters to strip from Anthropic-format requests before forwarding to
-    /// MiniMax's `/anthropic` endpoint (which doesn't support them).
+    /// provider `/anthropic` endpoints.
     public var unsupportedAnthropicParameters: [String] {
-        guard isMiniMax else { return [] }
-        return [
-            "top_k",
-            "stop_sequences",
-            "service_tier",
-            "mcp_servers",
-            "container",
-            "context_management"
-        ]
+        switch self {
+        case .miniMax, .miniMaxCN:
+            return [
+                "top_k",
+                "stop_sequences",
+                "service_tier",
+                "mcp_servers",
+                "container",
+                "context_management"
+            ]
+        case .deepSeek:
+            return [
+                "top_k",
+                "service_tier",
+                "mcp_servers",
+                "container",
+                "metadata",
+                "context_management"
+            ]
+        default:
+            return []
+        }
     }
 }

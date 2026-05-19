@@ -5,6 +5,8 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
     public let contextLength: Int?
     public let promptPricePer1M: Double?
     public let completionPricePer1M: Double?
+    public let promptCacheHitPricePer1M: Double?
+    public let promptCacheMissPricePer1M: Double?
     public let supportedParameters: Set<String>
 
     public init(
@@ -12,12 +14,16 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
         contextLength: Int?,
         promptPricePer1M: Double?,
         completionPricePer1M: Double?,
+        promptCacheHitPricePer1M: Double? = nil,
+        promptCacheMissPricePer1M: Double? = nil,
         supportedParameters: Set<String> = []
     ) {
         self.id = id
         self.contextLength = contextLength
         self.promptPricePer1M = promptPricePer1M
         self.completionPricePer1M = completionPricePer1M
+        self.promptCacheHitPricePer1M = promptCacheHitPricePer1M
+        self.promptCacheMissPricePer1M = promptCacheMissPricePer1M
         self.supportedParameters = supportedParameters
     }
 
@@ -47,6 +53,8 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
             contextLength: contextLength,
             promptPricePer1M: promptPricePer1M,
             completionPricePer1M: completionPricePer1M,
+            promptCacheHitPricePer1M: promptCacheHitPricePer1M,
+            promptCacheMissPricePer1M: promptCacheMissPricePer1M,
             supportedParameters: supportedParameters
         )
     }
@@ -105,6 +113,34 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
     }
 
     public func estimatedCostUSD(promptTokens: Int, completionTokens: Int) -> Double? {
+        estimatedCostUSD(
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            promptCacheHitTokens: nil,
+            promptCacheMissTokens: nil
+        )
+    }
+
+    public func estimatedCostUSD(
+        promptTokens: Int,
+        completionTokens: Int,
+        promptCacheHitTokens: Int?,
+        promptCacheMissTokens: Int?
+    ) -> Double? {
+        if promptCacheHitPricePer1M != nil || promptCacheMissPricePer1M != nil {
+            guard let promptCacheHitTokens,
+                  let promptCacheMissTokens else {
+                return nil
+            }
+            let sanitizedHitTokens = max(promptCacheHitTokens, 0)
+            let sanitizedMissTokens = max(promptCacheMissTokens, 0)
+            let sanitizedCompletionTokens = max(completionTokens, 0)
+            let hitCost = (Double(sanitizedHitTokens) / 1_000_000) * (promptCacheHitPricePer1M ?? 0)
+            let missCost = (Double(sanitizedMissTokens) / 1_000_000) * (promptCacheMissPricePer1M ?? promptPricePer1M ?? 0)
+            let completionCost = (Double(sanitizedCompletionTokens) / 1_000_000) * (completionPricePer1M ?? 0)
+            return hitCost + missCost + completionCost
+        }
+
         guard promptPricePer1M != nil || completionPricePer1M != nil else { return nil }
         let sanitizedPromptTokens = max(promptTokens, 0)
         let sanitizedCompletionTokens = max(completionTokens, 0)
@@ -115,10 +151,20 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
     }
 
     public var pricingPerMillionLabel: String? {
-        guard promptPricePer1M != nil || completionPricePer1M != nil else { return nil }
-        let promptLabel = promptPricePer1M.map { Self.formatUSDCurrency($0) } ?? "-"
+        guard promptPricePer1M != nil
+            || completionPricePer1M != nil
+            || promptCacheHitPricePer1M != nil
+            || promptCacheMissPricePer1M != nil else {
+            return nil
+        }
+        let promptLabel: String
+        if let hit = promptCacheHitPricePer1M, let miss = promptCacheMissPricePer1M {
+            promptLabel = "\(Self.formatUSDCurrency(hit))/M cached · \(Self.formatUSDCurrency(miss))/M uncached"
+        } else {
+            promptLabel = promptPricePer1M.map { Self.formatUSDCurrency($0) + "/M" } ?? "-"
+        }
         let completionLabel = completionPricePer1M.map { Self.formatUSDCurrency($0) } ?? "-"
-        return "In \(promptLabel)/M · Out \(completionLabel)/M"
+        return "In \(promptLabel) · Out \(completionLabel)/M"
     }
 
     private static func formatUSDCurrency(_ amount: Double) -> String {

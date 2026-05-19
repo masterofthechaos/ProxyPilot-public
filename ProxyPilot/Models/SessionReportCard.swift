@@ -11,6 +11,8 @@ final class SessionReportCard: ObservableObject {
         let model: String
         let promptTokens: Int
         let completionTokens: Int
+        let promptCacheHitTokens: Int?
+        let promptCacheMissTokens: Int?
         let durationSeconds: TimeInterval
         let path: String
         let wasStreaming: Bool
@@ -23,6 +25,8 @@ final class SessionReportCard: ObservableObject {
             model: String,
             promptTokens: Int,
             completionTokens: Int,
+            promptCacheHitTokens: Int? = nil,
+            promptCacheMissTokens: Int? = nil,
             durationSeconds: TimeInterval,
             path: String,
             wasStreaming: Bool
@@ -32,6 +36,8 @@ final class SessionReportCard: ObservableObject {
             self.model = model
             self.promptTokens = promptTokens
             self.completionTokens = completionTokens
+            self.promptCacheHitTokens = promptCacheHitTokens
+            self.promptCacheMissTokens = promptCacheMissTokens
             self.durationSeconds = durationSeconds
             self.path = path
             self.wasStreaming = wasStreaming
@@ -147,6 +153,8 @@ final class SessionReportCard: ObservableObject {
             model: entry.model,
             promptTokens: entry.promptTokens,
             completionTokens: entry.completionTokens,
+            promptCacheHitTokens: entry.promptCacheHitTokens,
+            promptCacheMissTokens: entry.promptCacheMissTokens,
             durationSeconds: entry.durationSeconds,
             path: entry.path,
             wasStreaming: entry.wasStreaming
