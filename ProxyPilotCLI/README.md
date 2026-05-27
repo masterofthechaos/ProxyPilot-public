@@ -97,7 +97,7 @@ proxypilot start [--port <port>] [--provider <provider>] [--upstream-url <url>] 
 | Flag | Default | Description |
 |---|---|---|
 | `--port`, `-p` | `4000` | Port to listen on |
-| `--provider` | `openai` | Upstream provider. Valid: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `deepseek`, `mistral`, `minimax`, `minimax-cn`, `github-copilot`, `ollama`, `lmstudio` |
+| `--provider` | `openai` | Upstream provider. Valid: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `deepseek`, `mistral`, `minimax`, `minimax-cn`, `qwen`, `github-copilot`, `ollama`, `lmstudio` |
 | `--upstream-url` | provider default | Override upstream API base URL |
 | `--key` | — | Upstream API key. Falls back to environment variable, then keychain/secrets store |
 | `--key-stdin` | false | Read one API key line from stdin |
@@ -194,7 +194,7 @@ proxypilot auth set --provider <provider> [--key <value>] [--stdin] [--json]
 
 | Flag | Default | Description |
 |---|---|---|
-| `--provider` | — | Required provider. Cloud only: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `deepseek`, `mistral`, `minimax`, `minimax-cn` |
+| `--provider` | — | Required provider. Cloud only: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `deepseek`, `mistral`, `minimax`, `minimax-cn`, `qwen` |
 | `--key` | — | Non-interactive key value; avoid in shared shells because it can be retained in shell history |
 | `--stdin` | false | Read one key line from stdin; recommended for scripts and terminals |
 | `--json` | false | Emit JSON output |
@@ -433,7 +433,7 @@ Pass `--json` to any command to get machine-readable output on stdout.
 **Error:**
 
 ```json
-{"ok": false, "error": {"code": "E001", "message": "Unknown provider: foo", "suggestion": "Valid: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, github-copilot, ollama, lmstudio"}}
+{"ok": false, "error": {"code": "E001", "message": "Unknown provider: foo", "suggestion": "Valid: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, qwen, github-copilot, ollama, lmstudio"}}
 ```
 
 Error codes:

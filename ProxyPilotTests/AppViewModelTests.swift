@@ -177,7 +177,7 @@ final class AppViewModelTests: XCTestCase {
         vm?.visibleMenuBarSections = [.statusDetails, .quickActions]
         vm?.visibleHomeDashboardSections = [.sessionSummary, .sessionReportCard]
         vm?.defaultSettingsSection = .customization
-        vm?.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .ollama, .lmStudio]
+        vm?.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen, .ollama, .lmStudio]
         vm?.visibleKeysProviders = [.openAI, .githubCopilot]
         vm?.copilotSidecarExpanded = false
         vm = nil
@@ -206,7 +206,7 @@ final class AppViewModelTests: XCTestCase {
         vm.visibleMenuBarSections = [.statusDetails, .quickActions]
         vm.visibleHomeDashboardSections = [.sessionSummary]
         vm.defaultSettingsSection = .customization
-        vm.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .ollama, .lmStudio]
+        vm.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen, .ollama, .lmStudio]
         vm.visibleKeysProviders = [.openAI]
         vm.copilotSidecarExpanded = false
 
@@ -302,7 +302,7 @@ final class AppViewModelTests: XCTestCase {
         vm.visibleMenuBarSections = [.statusDetails]
         vm.visibleHomeDashboardSections = [.sessionSummary]
         vm.defaultSettingsSection = .customization
-        vm.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .ollama, .lmStudio]
+        vm.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen, .ollama, .lmStudio]
         vm.visibleKeysProviders = [.openAI]
         vm.copilotSidecarExpanded = false
 
@@ -1278,7 +1278,7 @@ final class AppViewModelTests: XCTestCase {
     // MARK: - API Key Page URL
 
     func testCloudProvidersHaveAPIKeyPageURL() {
-        let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN]
+        let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen]
         for provider in cloudProviders {
             XCTAssertNotNil(provider.apiKeyPageURL, "\(provider.title) should have an API key page URL")
         }
@@ -1297,7 +1297,7 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testAllCloudProvidersHaveKeychainKeys() {
-        let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN]
+        let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen]
         for provider in cloudProviders {
             XCTAssertNotNil(provider.keychainKey, "\(provider.title) should have a keychain key")
             XCTAssertTrue(provider.requiresAPIKey, "\(provider.title) should require API key")

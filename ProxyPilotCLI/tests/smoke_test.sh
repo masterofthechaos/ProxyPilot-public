@@ -568,7 +568,7 @@ try:
         raise SystemExit(0)
     providers = d.get("data", {}).get("providers", [])
     status = {p.get("provider"): p.get("status") for p in providers}
-    expected = {"openai", "groq", "zai", "openrouter", "xai", "chutes", "google", "deepseek", "mistral", "minimax", "minimax-cn", "github-copilot", "ollama", "lmstudio"}
+    expected = {"openai", "groq", "zai", "openrouter", "xai", "chutes", "google", "deepseek", "mistral", "minimax", "minimax-cn", "qwen", "github-copilot", "ollama", "lmstudio"}
     if expected.issubset(set(status.keys())) and status.get("github-copilot") == "not_required" and status.get("ollama") == "not_required" and status.get("lmstudio") == "not_required":
         print("PASS")
     else:
