@@ -20,6 +20,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Upstream API key.")
     var key: String?
 
+    @Option(name: .long, help: "Prompt caching mode: auto, observe-only, or off.")
+    var promptCaching: CLIPromptCachingMode = .auto
+
     @Flag(name: .long, help: "Run as MCP server over stdio instead of HTTP proxy.")
     var mcp: Bool = false
 
@@ -51,7 +54,8 @@ struct ServeCommand: AsyncParsableCommand {
             upstreamAPIKey: resolvedCredential.apiKey,
             sessionStats: sessionStats,
             googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil,
-            inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "cli", sessionID: sessionID)
+            inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "cli", sessionID: sessionID),
+            promptCaching: promptCaching.configuration
         )
 
         let server = NIOProxyServer()
@@ -162,7 +166,7 @@ struct ServeCommand: AsyncParsableCommand {
     // MARK: - MCP stdio mode
 
     private func startMCPMode() async throws {
-        try await MCPServerSetup.run(port: port, provider: provider, key: key, upstreamURL: upstreamUrl)
+        try await MCPServerSetup.run(port: port, provider: provider, key: key, upstreamURL: upstreamUrl, promptCaching: promptCaching)
     }
 
     private struct ServePayload: Encodable {

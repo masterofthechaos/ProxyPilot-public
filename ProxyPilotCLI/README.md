@@ -91,7 +91,7 @@ proxypilot setup xcode [--port <port>] [--provider <provider>] [--upstream-url <
 Start the proxy server. The process stays in the foreground and writes a PID file so `stop` and `status` can find it. Use `--daemon` to background it.
 
 ```
-proxypilot start [--port <port>] [--provider <provider>] [--upstream-url <url>] [--key <key>] [--key-stdin] [--model <model[,model...]>] [--daemon] [--json]
+proxypilot start [--port <port>] [--provider <provider>] [--upstream-url <url>] [--key <key>] [--key-stdin] [--model <model[,model...]>] [--prompt-caching <auto|observe-only|off>] [--daemon] [--json]
 ```
 
 | Flag | Default | Description |
@@ -102,12 +102,13 @@ proxypilot start [--port <port>] [--provider <provider>] [--upstream-url <url>] 
 | `--key` | — | Upstream API key. Falls back to environment variable, then keychain/secrets store |
 | `--key-stdin` | false | Read one API key line from stdin |
 | `--model` | auto-discovered for local providers when omitted | Preferred upstream model(s), comma-separated |
+| `--prompt-caching` | `auto` | Cache mode: `auto` applies safe provider cache signals, `observe-only` records provider telemetry without mutation, `off` disables mutation and cache accounting |
 | `--daemon` | false | Run in background and write PID file |
 | `--json` | false | Emit JSON output instead of human-readable text |
 
 Key resolution order: `--key` flag > environment variable > keychain (macOS) / `secrets.json` (Linux).
 
-Environment variable names: `OPENAI_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `CHUTES_API_KEY`, `GOOGLE_API_KEY`.
+Environment variable names: `OPENAI_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `CHUTES_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `MINIMAX_API_KEY`, `MINIMAX_CN_API_KEY`, `QWEN_API_KEY`.
 
 ---
 
@@ -312,7 +313,7 @@ If the target directory is not writable, run with `sudo` or choose a writable `-
 Run the proxy server in the foreground (default), or launch an MCP server over stdio (`--mcp`). In MCP mode, the proxy runs in-process; stdout is reserved for JSON-RPC and all diagnostics go to stderr.
 
 ```
-proxypilot serve [--port <port>] [--provider <provider>] [--upstream-url <upstream-url>] [--key <key>] [--mcp] [--json]
+proxypilot serve [--port <port>] [--provider <provider>] [--upstream-url <upstream-url>] [--key <key>] [--prompt-caching <auto|observe-only|off>] [--mcp] [--json]
 ```
 
 | Flag | Default | Description |
@@ -321,10 +322,12 @@ proxypilot serve [--port <port>] [--provider <provider>] [--upstream-url <upstre
 | `--provider` | `openai` | Upstream provider |
 | `--upstream-url` | provider default | Override upstream API base URL |
 | `--key` | — | Upstream API key |
+| `--prompt-caching` | `auto` | Cache mode: `auto`, `observe-only`, or `off` |
 | `--mcp` | false | Run as MCP server over stdio instead of HTTP proxy |
 | `--json` | false | Emit JSON output (ignored in MCP mode) |
 
-MCP mode exposes 9 tools:
+MCP mode exposes 13 tools:
+`preflight`, `auth_status`, `auth_set`, `verify_routing`,
 `proxy_start`, `proxy_stop`, `proxy_restart`, `proxy_status`,
 `xcode_config_install`, `xcode_config_remove`, `list_upstream_models`,
 `get_session_stats`, `proxy_logs`.
@@ -361,6 +364,12 @@ The server inherits `--provider` and `--key` defaults but tools can override bot
 | xAI (Grok) | `xai` | `https://api.x.ai/v1` |
 | Chutes | `chutes` | `https://llm.chutes.ai/v1` |
 | Google (Gemini) | `google` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| DeepSeek | `deepseek` | `https://api.deepseek.com/v1` |
+| Mistral | `mistral` | `https://api.mistral.ai/v1` |
+| MiniMax | `minimax` | `https://api.minimax.io/v1` |
+| MiniMax CN | `minimax-cn` | `https://api.minimaxi.com/v1` |
+| Qwen | `qwen` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| GitHub Copilot sidecar | `github-copilot` | `http://127.0.0.1:4141/v1` |
 | Ollama | `ollama` | `http://localhost:11434/v1` |
 | LM Studio | `lmstudio` | `http://localhost:1234/v1` |
 

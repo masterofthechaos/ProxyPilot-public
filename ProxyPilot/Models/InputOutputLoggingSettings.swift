@@ -53,4 +53,23 @@ enum InputOutputLoggingRetention: String, CaseIterable, Identifiable {
             return "ProxyPilot will delete any saved inputs or outputs after 24 hours."
         }
     }
+
+    var durationSeconds: TimeInterval? {
+        switch self {
+        case .untilQuit:
+            return nil
+        case .thirtyMinutes:
+            return 30 * 60
+        case .oneHour:
+            return 60 * 60
+        case .twoHours:
+            return 2 * 60 * 60
+        case .sixHours:
+            return 6 * 60 * 60
+        case .twelveHours:
+            return 12 * 60 * 60
+        case .twentyFourHoursDefault, .twentyFourHoursMaximum:
+            return 24 * 60 * 60
+        }
+    }
 }

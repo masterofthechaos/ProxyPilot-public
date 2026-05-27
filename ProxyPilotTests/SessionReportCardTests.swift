@@ -193,4 +193,24 @@ final class SessionReportCardTests: XCTestCase {
         XCTAssertEqual(card.requests.first?.model, "model-10")
         XCTAssertEqual(card.sessionStartTime, Date(timeIntervalSince1970: 0))
     }
+
+    func testCacheAccountingAvailableIncludesWriteOnlyTelemetry() {
+        let card = SessionReportCard()
+        card.record(.init(
+            timestamp: Date(),
+            model: "model-a",
+            promptTokens: 100,
+            completionTokens: 20,
+            promptCacheWriteTokens: 80,
+            durationSeconds: 0.1,
+            path: "/v1/chat/completions",
+            wasStreaming: false
+        ))
+
+        XCTAssertTrue(card.cacheAccountingAvailable)
+        XCTAssertEqual(card.totalPromptCacheHitTokens, 0)
+        XCTAssertEqual(card.totalPromptCacheMissTokens, 0)
+        XCTAssertEqual(card.totalPromptCacheWriteTokens, 80)
+        XCTAssertNil(card.cacheHitRate)
+    }
 }

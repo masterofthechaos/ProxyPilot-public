@@ -18,19 +18,22 @@ public enum AnthropicTranslator {
         public let completionTokens: Int?
         public let promptCacheHitTokens: Int?
         public let promptCacheMissTokens: Int?
+        public let promptCacheWriteTokens: Int?
 
         public init(
             model: String?,
             promptTokens: Int?,
             completionTokens: Int?,
             promptCacheHitTokens: Int? = nil,
-            promptCacheMissTokens: Int? = nil
+            promptCacheMissTokens: Int? = nil,
+            promptCacheWriteTokens: Int? = nil
         ) {
             self.model = model
             self.promptTokens = promptTokens
             self.completionTokens = completionTokens
             self.promptCacheHitTokens = promptCacheHitTokens
             self.promptCacheMissTokens = promptCacheMissTokens
+            self.promptCacheWriteTokens = promptCacheWriteTokens
         }
     }
 
@@ -542,9 +545,19 @@ public enum AnthropicTranslator {
         ].forEach { root.removeValue(forKey: $0) }
 
         if var usage = root["usage"] as? [String: Any] {
+            let retainedUsageKeys: Set<String> = [
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "prompt_tokens_details",
+                "prompt_cache_hit_tokens",
+                "prompt_cache_miss_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens"
+            ]
             usage = Dictionary(
                 uniqueKeysWithValues: usage.filter { key, _ in
-                    ["prompt_tokens", "completion_tokens", "total_tokens"].contains(key)
+                    retainedUsageKeys.contains(key)
                 }
             )
             root["usage"] = usage
@@ -577,16 +590,29 @@ public enum AnthropicTranslator {
         let message = root["message"] as? [String: Any]
         let usage = (root["usage"] as? [String: Any]) ?? (message?["usage"] as? [String: Any])
         let model = nonEmptyString(root["model"]) ?? nonEmptyString(message?["model"])
+        let promptTokensValue = intValue(from: usage?["prompt_tokens"])
+        let promptTokenDetails = usage?["prompt_tokens_details"] as? [String: Any]
+        let openAICompatibleCacheHitTokens = intValue(from: promptTokenDetails?["cached_tokens"])
+        let explicitCacheHitTokens = intValue(from: usage?["prompt_cache_hit_tokens"])
         let promptCacheHitTokens = intValue(from: usage?["prompt_cache_hit_tokens"])
-            ?? intValue(from: (usage?["prompt_tokens_details"] as? [String: Any])?["cached_tokens"])
+            ?? openAICompatibleCacheHitTokens
             ?? intValue(from: usage?["cache_read_input_tokens"])
+        let promptCacheWriteTokens = intValue(from: usage?["cache_creation_input_tokens"])
         // Anthropic-format DeepSeek usage reports uncached input as input_tokens,
         // cache writes as cache_creation_input_tokens, and cache hits separately.
         let anthropicCacheMissTokens = intValue(from: usage?["input_tokens"]).map {
-            $0 + (intValue(from: usage?["cache_creation_input_tokens"]) ?? 0)
+            $0 + (promptCacheWriteTokens ?? 0)
+        }
+        let openAICompatibleCacheMissTokens: Int?
+        if let promptTokensValue,
+           let hitTokens = explicitCacheHitTokens ?? openAICompatibleCacheHitTokens {
+            openAICompatibleCacheMissTokens = max(0, promptTokensValue - hitTokens)
+        } else {
+            openAICompatibleCacheMissTokens = nil
         }
         let promptCacheMissTokens = intValue(from: usage?["prompt_cache_miss_tokens"])
             ?? anthropicCacheMissTokens
+            ?? openAICompatibleCacheMissTokens
         let splitPromptTokens: Int?
         if promptCacheHitTokens != nil || promptCacheMissTokens != nil {
             splitPromptTokens = (promptCacheHitTokens ?? 0) + (promptCacheMissTokens ?? 0)
@@ -602,7 +628,8 @@ public enum AnthropicTranslator {
             || promptTokens != nil
             || completionTokens != nil
             || promptCacheHitTokens != nil
-            || promptCacheMissTokens != nil else {
+            || promptCacheMissTokens != nil
+            || promptCacheWriteTokens != nil else {
             return nil
         }
         return AnthropicUsageSnapshot(
@@ -610,7 +637,8 @@ public enum AnthropicTranslator {
             promptTokens: promptTokens,
             completionTokens: completionTokens,
             promptCacheHitTokens: promptCacheHitTokens,
-            promptCacheMissTokens: promptCacheMissTokens
+            promptCacheMissTokens: promptCacheMissTokens,
+            promptCacheWriteTokens: promptCacheWriteTokens
         )
     }
 
@@ -1099,6 +1127,9 @@ public enum AnthropicTranslator {
         public var streamedEventCount: Int = 0
         public var lastSeenPromptTokens: Int = 0
         public var lastSeenCompletionTokens: Int = 0
+        public var lastSeenPromptCacheHitTokens: Int?
+        public var lastSeenPromptCacheMissTokens: Int?
+        public var lastSeenPromptCacheWriteTokens: Int?
 
         public init(requestID: String, messageID: String) {
             self.requestID = requestID
@@ -1129,8 +1160,41 @@ public enum AnthropicTranslator {
         var events: [String] = []
 
         if let usage = chunk["usage"] as? [String: Any] {
-            state.lastSeenPromptTokens = usage["prompt_tokens"] as? Int ?? state.lastSeenPromptTokens
-            state.lastSeenCompletionTokens = usage["completion_tokens"] as? Int ?? state.lastSeenCompletionTokens
+            let promptTokens = intValue(from: usage["prompt_tokens"])
+            let completionTokens = intValue(from: usage["completion_tokens"])
+            state.lastSeenPromptTokens = promptTokens ?? state.lastSeenPromptTokens
+            state.lastSeenCompletionTokens = completionTokens ?? state.lastSeenCompletionTokens
+
+            let details = usage["prompt_tokens_details"] as? [String: Any]
+            let openAICompatibleCacheHitTokens = intValue(from: details?["cached_tokens"])
+            let explicitCacheHitTokens = intValue(from: usage["prompt_cache_hit_tokens"])
+            let hitTokens = explicitCacheHitTokens
+                ?? openAICompatibleCacheHitTokens
+                ?? intValue(from: usage["cache_read_input_tokens"])
+            let writeTokens = intValue(from: usage["cache_creation_input_tokens"])
+            let anthropicMissTokens = intValue(from: usage["input_tokens"]).map {
+                $0 + (writeTokens ?? 0)
+            }
+            let openAIDerivedMissTokens: Int?
+            if let promptTokens,
+               let hitTokensForMiss = explicitCacheHitTokens ?? openAICompatibleCacheHitTokens {
+                openAIDerivedMissTokens = max(0, promptTokens - hitTokensForMiss)
+            } else {
+                openAIDerivedMissTokens = nil
+            }
+            let missTokens = intValue(from: usage["prompt_cache_miss_tokens"])
+                ?? anthropicMissTokens
+                ?? openAIDerivedMissTokens
+
+            if let hit = hitTokens {
+                state.lastSeenPromptCacheHitTokens = hit
+            }
+            if let miss = missTokens {
+                state.lastSeenPromptCacheMissTokens = miss
+            }
+            if let write = writeTokens {
+                state.lastSeenPromptCacheWriteTokens = write
+            }
         }
 
         guard let choices = chunk["choices"] as? [[String: Any]],

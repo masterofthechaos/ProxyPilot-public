@@ -34,6 +34,27 @@ final class SessionStatsTests: XCTestCase {
         XCTAssertNil(snapshot.avgLatencyMs)
     }
 
+    func testWriteOnlyCacheTelemetryCountsAsAvailable() async {
+        let stats = SessionStats()
+
+        await stats.record(RequestRecord(
+            model: "glm-5",
+            promptTokens: 100,
+            completionTokens: 10,
+            promptCacheHitTokens: nil,
+            promptCacheMissTokens: nil,
+            promptCacheWriteTokens: 75,
+            durationSeconds: 0.4,
+            path: "/v1/messages",
+            wasStreaming: false
+        ))
+
+        let snapshot = await stats.snapshot()
+        XCTAssertEqual(snapshot.totalPromptCacheWriteTokens, 75)
+        XCTAssertTrue(snapshot.cacheAccountingAvailable)
+        XCTAssertNil(snapshot.cacheHitRate)
+    }
+
     func testRecordingRequestAppendsSharedSessionReportEvent() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

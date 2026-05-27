@@ -53,6 +53,7 @@ final class AppViewModel: ObservableObject {
     private static let inputOutputLoggingCLIEnabledDefaultsKey = "proxypilot.inputOutputLogging.cliEnabled"
     private static let inputOutputLoggingRetentionDefaultsKey = "proxypilot.inputOutputLogging.retention"
     private static let inputOutputLoggingExternalStorageDefaultsKey = "proxypilot.inputOutputLogging.externalStorage"
+    private static let promptCachingModeDefaultsKey = "proxypilot.promptCaching.mode"
     static let appearancePreferenceDefaultsKey = "proxypilot.customization.appearance"
     static let proxyPilotAccentHexDefaultsKey = "proxypilot.customization.accentHex"
     static let showMenuBarExtraDefaultsKey = "proxypilot.customization.showMenuBarExtra"
@@ -62,6 +63,7 @@ final class AppViewModel: ObservableObject {
     static let defaultSettingsSectionDefaultsKey = "proxypilot.customization.defaultSettingsSection"
     static let keysProviderOrderDefaultsKey = "proxypilot.customization.keysProviderOrder"
     static let visibleKeysProvidersDefaultsKey = "proxypilot.customization.visibleKeysProviders"
+    static let didMigrateQwenVisibleProviderDefaultsKey = "proxypilot.customization.didMigrateQwenVisibleProvider"
     static let copilotSidecarExpandedDefaultsKey = "proxypilot.customization.copilotSidecarExpanded"
     // autoRestartEnabled defaults key: kept here for resetToFreshInstall cleanup
     private static let autoRestartEnabledDefaultsKey = "proxypilot.autoRestartEnabled"
@@ -425,11 +427,20 @@ final class AppViewModel: ObservableObject {
         return normalizedKeysProviderOrder(decoded)
     }
 
-    static func decodedVisibleKeysProviders(from defaults: UserDefaults) -> Set<KeysProviderViewItem> {
+    static func decodedVisibleKeysProviders(
+        from defaults: UserDefaults,
+        storedOrderRawValues: [String]?
+    ) -> Set<KeysProviderViewItem> {
         guard let stored = defaults.stringArray(forKey: visibleKeysProvidersDefaultsKey) else {
             return Set(KeysProviderViewItem.defaultOrder)
         }
-        return Set(stored.compactMap(KeysProviderViewItem.init(rawValue:)))
+        var decoded = Set(stored.compactMap(KeysProviderViewItem.init(rawValue:)))
+        let didMigrateQwen = defaults.bool(forKey: didMigrateQwenVisibleProviderDefaultsKey)
+        if !didMigrateQwen && storedOrderRawValues?.contains(KeysProviderViewItem.qwen.rawValue) != true {
+            decoded.insert(.qwen)
+            defaults.set(true, forKey: didMigrateQwenVisibleProviderDefaultsKey)
+        }
+        return decoded
     }
 
     func isHomeDashboardSectionVisible(_ section: HomeDashboardSection) -> Bool {
@@ -470,6 +481,14 @@ final class AppViewModel: ObservableObject {
         return visibleKeysProviders.contains(item)
     }
 
+    func apiKeyPageURL(for provider: UpstreamProvider) -> URL? {
+        provider.apiKeyPageURL(apiBaseURL: providerManager.upstreamAPIBaseURL(for: provider))
+    }
+
+    func apiKeyRegionHint(for provider: UpstreamProvider) -> String? {
+        provider.apiKeyRegionHint(apiBaseURL: providerManager.upstreamAPIBaseURL(for: provider))
+    }
+
     func setKeysProvider(_ provider: UpstreamProvider, isVisible: Bool) {
         guard let item = KeysProviderViewItem(provider: provider) else { return }
         if isVisible {
@@ -483,6 +502,14 @@ final class AppViewModel: ObservableObject {
         var order = keysProviderOrder
         order.move(fromOffsets: source, toOffset: destination)
         keysProviderOrder = order
+    }
+
+    func moveKeysProvider(_ provider: UpstreamProvider, up: Bool) {
+        guard let item = KeysProviderViewItem(provider: provider),
+              let index = keysProviderOrder.firstIndex(of: item) else { return }
+        let destination = up ? index - 1 : index + 1
+        guard keysProviderOrder.indices.contains(destination) else { return }
+        keysProviderOrder.swapAt(index, destination)
     }
 
     func resetKeysProvidersCustomization() {
@@ -572,6 +599,7 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.inputOutputLoggingCLIEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.inputOutputLoggingRetentionDefaultsKey)
         defaults.removeObject(forKey: Self.inputOutputLoggingExternalStorageDefaultsKey)
+        defaults.removeObject(forKey: Self.promptCachingModeDefaultsKey)
         defaults.removeObject(forKey: Self.appearancePreferenceDefaultsKey)
         defaults.removeObject(forKey: Self.proxyPilotAccentHexDefaultsKey)
         defaults.removeObject(forKey: Self.showMenuBarExtraDefaultsKey)
@@ -581,6 +609,7 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.defaultSettingsSectionDefaultsKey)
         defaults.removeObject(forKey: Self.keysProviderOrderDefaultsKey)
         defaults.removeObject(forKey: Self.visibleKeysProvidersDefaultsKey)
+        defaults.removeObject(forKey: Self.didMigrateQwenVisibleProviderDefaultsKey)
         defaults.removeObject(forKey: Self.copilotSidecarExpandedDefaultsKey)
         defaults.removeObject(forKey: Self.autoRestartEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.requireLocalAuthDefaultsKey)
@@ -656,6 +685,7 @@ final class AppViewModel: ObservableObject {
         inputOutputLoggingCLIEnabled = false
         inputOutputLoggingRetention = .twentyFourHoursDefault
         inputOutputLoggingExternalStorageEnabled = false
+        promptCachingMode = .computeCacheHints
         appearancePreference = .system
         proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
         showMenuBarExtra = true
@@ -757,6 +787,9 @@ final class AppViewModel: ObservableObject {
 
     func testKey(for provider: UpstreamProvider) async {
         await providerManager.testKey(for: provider)
+        if case .failure = providerManager.providerKeyTestStates[provider] {
+            trackProviderEndpointFailure(provider: provider, operation: .keyTest, issue: nil)
+        }
     }
 
     func refreshCopilotSidecarStatus() async {
@@ -1028,6 +1061,74 @@ final class AppViewModel: ObservableObject {
         didSet {
             defaults.set(inputOutputLoggingExternalStorageEnabled, forKey: Self.inputOutputLoggingExternalStorageDefaultsKey)
             persistSharedInputOutputLoggingPreferences()
+        }
+    }
+
+    @Published var promptCachingMode: PromptCachingMode = .computeCacheHints {
+        didSet {
+            defaults.set(promptCachingMode.rawValue, forKey: Self.promptCachingModeDefaultsKey)
+        }
+    }
+
+    var promptCachingConfiguration: PromptCachingConfiguration {
+        PromptCachingConfiguration(
+            isEnabled: promptCachingMode != .off,
+            mode: promptCachingMode,
+            retention: .providerDefault,
+            canonicalizeJSONForCache: promptCachingMode == .computeCacheHints
+        )
+    }
+
+    var promptCachingProviderStatusText: String {
+        switch promptCachingMode {
+        case .off:
+            return "Cache signals and provider cache accounting are disabled."
+        case .observeOnly:
+            return "ProxyPilot records provider cache telemetry without changing outbound requests."
+        case .explicitReferenceCache:
+            return "Reference-cache objects are deferred; ProxyPilot will observe telemetry only."
+        case .computeCacheHints:
+            switch upstreamProvider {
+            case .openAI, .mistral:
+                return "Auto sends a stable prompt_cache_key for OpenAI-compatible cache routing."
+            case .xAI:
+                return "Auto sends a stable x-grok-conv-id for Grok chat completions."
+            case .zAI:
+                return "Auto canonicalizes JSON for steadier z.ai automatic-cache prefixes."
+            case .deepSeek:
+                return "Auto keeps DeepSeek telemetry-only and refuses cost guesses without provider cache splits."
+            case .miniMax, .miniMaxCN:
+                if miniMaxRoutingMode == .anthropicPassthrough {
+                    return "Auto adds Anthropic cache_control on MiniMax passthrough requests."
+                }
+                return "MiniMax cache_control applies when Anthropic Passthrough routing is selected."
+            case .google:
+                return "Gemini direct cache mutation is blocked to protect thought_signature compatibility."
+            default:
+                return "This provider is observed, but no cache request mutation is enabled."
+            }
+        }
+    }
+
+    var promptCachingHomeStatusTitle: String {
+        if sessionReportCard.totalPromptCacheHitTokens > 0 {
+            return "Cache working"
+        }
+        if sessionReportCard.cacheAccountingAvailable {
+            return "Cache reported"
+        }
+        switch promptCachingMode {
+        case .off:
+            return "Caching off"
+        case .observeOnly:
+            return "Caching observed"
+        case .computeCacheHints:
+            if upstreamProvider == .google {
+                return "Caching guarded"
+            }
+            return "Caching auto"
+        case .explicitReferenceCache:
+            return "Caching observed"
         }
     }
 
@@ -1646,6 +1747,61 @@ final class AppViewModel: ObservableObject {
         return sourceText + " " + String(localized: "for all") + " \(total) " + String(localized: "requests.") + " " + dashboardNote
     }
 
+    var sessionCacheTelemetryText: String {
+        if sessionReportCard.cacheAccountingAvailable {
+            var parts = [
+                "\(Self.compactInteger(sessionReportCard.totalPromptCacheHitTokens)) cached",
+                "\(Self.compactInteger(sessionReportCard.totalPromptCacheMissTokens)) uncached"
+            ]
+            if sessionReportCard.totalPromptCacheWriteTokens > 0 {
+                parts.append("\(Self.compactInteger(sessionReportCard.totalPromptCacheWriteTokens)) written")
+            }
+            var summary = "Provider reported " + parts.joined(separator: ", ")
+            if let hitRate = sessionReportCard.cacheHitRate {
+                summary += String(format: " · %.0f%% hit rate", hitRate * 100)
+            }
+            if promptCachingMode == .off {
+                summary += String(localized: ". Caching is off for future requests.")
+            }
+            return summary
+        }
+
+        if promptCachingMode == .off {
+            return String(localized: "Cache signals and provider cache accounting are disabled for the current session.")
+        }
+
+        if upstreamProvider.promptCacheCapabilities.supportsProviderCacheTelemetry {
+            return String(localized: "No provider cache counters have been observed yet. Send a repeated long-context request to confirm whether the current provider is returning cached-token telemetry.")
+        }
+
+        if upstreamProvider.promptCacheCapabilities.supportsAutomaticProviderCaching {
+            return String(localized: "This provider may cache upstream context, but ProxyPilot does not yet receive compatible cached-token counters from it.")
+        }
+
+        return String(localized: "The current provider does not advertise cache telemetry in ProxyPilot yet.")
+    }
+
+    var sessionCacheMetricLabel: String {
+        if sessionReportCard.totalPromptCacheHitTokens > 0 {
+            return String(localized: "Cached")
+        }
+        if sessionReportCard.cacheAccountingAvailable {
+            return String(localized: "Cache Reported")
+        }
+        return String(localized: "Cache")
+    }
+
+    var sessionCacheMetricValue: String {
+        guard sessionReportCard.cacheAccountingAvailable else { return "No counters" }
+        if sessionReportCard.totalPromptCacheHitTokens > 0 {
+            return Self.compactInteger(sessionReportCard.totalPromptCacheHitTokens)
+        }
+        if sessionReportCard.totalPromptCacheWriteTokens > 0 {
+            return "\(Self.compactInteger(sessionReportCard.totalPromptCacheWriteTokens)) written"
+        }
+        return "\(Self.compactInteger(sessionReportCard.totalPromptCacheMissTokens)) uncached"
+    }
+
     func estimatedCostUSD(for record: SessionReportCard.RequestRecord) -> Double? {
         guard let model = upstreamModel(for: record.model) else { return nil }
         return model.estimatedCostUSD(
@@ -1689,6 +1845,9 @@ final class AppViewModel: ObservableObject {
             "prompt_tokens": record.promptTokens,
             "completion_tokens": record.completionTokens,
             "total_tokens": record.totalTokens,
+            "prompt_cache_hit_tokens": record.promptCacheHitTokens ?? NSNull(),
+            "prompt_cache_miss_tokens": record.promptCacheMissTokens ?? NSNull(),
+            "prompt_cache_write_tokens": record.promptCacheWriteTokens ?? NSNull(),
             "duration_ms": Int((record.durationSeconds * 1000).rounded()),
             "estimated_cost_usd": estimatedCost ?? NSNull()
         ]
@@ -1701,6 +1860,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func sessionRequestsCSV() -> String {
+        guard !sessionReportCard.requests.isEmpty else { return "" }
+
         let header = [
             "timestamp",
             "model",
@@ -1709,12 +1870,17 @@ final class AppViewModel: ObservableObject {
             "prompt_tokens",
             "completion_tokens",
             "total_tokens",
+            "prompt_cache_hit_tokens",
+            "prompt_cache_miss_tokens",
+            "prompt_cache_write_tokens",
             "duration_ms",
             "estimated_cost_usd"
         ].joined(separator: ",")
 
         let rows = sessionReportCard.requests.map { record in
-            [
+            let durationMilliseconds = Int((record.durationSeconds * 1000).rounded())
+            let estimatedCost = estimatedCostUSD(for: record).map { String(format: "%.6f", $0) } ?? ""
+            let fields: [String] = [
                 Self.csvEscaped(Self.sessionRequestTimestampFormatter.string(from: record.timestamp)),
                 Self.csvEscaped(record.model),
                 Self.csvEscaped(record.path),
@@ -1722,10 +1888,13 @@ final class AppViewModel: ObservableObject {
                 "\(record.promptTokens)",
                 "\(record.completionTokens)",
                 "\(record.totalTokens)",
-                "\(Int((record.durationSeconds * 1000).rounded()))",
-                estimatedCostUSD(for: record).map { String(format: "%.6f", $0) } ?? ""
+                record.promptCacheHitTokens.map(String.init) ?? "",
+                record.promptCacheMissTokens.map(String.init) ?? "",
+                record.promptCacheWriteTokens.map(String.init) ?? "",
+                "\(durationMilliseconds)",
+                estimatedCost
             ]
-            .joined(separator: ",")
+            return fields.joined(separator: ",")
         }
 
         return ([header] + rows).joined(separator: "\n")
@@ -1862,6 +2031,9 @@ final class AppViewModel: ObservableObject {
             rawValue: defaults.string(forKey: Self.inputOutputLoggingRetentionDefaultsKey) ?? ""
         ) ?? .twentyFourHoursDefault
         inputOutputLoggingExternalStorageEnabled = defaults.bool(forKey: Self.inputOutputLoggingExternalStorageDefaultsKey)
+        promptCachingMode = PromptCachingMode(
+            rawValue: defaults.string(forKey: Self.promptCachingModeDefaultsKey) ?? ""
+        ) ?? .computeCacheHints
         reconcileStoredInputOutputLoggingState()
         persistSharedInputOutputLoggingPreferences()
         appearancePreference = AppAppearancePreference(
@@ -1877,8 +2049,12 @@ final class AppViewModel: ObservableObject {
         defaultSettingsSection = SettingsSection(
             rawValue: defaults.string(forKey: Self.defaultSettingsSectionDefaultsKey) ?? ""
         ) ?? .home
+        let storedKeysProviderOrderRawValues = defaults.stringArray(forKey: Self.keysProviderOrderDefaultsKey)
         keysProviderOrder = Self.decodedKeysProviderOrder(from: defaults)
-        visibleKeysProviders = Self.decodedVisibleKeysProviders(from: defaults)
+        visibleKeysProviders = Self.decodedVisibleKeysProviders(
+            from: defaults,
+            storedOrderRawValues: storedKeysProviderOrderRawValues
+        )
         copilotSidecarExpanded = defaults.object(forKey: Self.copilotSidecarExpandedDefaultsKey) as? Bool ?? true
         suppressKeychainAccessPrimer = defaults.bool(forKey: Self.suppressKeychainPrimerDefaultsKey)
         requireLocalAuth = defaults.bool(forKey: Self.requireLocalAuthDefaultsKey)
@@ -2515,7 +2691,7 @@ final class AppViewModel: ObservableObject {
             providerManager.reconcileXcodeAgentModelSelection()
             markFirstSuccessfulRequestIfNeeded()
         } catch {
-            applyIssue(upstreamIssueFor(
+            let issue = upstreamIssueFor(
                 error,
                 fallbackCode: .generic,
                 fallbackTitle: String(localized: "Upstream Model Fetch Failed"),
@@ -2524,7 +2700,9 @@ final class AppViewModel: ObservableObject {
                 apiBase: apiBase,
                 path: upstreamProvider.modelsPath,
                 operation: .modelFetch
-            ))
+            )
+            applyIssue(issue)
+            trackProviderEndpointFailure(provider: upstreamProvider, operation: .modelFetch, issue: issue)
         }
     }
 
@@ -2635,7 +2813,7 @@ final class AppViewModel: ObservableObject {
             upstreamTestOutput = text.isEmpty ? "(empty response)" : text
             markFirstSuccessfulRequestIfNeeded()
         } catch {
-            applyIssue(upstreamIssueFor(
+            let issue = upstreamIssueFor(
                 error,
                 fallbackCode: .generic,
                 fallbackTitle: String(localized: "Upstream Test Failed"),
@@ -2644,7 +2822,9 @@ final class AppViewModel: ObservableObject {
                 apiBase: apiBase,
                 path: upstreamProvider.chatCompletionsPath,
                 operation: .upstreamTest
-            ))
+            )
+            applyIssue(issue)
+            trackProviderEndpointFailure(provider: upstreamProvider, operation: .upstreamTest, issue: issue)
         }
     }
 
@@ -3240,7 +3420,7 @@ general_settings:
 
     /// Builds a `LocalProxyServer.Config` from current AppViewModel state.
     /// Called by `ProxyLifecycleManager` via the `builtInProxyConfigBuilder` closure.
-    private func buildBuiltInProxyConfig() throws -> LocalProxyServer.Config {
+    func buildBuiltInProxyConfig() throws -> LocalProxyServer.Config {
         let proxy = try validatedProxyURL(requireLocalhost: true)
 
         guard let port = UInt16(exactly: proxy.port), (1...65535).contains(proxy.port) else {
@@ -3318,7 +3498,8 @@ general_settings:
                 ? providerManager.preferredXcodeAgentModel(from: savedDefaultModels)
                 : preferredModel,
             googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil,
-            inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "gui", sessionID: sessionID)
+            inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "gui", sessionID: sessionID),
+            promptCaching: promptCachingConfiguration
         )
 
         if upstreamKey == nil && upstreamProvider.requiresAPIKey {
@@ -3349,6 +3530,16 @@ general_settings:
         return value
     }
 
+    private static func compactInteger(_ value: Int) -> String {
+        if value >= 1_000_000 {
+            return String(format: "%.1fM", Double(value) / 1_000_000)
+        }
+        if value >= 1_000 {
+            return String(format: "%.1fK", Double(value) / 1_000)
+        }
+        return "\(value)"
+    }
+
     private func refreshLogText() {
         if useBuiltInProxy {
             logText = proxyService.readLogTail(from: Self.builtInProxyLogFileURL)
@@ -3368,6 +3559,23 @@ general_settings:
         guard !hasTrackedFirstSuccessfulRequest else { return }
         hasTrackedFirstSuccessfulRequest = true
         telemetryService.track(name: "first_successful_request", telemetryOptIn: telemetryOptIn)
+    }
+
+    private func trackProviderEndpointFailure(
+        provider: UpstreamProvider,
+        operation: UpstreamIssueOperation,
+        issue: AppIssue?
+    ) {
+        telemetryService.track(
+            name: "provider_endpoint_failed",
+            payload: Self.telemetryPayloadForProviderEndpointFailure(
+                provider: provider,
+                operation: operation,
+                issue: issue,
+                usesDefaultEndpoint: providerManager.upstreamAPIBaseURL(for: provider)?.absoluteString == provider.defaultAPIBaseURL
+            ),
+            telemetryOptIn: telemetryOptIn
+        )
     }
 
     private func refreshReachableProxyStatus(sequence: Int, locallyRunning: Bool) async {
@@ -3477,6 +3685,22 @@ general_settings:
         ]
     }
 
+    static func telemetryPayloadForProviderEndpointFailure(
+        provider: UpstreamProvider,
+        operation: UpstreamIssueOperation,
+        issue: AppIssue?,
+        usesDefaultEndpoint: Bool
+    ) -> [String: String] {
+        compactTelemetryPayload([
+            "operation": operation.rawValue,
+            "code": issue?.code.rawValue,
+            "provider_class": providerClassTelemetryValue(provider),
+            "provider_release_stage": providerReleaseStageTelemetryValue(provider),
+            "default_endpoint": String(usesDefaultEndpoint),
+            "upstream_key_required": String(provider.requiresAPIKey)
+        ])
+    }
+
     private static func compactTelemetryPayload(_ payload: [String: String?]) -> [String: String] {
         payload.compactMapValues { value in
             guard let value, !value.isEmpty else { return nil }
@@ -3498,9 +3722,16 @@ general_settings:
         provider.isLocal ? "local" : "cloud"
     }
 
-    private enum UpstreamIssueOperation {
+    private static func providerReleaseStageTelemetryValue(_ provider: UpstreamProvider) -> String {
+        if provider == .qwen { return "new_beta" }
+        if provider.isPreview { return "beta" }
+        return "stable"
+    }
+
+    enum UpstreamIssueOperation: String {
         case modelFetch
         case upstreamTest
+        case keyTest
     }
 
     private var upstreamFallbackActions: [AppIssue.Action] {

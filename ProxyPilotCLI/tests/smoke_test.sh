@@ -13,8 +13,12 @@ BINARY="$PROJECT_DIR/.build/debug/proxypilot"
 SMOKE_PORT=$((15000 + RANDOM % 20000))
 MCP_SMOKE_PORT=$((35000 + RANDOM % 20000))
 DISCOVERY_SMOKE_PORT=$((35000 + RANDOM % 20000))
+VALID_UPSTREAM_PORT=$((15000 + RANDOM % 20000))
+VALID_PROXY_PORT=$((15000 + RANDOM % 20000))
 PROXY_PID=""
 DISCOVERY_PROXY_PID=""
+VALID_UPSTREAM_PID=""
+VALID_PROXY_PID=""
 AUTH_SECRETS_DIR=""
 SMOKE_CONFIG_HOME="$(mktemp -d)"
 SMOKE_MODULE_CACHE="$(mktemp -d)"
@@ -79,6 +83,16 @@ cleanup() {
             kill "$DISCOVERY_PROXY_PID" 2>/dev/null || true
         fi
     fi
+    if [[ -n "$VALID_PROXY_PID" ]]; then
+        if kill -0 "$VALID_PROXY_PID" 2>/dev/null; then
+            kill "$VALID_PROXY_PID" 2>/dev/null || true
+        fi
+    fi
+    if [[ -n "$VALID_UPSTREAM_PID" ]]; then
+        if kill -0 "$VALID_UPSTREAM_PID" 2>/dev/null; then
+            kill "$VALID_UPSTREAM_PID" 2>/dev/null || true
+        fi
+    fi
     if [[ -n "$AUTH_SECRETS_DIR" && -d "$AUTH_SECRETS_DIR" ]]; then
         rm -rf "$AUTH_SECRETS_DIR"
     fi
@@ -108,6 +122,12 @@ done
 while lsof -iTCP:"$DISCOVERY_SMOKE_PORT" -sTCP:LISTEN >/dev/null 2>&1; do
     DISCOVERY_SMOKE_PORT=$((35000 + RANDOM % 20000))
 done
+while lsof -iTCP:"$VALID_UPSTREAM_PORT" -sTCP:LISTEN >/dev/null 2>&1; do
+    VALID_UPSTREAM_PORT=$((15000 + RANDOM % 20000))
+done
+while lsof -iTCP:"$VALID_PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1 || [[ "$VALID_PROXY_PORT" == "$VALID_UPSTREAM_PORT" ]]; do
+    VALID_PROXY_PORT=$((15000 + RANDOM % 20000))
+done
 
 echo ""
 echo -e "${BOLD}==========================================${RESET}"
@@ -116,6 +136,7 @@ echo -e "${BOLD}  Binary: $BINARY${RESET}"
 echo -e "${BOLD}  Port:   $SMOKE_PORT${RESET}"
 echo -e "${BOLD}  MCP:    $MCP_SMOKE_PORT${RESET}"
 echo -e "${BOLD}  Disc:   $DISCOVERY_SMOKE_PORT${RESET}"
+echo -e "${BOLD}  Valid:  $VALID_PROXY_PORT -> $VALID_UPSTREAM_PORT${RESET}"
 echo -e "${BOLD}==========================================${RESET}"
 
 # ===========================================================================
@@ -168,6 +189,22 @@ for subcmd in start stop status models logs config auth setup launch update serv
         fail "--help lists subcommand: $subcmd" "Not found in help output"
     fi
 done
+
+run_test "start and serve help document prompt caching mode"
+
+START_HELP="$("$BINARY" start --help 2>&1)"
+if echo "$START_HELP" | grep -q -- "--prompt-caching" && echo "$START_HELP" | grep -q "observe-only"; then
+    pass "start --help documents --prompt-caching modes"
+else
+    fail "start --help documents --prompt-caching" "$START_HELP"
+fi
+
+SERVE_HELP="$("$BINARY" serve --help 2>&1)"
+if echo "$SERVE_HELP" | grep -q -- "--prompt-caching" && echo "$SERVE_HELP" | grep -q "observe-only"; then
+    pass "serve --help documents --prompt-caching modes"
+else
+    fail "serve --help documents --prompt-caching" "$SERVE_HELP"
+fi
 
 # ===========================================================================
 # TEST 4 — status --port <smoke-port> --json reports stopped (no server running)
@@ -470,7 +507,246 @@ else
 fi
 
 # ===========================================================================
-# TEST 13 — stop discovers CLI-started process when PID file is missing
+# TEST 13 — valid upstream returns usable chat/messages envelopes
+# ===========================================================================
+run_test "Start local OpenAI-compatible stub for valid response checks"
+
+python3 - "$VALID_UPSTREAM_PORT" >/tmp/proxypilot_smoke_stub.log 2>&1 <<'PY' &
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+port = int(sys.argv[1])
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format, *args):
+        return
+
+    def _read_json(self):
+        length = int(self.headers.get("content-length", "0"))
+        raw = self.rfile.read(length) if length else b"{}"
+        return json.loads(raw.decode("utf-8") or "{}")
+
+    def _send(self, status, body, content_type="application/json"):
+        payload = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self):
+        if self.path == "/v1/models":
+            self._send(200, json.dumps({
+                "object": "list",
+                "data": [{"id": "smoke-model", "object": "model"}]
+            }))
+        else:
+            self._send(404, json.dumps({"error": "not found"}))
+
+    def do_POST(self):
+        try:
+            body = self._read_json()
+        except Exception:
+            self._send(400, json.dumps({"error": "invalid json"}))
+            return
+
+        if self.path != "/v1/chat/completions":
+            self._send(404, json.dumps({"error": "not found"}))
+            return
+
+        if body.get("stream") is True:
+            chunks = (
+                'data: {"id":"chatcmpl-smoke","object":"chat.completion.chunk","model":"smoke-model","choices":[{"index":0,"delta":{"content":"stub pong"},"finish_reason":null}]}\n\n'
+                'data: {"id":"chatcmpl-smoke","object":"chat.completion.chunk","model":"smoke-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n'
+                'data: [DONE]\n\n'
+            )
+            self._send(200, chunks, "text/event-stream")
+            return
+
+        self._send(200, json.dumps({
+            "id": "chatcmpl-smoke",
+            "object": "chat.completion",
+            "model": "smoke-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "stub pong"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+        }))
+
+server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+server.serve_forever()
+PY
+VALID_UPSTREAM_PID=$!
+
+VALID_UPSTREAM_READY=0
+for i in $(seq 1 20); do
+    sleep 0.2
+    if curl -fsS "http://127.0.0.1:${VALID_UPSTREAM_PORT}/v1/models" >/tmp/pp_valid_models.json 2>/dev/null; then
+        VALID_UPSTREAM_READY=1
+        break
+    fi
+done
+
+if [[ "$VALID_UPSTREAM_READY" -eq 1 ]]; then
+    pass "Local OpenAI-compatible stub is ready"
+else
+    fail "Local OpenAI-compatible stub is ready" "see /tmp/proxypilot_smoke_stub.log"
+fi
+
+run_test "Start proxy against local stub on port $VALID_PROXY_PORT"
+
+VALID_START_JSON="$("$BINARY" start --provider openai --upstream-url "http://127.0.0.1:${VALID_UPSTREAM_PORT}/v1" --key smoke-key --port "$VALID_PROXY_PORT" --model smoke-model --json --daemon 2>&1)"
+VALID_START_CHECK="$(python3 - "$VALID_START_JSON" <<'PY'
+import json
+import sys
+try:
+    d = json.loads(sys.argv[1])
+    if d.get("ok") is True and d.get("data", {}).get("status") == "started":
+        print("PASS")
+    else:
+        print(f"FAIL:{d}")
+except Exception as e:
+    print(f"PARSE_ERROR:{e}")
+PY
+)"
+if [[ "$VALID_START_CHECK" == "PASS" ]]; then
+    VALID_PROXY_PID="$(python3 - "$VALID_START_JSON" <<'PY'
+import json
+import sys
+try:
+    d = json.loads(sys.argv[1])
+    print(d.get("data", {}).get("pid", ""))
+except Exception:
+    print("")
+PY
+)"
+    pass "valid-response proxy started"
+else
+    fail "valid-response proxy start" "$VALID_START_CHECK :: $VALID_START_JSON"
+fi
+
+sleep 0.5
+
+run_test "POST /v1/chat/completions returns assistant content from stub"
+
+VALID_CHAT_HTTP_CODE="$(curl -s -o /tmp/pp_valid_chat.json -w "%{http_code}" \
+    -X POST http://127.0.0.1:${VALID_PROXY_PORT}/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model":"smoke-model","messages":[{"role":"user","content":"ping"}]}' \
+    2>&1 || true)"
+VALID_CHAT_CHECK="$(python3 - "$VALID_CHAT_HTTP_CODE" /tmp/pp_valid_chat.json <<'PY'
+import json
+import sys
+code = sys.argv[1]
+path = sys.argv[2]
+try:
+    d = json.load(open(path))
+    content = d["choices"][0]["message"]["content"]
+    if code == "200" and content:
+        print("PASS")
+    else:
+        print(f"FAIL:code={code} content={content!r} body={d}")
+except Exception as e:
+    print(f"PARSE_ERROR:{e}")
+PY
+)"
+if [[ "$VALID_CHAT_CHECK" == "PASS" ]]; then
+    pass "chat completions returned 200 with non-empty assistant content"
+else
+    fail "chat completions valid response" "$VALID_CHAT_CHECK :: $(cat /tmp/pp_valid_chat.json 2>/dev/null || true)"
+fi
+
+run_test "POST /v1/messages returns Anthropic JSON content from stub"
+
+VALID_MSGS_HTTP_CODE="$(curl -s -o /tmp/pp_valid_messages.json -w "%{http_code}" \
+    -X POST http://127.0.0.1:${VALID_PROXY_PORT}/v1/messages \
+    -H "Content-Type: application/json" \
+    -H "anthropic-version: 2023-06-01" \
+    -d '{"model":"claude-3-haiku-20240307","max_tokens":10,"messages":[{"role":"user","content":"ping"}]}' \
+    2>&1 || true)"
+VALID_MSGS_CHECK="$(python3 - "$VALID_MSGS_HTTP_CODE" /tmp/pp_valid_messages.json <<'PY'
+import json
+import sys
+code = sys.argv[1]
+path = sys.argv[2]
+try:
+    d = json.load(open(path))
+    content = d["content"][0]["text"]
+    if code == "200" and d.get("type") == "message" and content:
+        print("PASS")
+    else:
+        print(f"FAIL:code={code} content={content!r} body={d}")
+except Exception as e:
+    print(f"PARSE_ERROR:{e}")
+PY
+)"
+if [[ "$VALID_MSGS_CHECK" == "PASS" ]]; then
+    pass "messages returned 200 with non-empty Anthropic content"
+else
+    fail "messages valid response" "$VALID_MSGS_CHECK :: $(cat /tmp/pp_valid_messages.json 2>/dev/null || true)"
+fi
+
+run_test "Streaming /v1/messages returns Anthropic SSE events from stub"
+
+VALID_STREAM_HTTP_CODE="$(curl -s -o /tmp/pp_valid_messages_stream.txt -w "%{http_code}" \
+    -X POST http://127.0.0.1:${VALID_PROXY_PORT}/v1/messages \
+    -H "Content-Type: application/json" \
+    -H "anthropic-version: 2023-06-01" \
+    -d '{"model":"claude-3-haiku-20240307","max_tokens":10,"stream":true,"messages":[{"role":"user","content":"ping"}]}' \
+    2>&1 || true)"
+VALID_STREAM_CHECK="$(python3 - "$VALID_STREAM_HTTP_CODE" /tmp/pp_valid_messages_stream.txt <<'PY'
+import sys
+code = sys.argv[1]
+body = open(sys.argv[2]).read()
+if code == "200" and "event: content_block_delta" in body and '"text":"stub pong"' in body and "event: message_stop" in body:
+    print("PASS")
+else:
+    print(f"FAIL:code={code} body={body[:500]}")
+PY
+)"
+if [[ "$VALID_STREAM_CHECK" == "PASS" ]]; then
+    pass "streaming messages returned 200 with Anthropic SSE text delta"
+else
+    fail "streaming messages valid SSE" "$VALID_STREAM_CHECK"
+fi
+
+if [[ -n "$VALID_PROXY_PID" ]]; then
+    VALID_STOP_JSON="$("$BINARY" stop --port "$VALID_PROXY_PORT" --json 2>&1)"
+    VALID_STOP_CHECK="$(python3 - "$VALID_STOP_JSON" <<'PY'
+import json
+import sys
+try:
+    d = json.loads(sys.argv[1])
+    if d.get("ok") is True and d.get("data", {}).get("status") in ("stopped", "killed", "stopped_discovered"):
+        print("PASS")
+    else:
+        print(f"FAIL:{d}")
+except Exception as e:
+    print(f"PARSE_ERROR:{e}")
+PY
+)"
+    if [[ "$VALID_STOP_CHECK" == "PASS" ]]; then
+        VALID_PROXY_PID=""
+        pass "valid-response proxy stopped"
+    else
+        fail "valid-response proxy stop" "$VALID_STOP_CHECK :: $VALID_STOP_JSON"
+    fi
+fi
+
+if [[ -n "$VALID_UPSTREAM_PID" ]]; then
+    kill "$VALID_UPSTREAM_PID" 2>/dev/null || true
+    wait "$VALID_UPSTREAM_PID" 2>/dev/null || true
+    VALID_UPSTREAM_PID=""
+fi
+
+# ===========================================================================
+# TEST 14 — stop discovers CLI-started process when PID file is missing
 # ===========================================================================
 run_test "stop --port discovers CLI-started process when PID file is missing"
 
@@ -837,6 +1113,12 @@ if grep -q "allow_secret_write" "$PROJECT_DIR/Sources/MCP/MCPServerSetup.swift";
     pass "MCP auth_set documents allow_secret_write"
 else
     fail "MCP auth_set documents allow_secret_write"
+fi
+
+if grep -q "prompt_caching" "$PROJECT_DIR/Sources/MCP/MCPServerSetup.swift"; then
+    pass "MCP proxy lifecycle tools document prompt_caching"
+else
+    fail "MCP proxy lifecycle tools document prompt_caching"
 fi
 
 # ===========================================================================

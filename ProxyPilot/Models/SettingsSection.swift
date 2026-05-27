@@ -84,12 +84,15 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 }
 
 enum ProxySectionFocus: String, Identifiable, Hashable {
+    case cacheSignals
     case models
 
     var id: Self { self }
 
     var highlightDurationSeconds: TimeInterval {
         switch self {
+        case .cacheSignals:
+            return 4
         case .models:
             return 4
         }

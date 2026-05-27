@@ -13,6 +13,7 @@ final class SessionReportCard: ObservableObject {
         let completionTokens: Int
         let promptCacheHitTokens: Int?
         let promptCacheMissTokens: Int?
+        let promptCacheWriteTokens: Int?
         let durationSeconds: TimeInterval
         let path: String
         let wasStreaming: Bool
@@ -27,6 +28,7 @@ final class SessionReportCard: ObservableObject {
             completionTokens: Int,
             promptCacheHitTokens: Int? = nil,
             promptCacheMissTokens: Int? = nil,
+            promptCacheWriteTokens: Int? = nil,
             durationSeconds: TimeInterval,
             path: String,
             wasStreaming: Bool
@@ -38,6 +40,7 @@ final class SessionReportCard: ObservableObject {
             self.completionTokens = completionTokens
             self.promptCacheHitTokens = promptCacheHitTokens
             self.promptCacheMissTokens = promptCacheMissTokens
+            self.promptCacheWriteTokens = promptCacheWriteTokens
             self.durationSeconds = durationSeconds
             self.path = path
             self.wasStreaming = wasStreaming
@@ -77,6 +80,30 @@ final class SessionReportCard: ObservableObject {
     }
 
     var totalTokens: Int { totalPromptTokens + totalCompletionTokens }
+
+    var totalPromptCacheHitTokens: Int {
+        requests.reduce(0) { $0 + ($1.promptCacheHitTokens ?? 0) }
+    }
+
+    var totalPromptCacheMissTokens: Int {
+        requests.reduce(0) { $0 + ($1.promptCacheMissTokens ?? 0) }
+    }
+
+    var totalPromptCacheWriteTokens: Int {
+        requests.reduce(0) { $0 + ($1.promptCacheWriteTokens ?? 0) }
+    }
+
+    var cacheHitRate: Double? {
+        let total = totalPromptCacheHitTokens + totalPromptCacheMissTokens
+        guard total > 0 else { return nil }
+        return Double(totalPromptCacheHitTokens) / Double(total)
+    }
+
+    var cacheAccountingAvailable: Bool {
+        totalPromptCacheHitTokens > 0
+            || totalPromptCacheMissTokens > 0
+            || totalPromptCacheWriteTokens > 0
+    }
 
     var modelDistribution: [(model: String, count: Int)] {
         let grouped = Dictionary(grouping: requests, by: \.model)
@@ -155,6 +182,7 @@ final class SessionReportCard: ObservableObject {
             completionTokens: entry.completionTokens,
             promptCacheHitTokens: entry.promptCacheHitTokens,
             promptCacheMissTokens: entry.promptCacheMissTokens,
+            promptCacheWriteTokens: entry.promptCacheWriteTokens,
             durationSeconds: entry.durationSeconds,
             path: entry.path,
             wasStreaming: entry.wasStreaming

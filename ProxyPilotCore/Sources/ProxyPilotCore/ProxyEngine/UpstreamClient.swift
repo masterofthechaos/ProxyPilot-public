@@ -127,6 +127,7 @@ enum UpstreamClient {
             request.setValue(value, forHTTPHeaderField: name)
         }
 
+        applyJSONDefaults(body: body, request: &request)
         applyProviderCompatibilityHeaders(path: path, config: config, request: &request)
 
         // Set upstream auth
@@ -135,6 +136,29 @@ enum UpstreamClient {
         }
 
         return request
+    }
+
+    private static func applyJSONDefaults(body: Data?, request: inout URLRequest) {
+        guard body != nil else { return }
+
+        if request.value(forHTTPHeaderField: "Content-Type") == nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+
+        let existingAccept = request.value(forHTTPHeaderField: "Accept")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if existingAccept == nil || existingAccept == "" || existingAccept == "*/*" {
+            let accept = isStreamingRequestBody(body) ? "text/event-stream" : "application/json"
+            request.setValue(accept, forHTTPHeaderField: "Accept")
+        }
+    }
+
+    private static func isStreamingRequestBody(_ body: Data?) -> Bool {
+        guard let body,
+              let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            return false
+        }
+        return json["stream"] as? Bool == true
     }
 
     static func buildUpstreamURL(

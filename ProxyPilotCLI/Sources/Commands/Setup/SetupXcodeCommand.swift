@@ -116,6 +116,7 @@ struct SetupXcodeCommand: AsyncParsableCommand {
                     upstreamUrl: upstreamUrl,
                     key: inlineKey,
                     model: chosenModel.isEmpty ? nil : chosenModel,
+                    promptCaching: .auto,
                     json: false
                 )
             } catch {

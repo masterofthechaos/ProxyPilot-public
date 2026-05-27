@@ -31,6 +31,9 @@ struct StartCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Upstream model(s) to route requests to, comma-separated (e.g. 'gpt-4o,claude-3-opus'). First model is preferred for Anthropic translation.")
     var model: String?
 
+    @Option(name: .long, help: "Prompt caching mode: auto, observe-only, or off.")
+    var promptCaching: CLIPromptCachingMode = .auto
+
     @Flag(name: .long, help: "Emit JSON output.")
     var json: Bool = false
 
@@ -78,6 +81,7 @@ struct StartCommand: AsyncParsableCommand {
                     upstreamUrl: upstreamUrl,
                     key: inlineKey,
                     model: model,
+                    promptCaching: promptCaching,
                     json: json
                 )
             } catch {
@@ -150,7 +154,8 @@ struct StartCommand: AsyncParsableCommand {
             preferredAnthropicUpstreamModel: modelList.first ?? "",
             sessionStats: sessionStats,
             googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil,
-            inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "cli", sessionID: sessionID)
+            inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "cli", sessionID: sessionID),
+            promptCaching: promptCaching.configuration
         )
 
         let server = NIOProxyServer()

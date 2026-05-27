@@ -151,7 +151,34 @@ enum MCPServerSetup {
         }
     }
 
-    static func run(port: UInt16, provider: String?, key: String?, upstreamURL: String? = nil) async throws {
+    private static func promptCachingArgument(
+        _ value: Value?,
+        default defaultValue: CLIPromptCachingMode,
+        tool: String
+    ) -> (value: CLIPromptCachingMode, error: CallTool.Result?) {
+        guard let value else { return (defaultValue, nil) }
+        guard let raw = value.stringValue,
+              let parsed = CLIPromptCachingMode(argument: raw) else {
+            return (
+                defaultValue,
+                toolError(
+                    tool: tool,
+                    code: "E050",
+                    message: "Invalid prompt_caching value.",
+                    suggestion: "Use auto, observe-only, or off."
+                )
+            )
+        }
+        return (parsed, nil)
+    }
+
+    static func run(
+        port: UInt16,
+        provider: String?,
+        key: String?,
+        upstreamURL: String? = nil,
+        promptCaching: CLIPromptCachingMode = .auto
+    ) async throws {
         let state = ProxyState()
         let lifecycleGate = LifecycleGate()
 
@@ -192,6 +219,7 @@ enum MCPServerSetup {
                         "model": stringProp("Upstream model(s) to route requests to, comma-separated (e.g. 'gpt-4o,claude-3-opus'). First model is preferred for Anthropic translation. If omitted, provider fallback models are used when available."),
                         "key": stringProp("Upstream API key (optional, falls back to secrets store)"),
                         "url": stringProp("Upstream API base URL override (e.g. http://localhost:11434/v1)"),
+                        "prompt_caching": stringProp("Prompt caching mode: auto, observe-only, or off."),
                     ]),
                     annotations: .init(
                         readOnlyHint: false,
@@ -222,6 +250,7 @@ enum MCPServerSetup {
                         "model": stringProp("Upstream model(s) to route requests to, comma-separated (e.g. 'gpt-4o,claude-3-opus'). First model is preferred for Anthropic translation."),
                         "key": stringProp("Upstream API key"),
                         "url": stringProp("Upstream API base URL override (e.g. http://localhost:11434/v1)"),
+                        "prompt_caching": stringProp("Prompt caching mode: auto, observe-only, or off."),
                     ]),
                     annotations: .init(
                         readOnlyHint: false,
@@ -548,9 +577,16 @@ enum MCPServerSetup {
                 if let error = parsedURL.error { return error }
                 let parsedModel = stringArgument(params.arguments, name: "model", default: nil, tool: "proxy_start")
                 if let error = parsedModel.error { return error }
+                let parsedPromptCaching = promptCachingArgument(
+                    params.arguments?["prompt_caching"],
+                    default: promptCaching,
+                    tool: "proxy_start"
+                )
+                if let error = parsedPromptCaching.error { return error }
                 let reqKey = parsedKey.value
                 let reqURL = parsedURL.value
                 let reqModel = parsedModel.value
+                let reqPromptCaching = parsedPromptCaching.value
 
                 let requestedProvider: UpstreamProvider?
                 switch parsedProvider {
@@ -618,7 +654,8 @@ enum MCPServerSetup {
                     preferredAnthropicUpstreamModel: modelList.first ?? "",
                     sessionStats: state.sessionStats,
                     googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil,
-                    inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "mcp", sessionID: state.sessionID)
+                    inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "mcp", sessionID: state.sessionID),
+                    promptCaching: reqPromptCaching.configuration
                 )
 
                 do {
@@ -699,9 +736,16 @@ enum MCPServerSetup {
                 if let error = parsedURL.error { return error }
                 let parsedModel = stringArgument(params.arguments, name: "model", default: nil, tool: "proxy_restart")
                 if let error = parsedModel.error { return error }
+                let parsedPromptCaching = promptCachingArgument(
+                    params.arguments?["prompt_caching"],
+                    default: promptCaching,
+                    tool: "proxy_restart"
+                )
+                if let error = parsedPromptCaching.error { return error }
                 let reqKey = parsedKey.value
                 let reqURL = parsedURL.value
                 let reqModel = parsedModel.value
+                let reqPromptCaching = parsedPromptCaching.value
 
                 let requestedProvider: UpstreamProvider?
                 switch parsedProvider {
@@ -769,7 +813,8 @@ enum MCPServerSetup {
                     preferredAnthropicUpstreamModel: modelList.first ?? "",
                     sessionStats: state.sessionStats,
                     googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil,
-                    inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "mcp", sessionID: state.sessionID)
+                    inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "mcp", sessionID: state.sessionID),
+                    promptCaching: reqPromptCaching.configuration
                 )
 
                 do {
@@ -1043,7 +1088,12 @@ enum MCPServerSetup {
                         completionTokens: snapshot.totalCompletionTokens,
                         averageLatencyMs: snapshot.avgLatencyMs,
                         uptimeSeconds: snapshot.uptimeSeconds,
-                        models: snapshot.modelDistribution
+                        models: snapshot.modelDistribution,
+                        promptCacheHitTokens: snapshot.totalPromptCacheHitTokens,
+                        promptCacheMissTokens: snapshot.totalPromptCacheMissTokens,
+                        promptCacheWriteTokens: snapshot.totalPromptCacheWriteTokens,
+                        cacheHitRate: snapshot.cacheHitRate,
+                        cacheAccountingAvailable: snapshot.cacheAccountingAvailable
                     ),
                     text: text
                 )

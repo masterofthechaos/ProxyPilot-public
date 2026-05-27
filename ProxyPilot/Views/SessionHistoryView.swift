@@ -16,6 +16,7 @@ struct SessionHistoryView: View {
     @State private var copiedSessionFormat: String?
     @State private var showAllRequests = false
     @State private var showAllInputOutputLogs = false
+    @State private var selectedSessionLogViewModels: [SessionHistoryLogRecordViewModel] = []
 
     private var selectedSession: SessionHistorySession? {
         if let selectedSessionID,
@@ -43,6 +44,13 @@ struct SessionHistoryView: View {
         }
         .onChange(of: selectedSessionID) { _, _ in
             resetSessionDetailState()
+            updateSelectedLogViewModels()
+        }
+        .onChange(of: vm.sessionHistorySessions) { _, _ in
+            updateSelectedLogViewModels()
+        }
+        .onChange(of: sessionHistoryLogFingerprint) { _, _ in
+            updateSelectedLogViewModels()
         }
     }
 
@@ -261,6 +269,13 @@ struct SessionHistoryView: View {
             metric("Prompt", "\(session.totalPromptTokens)")
             metric("Completion", "\(session.totalCompletionTokens)")
             metric("Total", session.totalTokensFormatted)
+            if session.cacheAccountingAvailable {
+                metric("Cached", formatCompactInteger(session.totalPromptCacheHitTokens))
+                metric("Uncached", formatCompactInteger(session.totalPromptCacheMissTokens))
+                if session.totalPromptCacheWriteTokens > 0 {
+                    metric("Cache Write", formatCompactInteger(session.totalPromptCacheWriteTokens))
+                }
+            }
             metric("P95", session.p95Latency.map(formatLatency) ?? "No data")
         }
     }
@@ -315,6 +330,15 @@ struct SessionHistoryView: View {
                         detailRow("Prompt", "\(request.promptTokens)")
                         detailRow("Completion", "\(request.completionTokens)")
                         detailRow("Total", "\(request.promptTokens + request.completionTokens)")
+                        if let hit = request.promptCacheHitTokens {
+                            detailRow("Cached", "\(hit)")
+                        }
+                        if let miss = request.promptCacheMissTokens {
+                            detailRow("Uncached", "\(miss)")
+                        }
+                        if let write = request.promptCacheWriteTokens {
+                            detailRow("Cache write", "\(write)")
+                        }
                         detailRow("Latency", formatLatency(request.durationSeconds))
 
                         HStack {
@@ -339,6 +363,11 @@ struct SessionHistoryView: View {
                         Text("\(request.promptTokens + request.completionTokens) tok")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                        if let hit = request.promptCacheHitTokens, hit > 0 {
+                            Text("\(formatCompactInteger(hit)) cached")
+                                .font(.caption2)
+                                .foregroundStyle(.green)
+                        }
                         Text(formatLatency(request.durationSeconds))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
@@ -376,7 +405,8 @@ struct SessionHistoryView: View {
         let availability = session.inputOutputLogAvailability(
             masterLoggingEnabled: vm.inputOutputLoggingEnabled,
             cliLoggingEnabled: vm.inputOutputLoggingCLIEnabled,
-            matchingRecordCount: matchingLogs.count
+            matchingRecordCount: matchingLogs.count,
+            retention: vm.inputOutputLoggingRetention
         )
         return VStack(alignment: .leading, spacing: 10) {
             Text("Input & Output Logs")
@@ -419,6 +449,18 @@ struct SessionHistoryView: View {
                         onOpenAdvancedLogging()
                     }
                     .font(.caption)
+                }
+
+            case .retentionExpired(let retention):
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Prompt/output bodies are no longer available for this session. The session is outside the selected retention window, so any captured bodies would have been deleted while the report-card metadata stayed available.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("Current retention: \(retentionDisplayName(retention))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
 
             case .cliCaptureDisabled:
@@ -477,7 +519,8 @@ struct SessionHistoryView: View {
                     }
 
                     if let output = record.output {
-                        parsedOutputSection(SessionHistoryOutputParser.parse(output))
+                        let parsedOutput = SessionHistoryOutputParser.parse(output)
+                        parsedOutputSection(parsedOutput)
                         logBodySection(
                             title: "Output",
                             content: output,
@@ -517,9 +560,9 @@ struct SessionHistoryView: View {
                 if let tokenCounts = log.tokenCounts {
                     tokenPill("In", tokenCounts.promptTokens)
                     tokenPill("Out", tokenCounts.completionTokens)
-                }
-                if let output = record.output {
-                    parsedOutputPill(SessionHistoryOutputParser.parse(output))
+                    if let hit = tokenCounts.promptCacheHitTokens, hit > 0 {
+                        tokenPill("Cached", hit)
+                    }
                 }
                 if record.input != nil {
                     Label("Prompt", systemImage: "text.alignleft")
@@ -745,7 +788,10 @@ struct SessionHistoryView: View {
     }
 
     private func matchingLogViewModels(for session: SessionHistorySession) -> [SessionHistoryLogRecordViewModel] {
-        SessionHistoryLogRecordViewModel.matching(
+        if session.id == selectedSession?.id {
+            return selectedSessionLogViewModels
+        }
+        return SessionHistoryLogRecordViewModel.matching(
             vm.sessionHistoryInputOutputRecords,
             session: session
         )
@@ -878,12 +924,55 @@ struct SessionHistoryView: View {
         return "\(value)"
     }
 
+    private func retentionDisplayName(_ retention: InputOutputLoggingRetention) -> String {
+        switch retention {
+        case .untilQuit:
+            return "Until quit"
+        case .thirtyMinutes:
+            return "30 minutes"
+        case .oneHour:
+            return "1 hour"
+        case .twoHours:
+            return "2 hours"
+        case .sixHours:
+            return "6 hours"
+        case .twelveHours:
+            return "12 hours"
+        case .twentyFourHoursDefault, .twentyFourHoursMaximum:
+            return "24 hours"
+        }
+    }
+
+    private var sessionHistoryLogFingerprint: [SessionHistoryLogFingerprint] {
+        vm.sessionHistoryInputOutputRecords.map {
+            SessionHistoryLogFingerprint(id: $0.id, sessionID: $0.sessionID, timestamp: $0.timestamp)
+        }
+    }
+
+    private func updateSelectedLogViewModels() {
+        guard let session = selectedSession else {
+            selectedSessionLogViewModels = []
+            return
+        }
+        selectedSessionLogViewModels = SessionHistoryLogRecordViewModel.matching(
+            vm.sessionHistoryInputOutputRecords,
+            session: session
+        )
+    }
+
     private func refreshHistory() async {
         await vm.refreshSessionHistory()
         if selectedSessionID == nil || !vm.sessionHistorySessions.contains(where: { $0.id == selectedSessionID }) {
             selectedSessionID = vm.sessionHistorySessions.first?.id
         }
+        updateSelectedLogViewModels()
     }
+}
+
+private struct SessionHistoryLogFingerprint: Equatable {
+    let id: UUID
+    let sessionID: String?
+    let timestamp: Date
 }
 
 private struct SessionHistoryExport: Encodable {

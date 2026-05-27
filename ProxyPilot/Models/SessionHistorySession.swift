@@ -1,7 +1,7 @@
 import Foundation
 import ProxyPilotCore
 
-struct SessionHistorySession: Identifiable, Equatable {
+struct SessionHistorySession: Identifiable, Equatable, Sendable {
     let id: String
     let source: String
     let requests: [ProxyPilotCore.RequestRecord]
@@ -12,6 +12,19 @@ struct SessionHistorySession: Identifiable, Equatable {
     var totalPromptTokens: Int { requests.reduce(0) { $0 + $1.promptTokens } }
     var totalCompletionTokens: Int { requests.reduce(0) { $0 + $1.completionTokens } }
     var totalTokens: Int { totalPromptTokens + totalCompletionTokens }
+    var totalPromptCacheHitTokens: Int { requests.reduce(0) { $0 + ($1.promptCacheHitTokens ?? 0) } }
+    var totalPromptCacheMissTokens: Int { requests.reduce(0) { $0 + ($1.promptCacheMissTokens ?? 0) } }
+    var totalPromptCacheWriteTokens: Int { requests.reduce(0) { $0 + ($1.promptCacheWriteTokens ?? 0) } }
+    var cacheAccountingAvailable: Bool {
+        totalPromptCacheHitTokens > 0
+            || totalPromptCacheMissTokens > 0
+            || totalPromptCacheWriteTokens > 0
+    }
+    var cacheHitRate: Double? {
+        let total = totalPromptCacheHitTokens + totalPromptCacheMissTokens
+        guard total > 0 else { return nil }
+        return Double(totalPromptCacheHitTokens) / Double(total)
+    }
 
     var totalTokensFormatted: String {
         if totalTokens >= 1_000_000 {
@@ -68,6 +81,7 @@ struct SessionHistorySession: Identifiable, Equatable {
 
 enum SessionInputOutputLogAvailability: Equatable {
     case hasRecords(count: Int)
+    case retentionExpired(retention: InputOutputLoggingRetention)
     case masterLoggingDisabled
     case cliCaptureDisabled
     case enabledWaitingForRecords
@@ -120,7 +134,9 @@ extension SessionHistorySession {
     func inputOutputLogAvailability(
         masterLoggingEnabled: Bool,
         cliLoggingEnabled: Bool,
-        matchingRecordCount: Int
+        matchingRecordCount: Int,
+        retention: InputOutputLoggingRetention = .twentyFourHoursDefault,
+        now: Date = Date()
     ) -> SessionInputOutputLogAvailability {
         if matchingRecordCount > 0 {
             return .hasRecords(count: matchingRecordCount)
@@ -130,6 +146,11 @@ extension SessionHistorySession {
         }
         if usesCLIInputOutputCapture && !cliLoggingEnabled {
             return .cliCaptureDisabled
+        }
+        if let duration = retention.durationSeconds,
+           let endedAt,
+           endedAt.addingTimeInterval(duration) <= now {
+            return .retentionExpired(retention: retention)
         }
         return .enabledWaitingForRecords
     }
@@ -214,10 +235,16 @@ struct SessionHistoryLogRecordViewModel: Identifiable, Equatable {
 struct SessionHistoryLogTokenCounts: Equatable {
     let promptTokens: Int
     let completionTokens: Int
+    let promptCacheHitTokens: Int?
+    let promptCacheMissTokens: Int?
+    let promptCacheWriteTokens: Int?
 
     init(request: RequestRecord) {
         self.promptTokens = request.promptTokens
         self.completionTokens = request.completionTokens
+        self.promptCacheHitTokens = request.promptCacheHitTokens
+        self.promptCacheMissTokens = request.promptCacheMissTokens
+        self.promptCacheWriteTokens = request.promptCacheWriteTokens
     }
 
     var totalTokens: Int { promptTokens + completionTokens }

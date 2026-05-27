@@ -1147,3 +1147,94 @@ private func assertGoogleSchemaSanitized(provider: UpstreamProvider, model: Stri
     let error = try #require(parsed["error"] as? [String: Any])
     #expect(error["message"] as? String == "test error")
 }
+
+// MARK: - Cache Usage Telemetry Tests
+
+@Test func passthroughUsageDerivesOpenAICompatibleCacheMissTokens() throws {
+    let payload: [String: Any] = [
+        "model": "gpt-5",
+        "usage": [
+            "prompt_tokens": 1_000,
+            "completion_tokens": 20,
+            "prompt_tokens_details": ["cached_tokens": 400]
+        ]
+    ]
+    let data = try #require(try? JSONSerialization.data(withJSONObject: payload))
+
+    let snapshot = try #require(AnthropicTranslator.anthropicPassthroughUsage(from: data))
+
+    #expect(snapshot.promptCacheHitTokens == 400)
+    #expect(snapshot.promptCacheMissTokens == 600)
+}
+
+@Test func passthroughUsageKeepsExplicitCacheMissOverDerivedValue() throws {
+    let payload: [String: Any] = [
+        "usage": [
+            "prompt_tokens": 1_000,
+            "prompt_cache_hit_tokens": 400,
+            "prompt_cache_miss_tokens": 700,
+            "prompt_tokens_details": ["cached_tokens": 400]
+        ]
+    ]
+    let data = try #require(try? JSONSerialization.data(withJSONObject: payload))
+
+    let snapshot = try #require(AnthropicTranslator.anthropicPassthroughUsage(from: data))
+
+    #expect(snapshot.promptCacheMissTokens == 700)
+}
+
+@Test func passthroughUsageCapturesCacheWriteTokens() throws {
+    let payload: [String: Any] = [
+        "usage": [
+            "input_tokens": 300,
+            "cache_creation_input_tokens": 75,
+            "cache_read_input_tokens": 200,
+            "output_tokens": 40
+        ]
+    ]
+    let data = try #require(try? JSONSerialization.data(withJSONObject: payload))
+
+    let snapshot = try #require(AnthropicTranslator.anthropicPassthroughUsage(from: data))
+
+    #expect(snapshot.promptCacheHitTokens == 200)
+    #expect(snapshot.promptCacheMissTokens == 375)
+    #expect(snapshot.promptCacheWriteTokens == 75)
+}
+
+@Test func streamingChunkPreservesNativeAnthropicCacheReadAndWriteTokens() {
+    var state = AnthropicTranslator.StreamingState(requestID: "req_native_cache", messageID: "msg_native_cache")
+    let chunk: [String: Any] = [
+        "usage": [
+            "input_tokens": 300,
+            "cache_creation_input_tokens": 75,
+            "cache_read_input_tokens": 200,
+            "output_tokens": 40
+        ],
+        "choices": [["delta": ["content": "ok"], "finish_reason": NSNull()]]
+    ]
+
+    _ = AnthropicTranslator.processStreamingChunk(chunk, state: &state, model: "MiniMax-M2")
+
+    #expect(state.lastSeenPromptCacheHitTokens == 200)
+    #expect(state.lastSeenPromptCacheMissTokens == 375)
+    #expect(state.lastSeenPromptCacheWriteTokens == 75)
+}
+
+@Test func streamingChunkDerivesCacheMissAndCapturesWriteTokens() {
+    var state = AnthropicTranslator.StreamingState(requestID: "req_cache", messageID: "msg_cache")
+    let chunk: [String: Any] = [
+        "usage": [
+            "prompt_tokens": 1_000,
+            "completion_tokens": 20,
+            "prompt_tokens_details": ["cached_tokens": 400],
+            "cache_creation_input_tokens": 25
+        ],
+        "choices": [["delta": ["content": "ok"], "finish_reason": NSNull()]]
+    ]
+
+    _ = AnthropicTranslator.processStreamingChunk(chunk, state: &state, model: "gpt-5")
+
+    #expect(state.lastSeenPromptCacheHitTokens == 400)
+    #expect(state.lastSeenPromptCacheMissTokens == 600)
+    #expect(state.lastSeenPromptCacheWriteTokens == 25)
+}

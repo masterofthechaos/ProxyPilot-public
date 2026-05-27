@@ -12,7 +12,12 @@ struct MCPToolPayloadTests {
             completionTokens: 20,
             averageLatencyMs: 123,
             uptimeSeconds: 9,
-            models: ["glm-5.1": 2]
+            models: ["glm-5.1": 2],
+            promptCacheHitTokens: 4,
+            promptCacheMissTokens: 6,
+            promptCacheWriteTokens: 3,
+            cacheHitRate: 0.4,
+            cacheAccountingAvailable: true
         )
 
         let json = try AgentJSON.encode(payload)
@@ -26,6 +31,11 @@ struct MCPToolPayloadTests {
         #expect(object["average_latency_ms"] as? Int == 123)
         #expect(object["uptime_seconds"] as? Int == 9)
         #expect((object["models"] as? [String: Int])?["glm-5.1"] == 2)
+        #expect(object["prompt_cache_hit_tokens"] as? Int == 4)
+        #expect(object["prompt_cache_miss_tokens"] as? Int == 6)
+        #expect(object["prompt_cache_write_tokens"] as? Int == 3)
+        #expect(object["cache_hit_rate"] as? Double == 0.4)
+        #expect(object["cache_accounting_available"] as? Bool == true)
     }
 
     @Test func proxyStopPlanDoesNotSuggestConfigRemovalWhenConfigIsNotInstalled() {

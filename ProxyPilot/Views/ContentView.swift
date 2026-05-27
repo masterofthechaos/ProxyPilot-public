@@ -271,6 +271,7 @@ struct ContentView: View {
                 showInstallConfirmation: $showInstallConfirmation,
                 onOpenKeys: { selectedSection = .keys },
                 onOpenProxy: { selectedSection = .proxy },
+                onOpenCaching: { focusProxySection(.cacheSignals) },
                 onOpenAgentModel: { focusProxySection(.models) },
                 onOpenPreflight: {
                     selectedSection = .proxy
@@ -379,6 +380,17 @@ struct ContentView: View {
 
     private var appBuildText: String {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+    }
+
+    private var promptCachingModeColor: Color {
+        switch vm.promptCachingMode {
+        case .computeCacheHints:
+            return vm.upstreamProvider == .google ? .orange : .green
+        case .observeOnly, .explicitReferenceCache:
+            return .secondary
+        case .off:
+            return .orange
+        }
     }
 
     private func focusProxySection(_ focus: ProxySectionFocus) {
@@ -509,6 +521,33 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+
+            Section("Provider Cache Signals") {
+                Picker("Mode", selection: Binding(
+                    get: { vm.promptCachingMode },
+                    set: { vm.promptCachingMode = $0 }
+                )) {
+                    Text(PromptCachingMode.computeCacheHints.displayTitle).tag(PromptCachingMode.computeCacheHints)
+                    Text(PromptCachingMode.observeOnly.displayTitle).tag(PromptCachingMode.observeOnly)
+                    Text(PromptCachingMode.off.displayTitle).tag(PromptCachingMode.off)
+                }
+                .pickerStyle(.segmented)
+                .proxyFocusGlow(isActive: highlightedProxySection == .cacheSignals, color: vm.proxyPilotAccentColor)
+
+                LabeledContent("Provider") {
+                    Text(vm.upstreamProvider.title)
+                }
+
+                LabeledContent("Signal") {
+                    Text(vm.promptCachingMode.displayTitle)
+                        .foregroundStyle(promptCachingModeColor)
+                }
+
+                Text(vm.promptCachingProviderStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .id(ProxySectionFocus.cacheSignals)
 
             Section("Preflight") {
                 Button {
@@ -1549,8 +1588,11 @@ struct ContentView: View {
 
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(provider.title)
-                    .font(.subheadline.bold())
+                HStack(spacing: 6) {
+                    Text(provider.title)
+                        .font(.subheadline.bold())
+                    providerBadges(for: provider)
+                }
                 Spacer()
                 if hasKey {
                     HStack(spacing: 4) {
@@ -1597,12 +1639,18 @@ struct ContentView: View {
                         }
                         .disabled(testState == .testing)
                     }
-                    if let url = provider.apiKeyPageURL {
+                    if let url = vm.apiKeyPageURL(for: provider) {
                         Button("Get Key") {
                             NSWorkspace.shared.open(url)
                         }
                     }
                     Spacer()
+                }
+                if let regionHint = vm.apiKeyRegionHint(for: provider) {
+                    Text(regionHint)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
                 if hasKey {
                     if let cliStatusText = vm.providerCLIAuthStatusText(for: provider) {
@@ -1622,6 +1670,23 @@ struct ContentView: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func providerBadges(for provider: UpstreamProvider) -> some View {
+        if provider == .qwen {
+            providerBadge("New", foreground: .blue, background: .blue.opacity(0.14))
+            providerBadge("Beta", foreground: .orange, background: .orange.opacity(0.16))
+        }
+    }
+
+    private func providerBadge(_ title: String, foreground: Color, background: Color) -> some View {
+        Text(title)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(background, in: Capsule())
+            .foregroundStyle(foreground)
     }
 
     @ViewBuilder
@@ -2371,5 +2436,20 @@ private struct OnboardingWizardView: View {
         }
         .padding(20)
         .frame(width: 480, height: 240)
+    }
+}
+
+private extension PromptCachingMode {
+    var displayTitle: String {
+        switch self {
+        case .computeCacheHints:
+            return "Auto"
+        case .observeOnly:
+            return "Observe Only"
+        case .off:
+            return "Off"
+        case .explicitReferenceCache:
+            return "Reference Cache"
+        }
     }
 }

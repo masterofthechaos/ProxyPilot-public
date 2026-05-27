@@ -72,6 +72,33 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(relaunched.liquidGlassEnabled)
     }
 
+    func testPromptCachingModeDefaultsToAutoAndPersists() {
+        var vm: AppViewModel? = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm?.promptCachingMode, .computeCacheHints)
+        XCTAssertEqual(vm?.promptCachingConfiguration.mode, .computeCacheHints)
+        XCTAssertTrue(vm?.promptCachingConfiguration.canonicalizeJSONForCache == true)
+
+        vm?.promptCachingMode = .observeOnly
+        vm = nil
+
+        let relaunched = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(relaunched.promptCachingMode, .observeOnly)
+        XCTAssertEqual(relaunched.promptCachingConfiguration.mode, .observeOnly)
+        XCTAssertFalse(relaunched.promptCachingConfiguration.canonicalizeJSONForCache)
+    }
+
+    func testBuiltInProxyConfigCarriesPromptCachingMode() throws {
+        let vm = AppViewModel(defaults: defaults)
+        vm.promptCachingMode = .off
+
+        let config = try vm.buildBuiltInProxyConfig()
+
+        XCTAssertEqual(config.promptCaching.mode, .off)
+        XCTAssertFalse(config.promptCaching.recordsProviderCacheTelemetry)
+    }
+
     func testInputOutputLoggingDefaultsOffWithDefaultRetention() {
         let vm = AppViewModel(defaults: defaults)
 
@@ -272,7 +299,140 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertEqual(vm.keysProviderOrder.prefix(2), [.openAI, .githubCopilot])
         XCTAssertEqual(vm.keysProviderOrder.count, KeysProviderViewItem.defaultOrder.count)
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .qwen])
+    }
+
+    func testKeysProviderCustomizationMigratesQwenIntoLegacyVisibleProvidersOnce() {
+        defaults.set(
+            [
+                KeysProviderViewItem.openAI.rawValue,
+                KeysProviderViewItem.githubCopilot.rawValue,
+                KeysProviderViewItem.zAI.rawValue
+            ],
+            forKey: AppViewModel.keysProviderOrderDefaultsKey
+        )
+        defaults.set(
+            [
+                KeysProviderViewItem.openAI.rawValue
+            ],
+            forKey: AppViewModel.visibleKeysProvidersDefaultsKey
+        )
+
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(vm.keysProviderOrder.contains(.qwen))
+        XCTAssertTrue(vm.visibleKeysProviders.contains(.qwen))
+        XCTAssertTrue(vm.visibleKeysProviders.contains(.openAI))
+        XCTAssertFalse(vm.visibleKeysProviders.contains(.zAI))
+        XCTAssertTrue(defaults.bool(forKey: AppViewModel.didMigrateQwenVisibleProviderDefaultsKey))
+    }
+
+    func testKeysProviderCustomizationMigratesQwenIntoLegacyVisibilityOnlyCustomization() {
+        defaults.set(
+            [
+                KeysProviderViewItem.openAI.rawValue
+            ],
+            forKey: AppViewModel.visibleKeysProvidersDefaultsKey
+        )
+
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(vm.keysProviderOrder.contains(.qwen))
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .qwen])
+        XCTAssertTrue(defaults.bool(forKey: AppViewModel.didMigrateQwenVisibleProviderDefaultsKey))
+    }
+
+    func testKeysProviderCustomizationRespectsQwenHiddenAfterMigration() {
+        defaults.set(
+            [
+                KeysProviderViewItem.openAI.rawValue,
+                KeysProviderViewItem.qwen.rawValue,
+                KeysProviderViewItem.githubCopilot.rawValue
+            ],
+            forKey: AppViewModel.keysProviderOrderDefaultsKey
+        )
+        defaults.set(
+            [
+                KeysProviderViewItem.openAI.rawValue
+            ],
+            forKey: AppViewModel.visibleKeysProvidersDefaultsKey
+        )
+        defaults.set(true, forKey: AppViewModel.didMigrateQwenVisibleProviderDefaultsKey)
+
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(vm.keysProviderOrder.contains(.qwen))
+        XCTAssertFalse(vm.visibleKeysProviders.contains(.qwen))
         XCTAssertEqual(vm.visibleKeysProviders, [.openAI])
+    }
+
+    func testKeysProviderCustomizationRespectsQwenHiddenAfterVisibilityOnlyMigration() {
+        defaults.set(
+            [
+                KeysProviderViewItem.openAI.rawValue
+            ],
+            forKey: AppViewModel.visibleKeysProvidersDefaultsKey
+        )
+        defaults.set(true, forKey: AppViewModel.didMigrateQwenVisibleProviderDefaultsKey)
+
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(vm.keysProviderOrder.contains(.qwen))
+        XCTAssertFalse(vm.visibleKeysProviders.contains(.qwen))
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI])
+    }
+
+
+    func testMoveKeysProviderReordersRowsWithBounds() {
+        let vm = AppViewModel(defaults: defaults)
+
+        vm.moveKeysProvider(.qwen, up: true)
+
+        guard let qwenIndex = vm.keysProviderOrder.firstIndex(of: .qwen),
+              let miniMaxCNIndex = vm.keysProviderOrder.firstIndex(of: .miniMaxCN) else {
+            XCTFail("Expected Qwen and MiniMax CN in provider customization order")
+            return
+        }
+        XCTAssertLessThan(qwenIndex, miniMaxCNIndex)
+
+        let first = vm.keysProviderOrder.first
+        if let firstProvider = first?.provider {
+            vm.moveKeysProvider(firstProvider, up: true)
+        }
+        XCTAssertEqual(vm.keysProviderOrder.first, first)
+    }
+
+    func testQwenUsesInternationalModelStudioAPIKeyPageURLByDefault() throws {
+        let url = try XCTUnwrap(UpstreamProvider.qwen.apiKeyPageURL)
+
+        XCTAssertEqual(url.absoluteString, "https://modelstudio.console.alibabacloud.com/?tab=api#/api-key")
+    }
+
+    func testQwenAPIKeyPageURLFollowsSelectedEndpointRegion() throws {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(
+            vm.apiKeyPageURL(for: .qwen)?.absoluteString,
+            "https://modelstudio.console.alibabacloud.com/?tab=api#/api-key"
+        )
+        XCTAssertEqual(
+            vm.apiKeyRegionHint(for: .qwen),
+            "International DashScope endpoint selected. Use an Alibaba Cloud Model Studio key from Singapore or another matching non-China region."
+        )
+
+        defaults.set(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            forKey: "proxypilot.upstreamAPIBaseURL.\(UpstreamProvider.qwen.rawValue)"
+        )
+
+        XCTAssertEqual(
+            vm.apiKeyPageURL(for: .qwen)?.absoluteString,
+            "https://dashscope.console.aliyun.com/apiKey"
+        )
+        XCTAssertEqual(
+            vm.apiKeyRegionHint(for: .qwen),
+            "China (Beijing) DashScope endpoint selected. Use a China-region Model Studio API key."
+        )
     }
 
     func testKeysProviderCustomizationCanHideAndResetCopilotSidecar() {
@@ -1955,16 +2115,73 @@ final class AppViewModelTests: XCTestCase {
             model: "model-a",
             promptTokens: 100,
             completionTokens: 200,
+            promptCacheHitTokens: 40,
+            promptCacheMissTokens: 60,
+            promptCacheWriteTokens: 10,
             durationSeconds: 0.123,
             path: "/v1/chat/completions",
             wasStreaming: true
         ))
 
         let csv = vm.sessionRequestsCSV()
-        XCTAssertTrue(csv.contains("timestamp,model,path,streaming,prompt_tokens"))
+        XCTAssertTrue(csv.contains("timestamp,model,path,streaming,prompt_tokens,completion_tokens,total_tokens,prompt_cache_hit_tokens,prompt_cache_miss_tokens,prompt_cache_write_tokens"))
         XCTAssertTrue(csv.contains("model-a"))
         XCTAssertTrue(csv.contains("/v1/chat/completions"))
+        XCTAssertTrue(csv.contains(",40,60,10,"))
         XCTAssertTrue(csv.contains("0.000300"))
+    }
+
+    func testSessionRequestsCSVIsEmptyWhenNoRequestsExist() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm.sessionRequestsCSV(), "")
+    }
+
+    func testSessionCacheTelemetryRemainsVisibleWhenCachingIsOff() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.promptCachingMode = .off
+        vm.sessionReportCard.record(.init(
+            timestamp: Date(timeIntervalSince1970: 0),
+            model: "model-a",
+            promptTokens: 100,
+            completionTokens: 200,
+            promptCacheHitTokens: nil,
+            promptCacheMissTokens: nil,
+            promptCacheWriteTokens: 100,
+            durationSeconds: 0.123,
+            path: "/v1/chat/completions",
+            wasStreaming: true
+        ))
+
+        XCTAssertEqual(vm.promptCachingHomeStatusTitle, "Cache reported")
+        XCTAssertEqual(vm.sessionCacheMetricLabel, "Cache Reported")
+        XCTAssertEqual(vm.sessionCacheMetricValue, "100 written")
+        XCTAssertTrue(vm.sessionCacheTelemetryText.contains("Provider reported"))
+        XCTAssertTrue(vm.sessionCacheTelemetryText.contains("100 written"))
+        XCTAssertTrue(vm.sessionCacheTelemetryText.contains("Caching is off for future requests"))
+    }
+
+    func testSessionRequestJSONIncludesCacheTelemetryFields() throws {
+        let vm = AppViewModel(defaults: defaults)
+        let record = SessionReportCard.RequestRecord(
+            timestamp: Date(timeIntervalSince1970: 0),
+            model: "model-a",
+            promptTokens: 100,
+            completionTokens: 200,
+            promptCacheHitTokens: 40,
+            promptCacheMissTokens: 60,
+            promptCacheWriteTokens: 10,
+            durationSeconds: 0.123,
+            path: "/v1/chat/completions",
+            wasStreaming: true
+        )
+
+        let data = Data(vm.sessionRequestJSON(record).utf8)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(payload["prompt_cache_hit_tokens"] as? Int, 40)
+        XCTAssertEqual(payload["prompt_cache_miss_tokens"] as? Int, 60)
+        XCTAssertEqual(payload["prompt_cache_write_tokens"] as? Int, 10)
     }
 
     func testBuildBadgeIsHiddenForStableBundle() {
@@ -2017,6 +2234,44 @@ final class AppViewModelTests: XCTestCase {
             telemetryOptIn: false,
             isAlphaBuild: true
         ))
+    }
+
+    func testProviderEndpointFailureTelemetryCapturesQwenNewBetaWithoutProviderNameOrURL() {
+        let issue = AppIssue(
+            code: .upstreamUnauthorized,
+            title: "Upstream Authorization Failed",
+            message: "Qwen returned HTTP 401 from https://dashscope.console.aliyun.com",
+            actions: [.openUpstreamKeyEditor]
+        )
+
+        let payload = AppViewModel.telemetryPayloadForProviderEndpointFailure(
+            provider: .qwen,
+            operation: .modelFetch,
+            issue: issue,
+            usesDefaultEndpoint: true
+        )
+
+        XCTAssertEqual(payload["operation"], "modelFetch")
+        XCTAssertEqual(payload["code"], AppIssue.Code.upstreamUnauthorized.rawValue)
+        XCTAssertEqual(payload["provider_class"], "cloud")
+        XCTAssertEqual(payload["provider_release_stage"], "new_beta")
+        XCTAssertEqual(payload["default_endpoint"], "true")
+        XCTAssertFalse(payload.values.contains { $0.localizedCaseInsensitiveContains("qwen") })
+        XCTAssertFalse(payload.values.contains { $0.localizedCaseInsensitiveContains("dashscope") })
+    }
+
+    func testProviderEndpointFailureTelemetryClassifiesExistingPreviewProviders() {
+        let payload = AppViewModel.telemetryPayloadForProviderEndpointFailure(
+            provider: .miniMax,
+            operation: .keyTest,
+            issue: nil,
+            usesDefaultEndpoint: false
+        )
+
+        XCTAssertEqual(payload["operation"], "keyTest")
+        XCTAssertEqual(payload["provider_release_stage"], "beta")
+        XCTAssertEqual(payload["default_endpoint"], "false")
+        XCTAssertNil(payload["code"])
     }
 
     func testGitHubBugReportURLPrefillsIssueContext() throws {

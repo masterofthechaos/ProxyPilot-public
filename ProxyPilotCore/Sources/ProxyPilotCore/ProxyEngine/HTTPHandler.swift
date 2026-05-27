@@ -189,27 +189,40 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 masterKey: config.masterKey,
                 allowedModels: config.allowedModels,
                 requiresAuth: config.requiresAuth,
+                anthropicTranslatorMode: config.anthropicTranslatorMode,
+                miniMaxRoutingMode: config.miniMaxRoutingMode,
                 preferredAnthropicUpstreamModel: config.preferredAnthropicUpstreamModel,
                 sessionStats: config.sessionStats,
-                inputOutputLogger: config.inputOutputLogger
+                googleThoughtSignatureStore: config.googleThoughtSignatureStore,
+                inputOutputLogger: config.inputOutputLogger,
+                promptCaching: config.promptCaching,
+                sessionID: config.sessionID
+            )
+
+            let mutation = applyPromptCacheMutation(
+                path: "/v1/messages",
+                headers: headers,
+                body: passthroughBody,
+                model: config.preferredAnthropicUpstreamModel,
+                config: passthroughConfig
             )
 
             if isStreaming {
                 handleAnthropicPassthroughStreaming(
                     ctxBox: ctxBox,
                     eventLoop: eventLoop,
-                    headers: headers,
+                    headers: mutation.headers,
                     originalBody: bodyData,
-                    body: passthroughBody,
+                    body: mutation.body,
                     config: passthroughConfig
                 )
             } else {
                 handleAnthropicPassthroughBuffered(
                     ctxBox: ctxBox,
                     eventLoop: eventLoop,
-                    headers: headers,
+                    headers: mutation.headers,
                     originalBody: bodyData,
-                    body: passthroughBody,
+                    body: mutation.body,
                     config: passthroughConfig
                 )
             }
@@ -246,14 +259,21 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             sendErrorResponse(context: context, status: .internalServerError, message: "Failed to serialize translated request")
             return
         }
+        let mutation = applyPromptCacheMutation(
+            path: config.upstreamProvider.chatCompletionsPath,
+            headers: headers,
+            body: openAIBody,
+            model: resolvedUpstreamModel,
+            config: config
+        )
 
         if isStreaming {
             handleAnthropicStreaming(
                 ctxBox: ctxBox,
                 eventLoop: eventLoop,
-                headers: headers,
+                headers: mutation.headers,
                 originalBody: bodyData,
-                body: openAIBody,
+                body: mutation.body,
                 originalModel: originalModel,
                 translationContext: translationContext,
                 config: config
@@ -262,9 +282,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             handleAnthropicBuffered(
                 ctxBox: ctxBox,
                 eventLoop: eventLoop,
-                headers: headers,
+                headers: mutation.headers,
                 originalBody: bodyData,
-                body: openAIBody,
+                body: mutation.body,
                 originalModel: originalModel,
                 translationContext: translationContext,
                 config: config
@@ -369,6 +389,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             var lastSeenCompletionTokens = 0
             var lastSeenPromptCacheHitTokens: Int?
             var lastSeenPromptCacheMissTokens: Int?
+            var lastSeenPromptCacheWriteTokens: Int?
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             do {
@@ -396,7 +417,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         promptTokens: &lastSeenPromptTokens,
                         completionTokens: &lastSeenCompletionTokens,
                         promptCacheHitTokens: &lastSeenPromptCacheHitTokens,
-                        promptCacheMissTokens: &lastSeenPromptCacheMissTokens
+                        promptCacheMissTokens: &lastSeenPromptCacheMissTokens,
+                        promptCacheWriteTokens: &lastSeenPromptCacheWriteTokens
                     )
 
                     let lineData = Data((validatedLine + "\n").utf8)
@@ -434,6 +456,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         completionTokens: lastSeenCompletionTokens,
                         promptCacheHitTokens: lastSeenPromptCacheHitTokens,
                         promptCacheMissTokens: lastSeenPromptCacheMissTokens,
+                        promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
                         config: config
                     )
                     await recordInputOutputLog(
@@ -686,6 +709,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                             startedAt: requestStart,
                             promptTokens: state.lastSeenPromptTokens,
                             completionTokens: state.lastSeenCompletionTokens,
+                            promptCacheHitTokens: state.lastSeenPromptCacheHitTokens,
+                            promptCacheMissTokens: state.lastSeenPromptCacheMissTokens,
+                            promptCacheWriteTokens: state.lastSeenPromptCacheWriteTokens,
                             config: config
                         )
                     }
@@ -772,6 +798,13 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         // Collect headers as tuples
         let headers: [(String, String)] = head.headers.map { ($0.name, $0.value) }
+        let mutation = applyPromptCacheMutation(
+            path: config.upstreamProvider.chatCompletionsPath,
+            headers: headers,
+            body: sanitizedBody,
+            model: requestModel,
+            config: config
+        )
 
         // Box context so it can cross the Task boundary safely.
         // All access goes through eventLoop.execute, which is the only safe way.
@@ -784,9 +817,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 eventLoop: eventLoop,
                 path: path,
                 method: String(describing: head.method),
-                headers: headers,
+                headers: mutation.headers,
                 originalBody: bodyData,
-                body: sanitizedBody,
+                body: mutation.body,
                 requestModel: requestModel,
                 config: config
             )
@@ -796,9 +829,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 eventLoop: eventLoop,
                 path: path,
                 method: String(describing: head.method),
-                headers: headers,
+                headers: mutation.headers,
                 originalBody: bodyData,
-                body: sanitizedBody,
+                body: mutation.body,
                 requestModel: requestModel,
                 config: config
             )
@@ -894,6 +927,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             var lastSeenCompletionTokens = 0
             var lastSeenPromptCacheHitTokens: Int?
             var lastSeenPromptCacheMissTokens: Int?
+            var lastSeenPromptCacheWriteTokens: Int?
             var lastSeenModel = requestModel ?? config.preferredAnthropicUpstreamModel
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
@@ -914,7 +948,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         promptTokens: &lastSeenPromptTokens,
                         completionTokens: &lastSeenCompletionTokens,
                         promptCacheHitTokens: &lastSeenPromptCacheHitTokens,
-                        promptCacheMissTokens: &lastSeenPromptCacheMissTokens
+                        promptCacheMissTokens: &lastSeenPromptCacheMissTokens,
+                        promptCacheWriteTokens: &lastSeenPromptCacheWriteTokens
                     )
                     let normalizedLine = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
                         rawLine,
@@ -961,6 +996,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         completionTokens: lastSeenCompletionTokens,
                         promptCacheHitTokens: lastSeenPromptCacheHitTokens,
                         promptCacheMissTokens: lastSeenPromptCacheMissTokens,
+                        promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
                         config: config
                     )
                     await recordInputOutputLog(
@@ -1087,6 +1123,24 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return (try? JSONSerialization.data(withJSONObject: request)) ?? body
     }
 
+    private func applyPromptCacheMutation(
+        path: String,
+        headers: [(String, String)],
+        body: Data,
+        model: String?,
+        config: ProxyConfiguration
+    ) -> PromptCacheMutation {
+        PromptCacheAdapter.mutate(
+            path: path,
+            headers: headers,
+            body: body,
+            provider: config.upstreamProvider,
+            model: model,
+            sessionID: config.sessionID,
+            configuration: config.promptCaching
+        )
+    }
+
     private func sanitizedChatRequestBody(_ body: Data) -> Data {
         let provider = config.upstreamProvider
         guard !provider.unsupportedOpenAIParameters.isEmpty
@@ -1113,6 +1167,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         completionTokens: Int? = nil,
         promptCacheHitTokens: Int? = nil,
         promptCacheMissTokens: Int? = nil,
+        promptCacheWriteTokens: Int? = nil,
         config: ProxyConfiguration
     ) async {
         guard let sessionStats = config.sessionStats else { return }
@@ -1123,14 +1178,16 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let resolvedModel = (trimmedModel?.isEmpty == false)
             ? trimmedModel!
             : config.preferredAnthropicUpstreamModel
+        let recordsCacheTelemetry = config.promptCaching.recordsProviderCacheTelemetry
 
         await sessionStats.record(RequestRecord(
             timestamp: startedAt,
             model: resolvedModel.isEmpty ? "unknown" : resolvedModel,
             promptTokens: promptTokens ?? responseUsage?.prompt ?? 0,
             completionTokens: completionTokens ?? responseUsage?.completion ?? 0,
-            promptCacheHitTokens: promptCacheHitTokens ?? responseUsage?.promptCacheHit,
-            promptCacheMissTokens: promptCacheMissTokens ?? responseUsage?.promptCacheMiss,
+            promptCacheHitTokens: recordsCacheTelemetry ? (promptCacheHitTokens ?? responseUsage?.promptCacheHit) : nil,
+            promptCacheMissTokens: recordsCacheTelemetry ? (promptCacheMissTokens ?? responseUsage?.promptCacheMiss) : nil,
+            promptCacheWriteTokens: recordsCacheTelemetry ? (promptCacheWriteTokens ?? responseUsage?.promptCacheWrite) : nil,
             durationSeconds: Date().timeIntervalSince(startedAt),
             path: path,
             wasStreaming: wasStreaming
@@ -1174,7 +1231,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         prompt: Int,
         completion: Int,
         promptCacheHit: Int?,
-        promptCacheMiss: Int?
+        promptCacheMiss: Int?,
+        promptCacheWrite: Int?
     )? {
         guard let usage = AnthropicTranslator.anthropicPassthroughUsage(from: data) else {
             return nil
@@ -1183,7 +1241,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             usage.promptTokens ?? 0,
             usage.completionTokens ?? 0,
             usage.promptCacheHitTokens,
-            usage.promptCacheMissTokens
+            usage.promptCacheMissTokens,
+            usage.promptCacheWriteTokens
         )
     }
 
@@ -1193,7 +1252,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         promptTokens: inout Int,
         completionTokens: inout Int,
         promptCacheHitTokens: inout Int?,
-        promptCacheMissTokens: inout Int?
+        promptCacheMissTokens: inout Int?,
+        promptCacheWriteTokens: inout Int?
     ) {
         guard let usage = AnthropicTranslator.anthropicPassthroughUsage(fromStreamingLine: line) else { return }
         if let responseModel = usage.model {
@@ -1203,6 +1263,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         completionTokens = usage.completionTokens ?? completionTokens
         promptCacheHitTokens = usage.promptCacheHitTokens ?? promptCacheHitTokens
         promptCacheMissTokens = usage.promptCacheMissTokens ?? promptCacheMissTokens
+        promptCacheWriteTokens = usage.promptCacheWriteTokens ?? promptCacheWriteTokens
     }
 
     private func upstreamErrorMessage(

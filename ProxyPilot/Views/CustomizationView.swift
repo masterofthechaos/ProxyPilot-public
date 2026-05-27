@@ -1,4 +1,5 @@
 import AppKit
+import ProxyPilotCore
 import SwiftUI
 
 struct CustomizationView: View {
@@ -171,19 +172,20 @@ struct CustomizationView: View {
             .toggleStyle(.switch)
             .help("Hides the Copilot sidecar setup card and GitHub Copilot provider row without changing saved credentials.")
 
-            Text("Choose which built-in providers appear in Keys & Providers and drag rows to change their display order. This only changes the settings view; existing keys and provider routing settings are preserved.")
+            Text("Choose which built-in providers appear in Keys & Providers and use the row controls to change their display order. This only changes the settings view; existing keys and provider routing settings are preserved.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            List {
+            VStack(spacing: 0) {
                 ForEach(vm.keysProviderOrder) { item in
                     keysProviderCustomizationRow(item)
-                }
-                .onMove { source, destination in
-                    vm.moveKeysProviderItems(fromOffsets: source, toOffset: destination)
+                    if item != vm.keysProviderOrder.last {
+                        Divider()
+                            .padding(.leading, 28)
+                    }
                 }
             }
-            .frame(minHeight: 320, maxHeight: 440)
+            .padding(.vertical, 4)
 
             Button("Reset Keys & Providers view") {
                 vm.resetKeysProvidersCustomization()
@@ -273,22 +275,60 @@ struct CustomizationView: View {
         HStack(spacing: 10) {
             Image(systemName: "line.3.horizontal")
                 .foregroundStyle(.tertiary)
-                .help("Drag to reorder")
+                .help("Provider row")
 
             Toggle(isOn: Binding(
                 get: { vm.visibleKeysProviders.contains(item) },
                 set: { vm.setKeysProvider(item.provider, isVisible: $0) }
             )) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(item.title)
+                    HStack(spacing: 6) {
+                        Text(item.title)
+                        providerBadges(for: item.provider)
+                    }
                     Text(item.detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
             .toggleStyle(.checkbox)
+
+            Spacer()
+
+            Button {
+                vm.moveKeysProvider(item.provider, up: true)
+            } label: {
+                Image(systemName: "chevron.up")
+            }
+            .disabled(vm.keysProviderOrder.first == item)
+            .help("Move \(item.title) up")
+
+            Button {
+                vm.moveKeysProvider(item.provider, up: false)
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .disabled(vm.keysProviderOrder.last == item)
+            .help("Move \(item.title) down")
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private func providerBadges(for provider: UpstreamProvider) -> some View {
+        if provider == .qwen {
+            providerBadge("New", foreground: .blue, background: .blue.opacity(0.14))
+            providerBadge("Beta", foreground: .orange, background: .orange.opacity(0.16))
+        }
+    }
+
+    private func providerBadge(_ title: String, foreground: Color, background: Color) -> some View {
+        Text(title)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(background, in: Capsule())
+            .foregroundStyle(foreground)
     }
 
     private var resetViewsSection: some View {

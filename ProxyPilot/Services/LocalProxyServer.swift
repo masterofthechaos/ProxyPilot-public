@@ -54,6 +54,7 @@ final class LocalProxyServer: @unchecked Sendable {
         let preferredAnthropicUpstreamModel: String
         let googleThoughtSignatureStore: GoogleThoughtSignatureStore?
         let inputOutputLogger: InputOutputLoggingRecorder?
+        var promptCaching: PromptCachingConfiguration = .default
 
         init(
             host: String,
@@ -69,7 +70,8 @@ final class LocalProxyServer: @unchecked Sendable {
             miniMaxRoutingMode: MiniMaxRoutingMode,
             preferredAnthropicUpstreamModel: String,
             googleThoughtSignatureStore: GoogleThoughtSignatureStore?,
-            inputOutputLogger: InputOutputLoggingRecorder? = nil
+            inputOutputLogger: InputOutputLoggingRecorder? = nil,
+            promptCaching: PromptCachingConfiguration = .default
         ) {
             self.host = host
             self.port = port
@@ -85,6 +87,7 @@ final class LocalProxyServer: @unchecked Sendable {
             self.preferredAnthropicUpstreamModel = preferredAnthropicUpstreamModel
             self.googleThoughtSignatureStore = googleThoughtSignatureStore
             self.inputOutputLogger = inputOutputLogger
+            self.promptCaching = promptCaching
         }
 
         var isLocalhostUpstream: Bool {
@@ -123,13 +126,11 @@ final class LocalProxyServer: @unchecked Sendable {
     private let connectionCountLock = NSLock()
     private var activeConnectionCount: Int = 0
     private var releasedConnectionIDs: Set<String> = []
-    private var sessionID = UUID().uuidString
 
     private typealias AnthropicStreamingState = AnthropicTranslator.StreamingState
 
     func start(config: Config) throws {
         if listener != nil { throw ServerError.alreadyRunning }
-        sessionID = config.sessionID
         Task { @MainActor in
             state.sessionRequestCount = 0
             state.lastModelSeen = ""
@@ -511,6 +512,7 @@ final class LocalProxyServer: @unchecked Sendable {
         request.httpBody = outboundBody
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyPromptCacheMutation(path: config.upstreamProvider.chatCompletionsPath, model: requestModel, config: config, request: &request)
         applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
         applyUpstreamAuth(config: config, request: &request)
         request.timeoutInterval = 60
@@ -564,11 +566,12 @@ final class LocalProxyServer: @unchecked Sendable {
                     completionTokens: usage.completionTokens ?? 0,
                     promptCacheHitTokens: usage.promptCacheHitTokens,
                     promptCacheMissTokens: usage.promptCacheMissTokens,
+                    promptCacheWriteTokens: usage.promptCacheWriteTokens,
                     durationSeconds: Date().timeIntervalSince(requestStartTime),
                     path: "/v1/chat/completions",
                     wasStreaming: false
                 )
-                recordSessionReport(record)
+                recordSessionReport(record, config: config)
             }
         } catch {
             respond(
@@ -618,6 +621,7 @@ final class LocalProxyServer: @unchecked Sendable {
         request.httpBody = outboundBody
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        applyPromptCacheMutation(path: config.upstreamProvider.chatCompletionsPath, model: requestModel, config: config, request: &request)
         applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
         applyUpstreamAuth(config: config, request: &request)
         request.timeoutInterval = 120
@@ -656,6 +660,7 @@ final class LocalProxyServer: @unchecked Sendable {
             var lastSeenCompletionTokens = 0
             var lastSeenPromptCacheHitTokens: Int?
             var lastSeenPromptCacheMissTokens: Int?
+            var lastSeenPromptCacheWriteTokens: Int?
             var lastSeenModel = requestModel
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
@@ -675,6 +680,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     lastSeenCompletionTokens = usage.completionTokens ?? lastSeenCompletionTokens
                     lastSeenPromptCacheHitTokens = usage.promptCacheHitTokens ?? lastSeenPromptCacheHitTokens
                     lastSeenPromptCacheMissTokens = usage.promptCacheMissTokens ?? lastSeenPromptCacheMissTokens
+                    lastSeenPromptCacheWriteTokens = usage.promptCacheWriteTokens ?? lastSeenPromptCacheWriteTokens
                 }
 
                 if normalizedLine == "data: [DONE]" {
@@ -687,11 +693,12 @@ final class LocalProxyServer: @unchecked Sendable {
                         completionTokens: lastSeenCompletionTokens,
                         promptCacheHitTokens: lastSeenPromptCacheHitTokens,
                         promptCacheMissTokens: lastSeenPromptCacheMissTokens,
+                        promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
                         durationSeconds: Date().timeIntervalSince(requestStartTime),
                         path: "/v1/chat/completions",
                         wasStreaming: true
                     )
-                    recordSessionReport(record)
+                        recordSessionReport(record, config: config)
                     await recordInputOutputLog(
                         inputBody: body,
                         outputBody: outputCapture.capturedOutput,
@@ -716,11 +723,12 @@ final class LocalProxyServer: @unchecked Sendable {
                 completionTokens: lastSeenCompletionTokens,
                 promptCacheHitTokens: lastSeenPromptCacheHitTokens,
                 promptCacheMissTokens: lastSeenPromptCacheMissTokens,
+                promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
                 durationSeconds: Date().timeIntervalSince(requestStartTime),
                 path: "/v1/chat/completions",
                 wasStreaming: true
             )
-            recordSessionReport(record)
+            recordSessionReport(record, config: config)
             await recordInputOutputLog(
                 inputBody: body,
                 outputBody: outputCapture.capturedOutput,
@@ -807,12 +815,13 @@ final class LocalProxyServer: @unchecked Sendable {
             request.httpMethod = "POST"
             request.httpBody = passthroughData
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            applyProviderCompatibilityHeaders(config: config, path: "/v1/messages", request: &request)
-            applyUpstreamAuth(config: config, request: &request)
             request.timeoutInterval = 120
 
             if isStreaming {
                 request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                applyPromptCacheMutation(path: "/v1/messages", model: upstreamModel, config: config, request: &request)
+                applyProviderCompatibilityHeaders(config: config, path: "/v1/messages", request: &request)
+                applyUpstreamAuth(config: config, request: &request)
                 await handleAnthropicPassthroughStreaming(
                     request: request,
                     model: requestedModel,
@@ -824,6 +833,10 @@ final class LocalProxyServer: @unchecked Sendable {
                     config: config
                 )
             } else {
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                applyPromptCacheMutation(path: "/v1/messages", model: upstreamModel, config: config, request: &request)
+                applyProviderCompatibilityHeaders(config: config, path: "/v1/messages", request: &request)
+                applyUpstreamAuth(config: config, request: &request)
                 await handleAnthropicPassthroughBuffered(
                     request: request,
                     model: requestedModel,
@@ -869,12 +882,13 @@ final class LocalProxyServer: @unchecked Sendable {
         request.httpMethod = "POST"
         request.httpBody = openAIData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
-        applyUpstreamAuth(config: config, request: &request)
         request.timeoutInterval = 120
 
         if isStreaming {
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+            applyPromptCacheMutation(path: config.upstreamProvider.chatCompletionsPath, model: upstreamModel, config: config, request: &request)
+            applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
+            applyUpstreamAuth(config: config, request: &request)
             switch config.anthropicTranslatorMode {
             case .hardened:
                 await handleAnthropicStreamingHardened(
@@ -902,6 +916,9 @@ final class LocalProxyServer: @unchecked Sendable {
             }
         } else {
             request.setValue("application/json", forHTTPHeaderField: "Accept")
+            applyPromptCacheMutation(path: config.upstreamProvider.chatCompletionsPath, model: upstreamModel, config: config, request: &request)
+            applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
+            applyUpstreamAuth(config: config, request: &request)
             await handleAnthropicBuffered(
                 request: request,
                 model: requestedModel,
@@ -975,7 +992,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     path: "/v1/messages",
                     wasStreaming: false
                 )
-                recordSessionReport(record)
+                recordSessionReport(record, config: config)
             }
 
             let anthropicResponse = AnthropicTranslator.responseFromOpenAI(
@@ -1061,6 +1078,7 @@ final class LocalProxyServer: @unchecked Sendable {
             var lastSeenCompletionTokens = 0
             var lastSeenPromptCacheHitTokens: Int?
             var lastSeenPromptCacheMissTokens: Int?
+            var lastSeenPromptCacheWriteTokens: Int?
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             for try await line in bytes.lines {
@@ -1080,10 +1098,11 @@ final class LocalProxyServer: @unchecked Sendable {
                         promptTokens: lastSeenPromptTokens, completionTokens: lastSeenCompletionTokens,
                         promptCacheHitTokens: lastSeenPromptCacheHitTokens,
                         promptCacheMissTokens: lastSeenPromptCacheMissTokens,
+                        promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
                         durationSeconds: Date().timeIntervalSince(requestStartTime),
                         path: "/v1/messages", wasStreaming: true
                     )
-                    recordSessionReport(record)
+                    recordSessionReport(record, config: config)
                     await recordInputOutputLog(
                         inputBody: inputBody,
                         outputBody: outputCapture.capturedOutput,
@@ -1113,6 +1132,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     let usageSnapshot = AnthropicTranslator.anthropicPassthroughUsage(fromStreamingLine: line)
                     lastSeenPromptCacheHitTokens = usageSnapshot?.promptCacheHitTokens ?? lastSeenPromptCacheHitTokens
                     lastSeenPromptCacheMissTokens = usageSnapshot?.promptCacheMissTokens ?? lastSeenPromptCacheMissTokens
+                    lastSeenPromptCacheWriteTokens = usageSnapshot?.promptCacheWriteTokens ?? lastSeenPromptCacheWriteTokens
                 }
 
                 if isFirstChunk {
@@ -1155,10 +1175,11 @@ final class LocalProxyServer: @unchecked Sendable {
                 promptTokens: lastSeenPromptTokens, completionTokens: lastSeenCompletionTokens,
                 promptCacheHitTokens: lastSeenPromptCacheHitTokens,
                 promptCacheMissTokens: lastSeenPromptCacheMissTokens,
+                promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
                 durationSeconds: Date().timeIntervalSince(requestStartTime),
                 path: "/v1/messages", wasStreaming: true
             )
-            recordSessionReport(record)
+            recordSessionReport(record, config: config)
             await recordInputOutputLog(
                 inputBody: inputBody,
                 outputBody: outputCapture.capturedOutput,
@@ -1266,10 +1287,13 @@ final class LocalProxyServer: @unchecked Sendable {
             let record = SessionReportCard.RequestRecord(
                 timestamp: requestStartTime, model: reportModel,
                 promptTokens: state.lastSeenPromptTokens, completionTokens: state.lastSeenCompletionTokens,
+                promptCacheHitTokens: state.lastSeenPromptCacheHitTokens,
+                promptCacheMissTokens: state.lastSeenPromptCacheMissTokens,
+                promptCacheWriteTokens: state.lastSeenPromptCacheWriteTokens,
                 durationSeconds: Date().timeIntervalSince(requestStartTime),
                 path: "/v1/messages", wasStreaming: true
             )
-            recordSessionReport(record)
+            recordSessionReport(record, config: config)
             await recordInputOutputLog(
                 inputBody: inputBody,
                 outputBody: outputCapture.capturedOutput,
@@ -1329,11 +1353,12 @@ final class LocalProxyServer: @unchecked Sendable {
                     completionTokens: usage?.completionTokens ?? 0,
                     promptCacheHitTokens: usage?.promptCacheHitTokens,
                     promptCacheMissTokens: usage?.promptCacheMissTokens,
+                    promptCacheWriteTokens: usage?.promptCacheWriteTokens,
                     durationSeconds: Date().timeIntervalSince(requestStartTime),
                     path: "/v1/messages",
                     wasStreaming: false
                 )
-                recordSessionReport(record)
+                recordSessionReport(record, config: config)
             }
             await recordInputOutputLog(
                 inputBody: inputBody,
@@ -1376,6 +1401,7 @@ final class LocalProxyServer: @unchecked Sendable {
         var lastSeenCompletionTokens = 0
         var lastSeenPromptCacheHitTokens: Int?
         var lastSeenPromptCacheMissTokens: Int?
+        var lastSeenPromptCacheWriteTokens: Int?
         var didReceiveStreamData = false
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -1413,7 +1439,8 @@ final class LocalProxyServer: @unchecked Sendable {
                     promptTokens: &lastSeenPromptTokens,
                     completionTokens: &lastSeenCompletionTokens,
                     promptCacheHitTokens: &lastSeenPromptCacheHitTokens,
-                    promptCacheMissTokens: &lastSeenPromptCacheMissTokens
+                    promptCacheMissTokens: &lastSeenPromptCacheMissTokens,
+                    promptCacheWriteTokens: &lastSeenPromptCacheWriteTokens
                 )
                 let sseData = Data((validatedLine + "\n").utf8)
                 outputCapture.append(sseData)
@@ -1432,11 +1459,12 @@ final class LocalProxyServer: @unchecked Sendable {
                     completionTokens: lastSeenCompletionTokens,
                     promptCacheHitTokens: lastSeenPromptCacheHitTokens,
                     promptCacheMissTokens: lastSeenPromptCacheMissTokens,
+                    promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
                     durationSeconds: Date().timeIntervalSince(requestStartTime),
                     path: "/v1/messages",
                     wasStreaming: true
                 )
-                recordSessionReport(record)
+                recordSessionReport(record, config: config)
             }
             appendLog("passthrough streaming complete: model=\(lastSeenModel)")
             await recordInputOutputLog(
@@ -1499,8 +1527,9 @@ final class LocalProxyServer: @unchecked Sendable {
         )
     }
 
-    private func recordSessionReport(_ record: SessionReportCard.RequestRecord) {
-        let currentSessionID = sessionID
+    private func recordSessionReport(_ record: SessionReportCard.RequestRecord, config: Config) {
+        let record = recordWithAllowedCacheTelemetry(record, promptCaching: config.promptCaching)
+        let currentSessionID = config.sessionID
         Task { @MainActor [weak self] in
             self?.reportCard.record(record)
         }
@@ -1512,6 +1541,7 @@ final class LocalProxyServer: @unchecked Sendable {
             completionTokens: record.completionTokens,
             promptCacheHitTokens: record.promptCacheHitTokens,
             promptCacheMissTokens: record.promptCacheMissTokens,
+            promptCacheWriteTokens: record.promptCacheWriteTokens,
             durationSeconds: record.durationSeconds,
             path: record.path,
             wasStreaming: record.wasStreaming
@@ -1523,6 +1553,28 @@ final class LocalProxyServer: @unchecked Sendable {
                 record: coreRecord
             )
         )
+    }
+
+    private func recordWithAllowedCacheTelemetry(
+        _ record: SessionReportCard.RequestRecord,
+        promptCaching: PromptCachingConfiguration
+    ) -> SessionReportCard.RequestRecord {
+        guard promptCaching.recordsProviderCacheTelemetry else {
+            return SessionReportCard.RequestRecord(
+                id: record.id,
+                timestamp: record.timestamp,
+                model: record.model,
+                promptTokens: record.promptTokens,
+                completionTokens: record.completionTokens,
+                promptCacheHitTokens: nil,
+                promptCacheMissTokens: nil,
+                promptCacheWriteTokens: nil,
+                durationSeconds: record.durationSeconds,
+                path: record.path,
+                wasStreaming: record.wasStreaming
+            )
+        }
+        return record
     }
 
     private func modelFromResponse(_ data: Data) -> String? {
@@ -1542,7 +1594,8 @@ final class LocalProxyServer: @unchecked Sendable {
         promptTokens: inout Int,
         completionTokens: inout Int,
         promptCacheHitTokens: inout Int?,
-        promptCacheMissTokens: inout Int?
+        promptCacheMissTokens: inout Int?,
+        promptCacheWriteTokens: inout Int?
     ) {
         guard let usage = AnthropicTranslator.anthropicPassthroughUsage(fromStreamingLine: line) else { return }
         model = usage.model ?? model
@@ -1550,6 +1603,7 @@ final class LocalProxyServer: @unchecked Sendable {
         completionTokens = usage.completionTokens ?? completionTokens
         promptCacheHitTokens = usage.promptCacheHitTokens ?? promptCacheHitTokens
         promptCacheMissTokens = usage.promptCacheMissTokens ?? promptCacheMissTokens
+        promptCacheWriteTokens = usage.promptCacheWriteTokens ?? promptCacheWriteTokens
     }
 
     private func recordXcodeAgentRequest(model: String, status: Int) {
@@ -1766,6 +1820,29 @@ final class LocalProxyServer: @unchecked Sendable {
     private func applyUpstreamAuth(config: Config, request: inout URLRequest) {
         guard let apiKey = config.upstreamAPIKey, !apiKey.isEmpty else { return }
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+    }
+
+    private func applyPromptCacheMutation(
+        path: String,
+        model: String?,
+        config: Config,
+        request: inout URLRequest
+    ) {
+        guard let body = request.httpBody else { return }
+        let headers = (request.allHTTPHeaderFields ?? [:]).map { ($0.key, $0.value) }
+        let mutation = PromptCacheAdapter.mutate(
+            path: path,
+            headers: headers,
+            body: body,
+            provider: config.upstreamProvider,
+            model: model,
+            sessionID: config.sessionID,
+            configuration: config.promptCaching
+        )
+        request.httpBody = mutation.body
+        for (name, value) in mutation.headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
     }
 
     private func applyProviderCompatibilityHeaders(config: Config, path: String, request: inout URLRequest) {

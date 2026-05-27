@@ -9,6 +9,7 @@ struct HomeDashboardView: View {
 
     let onOpenKeys: () -> Void
     let onOpenProxy: () -> Void
+    let onOpenCaching: () -> Void
     let onOpenAgentModel: () -> Void
     let onOpenPreflight: () -> Void
     let onOpenSessionHistory: () -> Void
@@ -66,6 +67,7 @@ struct HomeDashboardView: View {
                     HStack(spacing: 12) {
                         heroMetric("Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right")
                         heroMetric("Tokens", vm.sessionReportCard.totalTokensFormatted, systemImage: "number")
+                        heroMetric(vm.sessionCacheMetricLabel, vm.sessionCacheMetricValue, systemImage: "bolt.horizontal")
                         heroMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD), systemImage: "dollarsign.circle")
                         heroMetric("Latency", sessionLatencyText, systemImage: "timer")
                     }
@@ -73,6 +75,7 @@ struct HomeDashboardView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 12)], spacing: 12) {
                         heroMetric("Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right")
                         heroMetric("Tokens", vm.sessionReportCard.totalTokensFormatted, systemImage: "number")
+                        heroMetric(vm.sessionCacheMetricLabel, vm.sessionCacheMetricValue, systemImage: "bolt.horizontal")
                         heroMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD), systemImage: "dollarsign.circle")
                         heroMetric("Latency", sessionLatencyText, systemImage: "timer")
                     }
@@ -81,6 +84,7 @@ struct HomeDashboardView: View {
                 ViewThatFits {
                     HStack(spacing: 10) {
                         upstreamProviderBadge
+                        cacheStatusBadge
                         agentModelStatusBadge
                         preflightStatusBadge
                         Spacer()
@@ -88,6 +92,7 @@ struct HomeDashboardView: View {
 
                     VStack(alignment: .leading, spacing: 8) {
                         upstreamProviderBadge
+                        cacheStatusBadge
                         agentModelStatusBadge
                         preflightStatusBadge
                     }
@@ -373,6 +378,10 @@ struct HomeDashboardView: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    Text(vm.sessionCacheTelemetryText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
                     if !vm.sessionModelLatencyBreakdown.isEmpty {
                         Divider()
                         perModelLatency
@@ -434,6 +443,7 @@ struct HomeDashboardView: View {
                 smallMetric("Prompt", "\(vm.sessionReportCard.totalPromptTokens)")
                 smallMetric("Completion", "\(vm.sessionReportCard.totalCompletionTokens)")
                 smallMetric("Total", vm.sessionReportCard.totalTokensFormatted)
+                smallMetric(vm.sessionCacheMetricLabel, vm.sessionCacheMetricValue)
                 smallMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD))
                 if let latency = vm.sessionLatencySummary {
                     smallMetric("P95", formatLatency(latency.p95))
@@ -444,6 +454,7 @@ struct HomeDashboardView: View {
                 smallMetric("Prompt", "\(vm.sessionReportCard.totalPromptTokens)")
                 smallMetric("Completion", "\(vm.sessionReportCard.totalCompletionTokens)")
                 smallMetric("Total", vm.sessionReportCard.totalTokensFormatted)
+                smallMetric(vm.sessionCacheMetricLabel, vm.sessionCacheMetricValue)
                 smallMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD))
                 if let latency = vm.sessionLatencySummary {
                     smallMetric("P95", formatLatency(latency.p95))
@@ -516,6 +527,15 @@ struct HomeDashboardView: View {
                                 requestDetailRow(label: "Prompt", value: "\(request.promptTokens)")
                                 requestDetailRow(label: "Completion", value: "\(request.completionTokens)")
                                 requestDetailRow(label: "Total", value: "\(request.totalTokens)")
+                                if let hit = request.promptCacheHitTokens {
+                                    requestDetailRow(label: "Cached", value: "\(hit)")
+                                }
+                                if let miss = request.promptCacheMissTokens {
+                                    requestDetailRow(label: "Uncached", value: "\(miss)")
+                                }
+                                if let write = request.promptCacheWriteTokens {
+                                    requestDetailRow(label: "Cache write", value: "\(write)")
+                                }
                                 requestDetailRow(label: "Latency", value: formatLatency(request.durationSeconds))
                                 requestDetailRow(label: vm.sessionRequestCostLabel, value: vm.formatUSD(vm.estimatedCostUSD(for: request)))
 
@@ -548,6 +568,11 @@ struct HomeDashboardView: View {
                                     Text("\(request.totalTokens) tok")
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
+                                    if let hit = request.promptCacheHitTokens, hit > 0 {
+                                        Text("\(formatCompactInteger(hit)) cached")
+                                            .font(.caption2)
+                                            .foregroundStyle(.green)
+                                    }
                                     Text(vm.formatUSD(vm.estimatedCostUSD(for: request)))
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
@@ -618,6 +643,32 @@ struct HomeDashboardView: View {
         .buttonStyle(.plain)
         .help("Open preflight checks")
         .accessibilityHint("Opens the Proxy section and shows preflight checks.")
+    }
+
+    private var cacheStatusBadge: some View {
+        Button {
+            onOpenCaching()
+        } label: {
+            statusBadgeLabel(
+                title: vm.promptCachingHomeStatusTitle,
+                systemImage: "bolt.horizontal.circle",
+                color: cacheStatusColor
+            )
+        }
+        .buttonStyle(.plain)
+        .help(vm.promptCachingProviderStatusText)
+        .accessibilityHint("Opens the Proxy section to configure provider cache signals.")
+    }
+
+    private var cacheStatusColor: Color {
+        switch vm.promptCachingMode {
+        case .computeCacheHints:
+            return vm.upstreamProvider == .google ? .orange : .green
+        case .observeOnly, .explicitReferenceCache:
+            return .secondary
+        case .off:
+            return .orange
+        }
     }
 
     @ViewBuilder
@@ -725,5 +776,15 @@ struct HomeDashboardView: View {
             return "\(Int((seconds * 1000).rounded()))ms"
         }
         return String(format: "%.2fs", seconds)
+    }
+
+    private func formatCompactInteger(_ value: Int) -> String {
+        if value >= 1_000_000 {
+            return String(format: "%.1fM", Double(value) / 1_000_000)
+        }
+        if value >= 1_000 {
+            return String(format: "%.1fK", Double(value) / 1_000)
+        }
+        return "\(value)"
     }
 }

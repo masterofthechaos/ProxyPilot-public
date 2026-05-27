@@ -105,6 +105,120 @@ final class SessionHistorySessionTests: XCTestCase {
         )
     }
 
+    func testInputOutputAvailabilityReportsExpiredRetentionWindow() {
+        let session = SessionHistorySession(
+            id: "old-session",
+            source: "gui",
+            requests: [
+                RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 100),
+                    model: "glm-5.1",
+                    promptTokens: 10,
+                    completionTokens: 5,
+                    durationSeconds: 0.4,
+                    path: "/v1/messages",
+                    wasStreaming: true
+                )
+            ]
+        )
+
+        XCTAssertEqual(
+            session.inputOutputLogAvailability(
+                masterLoggingEnabled: true,
+                cliLoggingEnabled: true,
+                matchingRecordCount: 0,
+                retention: .twentyFourHoursDefault,
+                now: Date(timeIntervalSince1970: 100 + (25 * 60 * 60))
+            ),
+            .retentionExpired(retention: .twentyFourHoursDefault)
+        )
+    }
+
+    func testInputOutputAvailabilityPrefersMasterDisabledOverExpiredRetention() {
+        let session = SessionHistorySession(
+            id: "old-session",
+            source: "gui",
+            requests: [
+                RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 100),
+                    model: "glm-5.1",
+                    promptTokens: 10,
+                    completionTokens: 5,
+                    durationSeconds: 0.4,
+                    path: "/v1/messages",
+                    wasStreaming: true
+                )
+            ]
+        )
+
+        XCTAssertEqual(
+            session.inputOutputLogAvailability(
+                masterLoggingEnabled: false,
+                cliLoggingEnabled: true,
+                matchingRecordCount: 0,
+                retention: .twentyFourHoursDefault,
+                now: Date(timeIntervalSince1970: 100 + (25 * 60 * 60))
+            ),
+            .masterLoggingDisabled
+        )
+    }
+
+    func testInputOutputAvailabilityPrefersCLICaptureDisabledOverExpiredRetention() {
+        let session = SessionHistorySession(
+            id: "old-cli-session",
+            source: "cli",
+            requests: [
+                RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 100),
+                    model: "glm-5.1",
+                    promptTokens: 10,
+                    completionTokens: 5,
+                    durationSeconds: 0.4,
+                    path: "/v1/messages",
+                    wasStreaming: true
+                )
+            ]
+        )
+
+        XCTAssertEqual(
+            session.inputOutputLogAvailability(
+                masterLoggingEnabled: true,
+                cliLoggingEnabled: false,
+                matchingRecordCount: 0,
+                retention: .twentyFourHoursDefault,
+                now: Date(timeIntervalSince1970: 100 + (25 * 60 * 60))
+            ),
+            .cliCaptureDisabled
+        )
+    }
+
+    func testSessionHistoryAggregatesCacheTelemetry() {
+        let session = SessionHistorySession(
+            id: "cache-session",
+            source: "cli",
+            requests: [
+                RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 100),
+                    model: "glm-5.1",
+                    promptTokens: 100,
+                    completionTokens: 10,
+                    promptCacheHitTokens: 70,
+                    promptCacheMissTokens: 30,
+                    promptCacheWriteTokens: 5,
+                    durationSeconds: 0.4,
+                    path: "/v1/chat/completions",
+                    wasStreaming: false
+                )
+            ]
+        )
+
+        XCTAssertTrue(session.cacheAccountingAvailable)
+        XCTAssertEqual(session.totalPromptCacheHitTokens, 70)
+        XCTAssertEqual(session.totalPromptCacheMissTokens, 30)
+        XCTAssertEqual(session.totalPromptCacheWriteTokens, 5)
+        XCTAssertEqual(session.cacheHitRate ?? -1, 0.7, accuracy: 0.0001)
+    }
+
     func testInputOutputLogViewModelsFilterAndSortBySessionID() {
         let older = InputOutputLogRecord(
             timestamp: Date(timeIntervalSince1970: 100),

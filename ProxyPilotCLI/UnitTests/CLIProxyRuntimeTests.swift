@@ -31,6 +31,7 @@ struct CLIProxyRuntimeTests {
             upstreamUrl: "https://api.example.test/v1",
             key: secret,
             model: "glm-5",
+            promptCaching: .auto,
             json: true
         )
 

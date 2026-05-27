@@ -126,6 +126,7 @@ enum KeysProviderViewItem: String, CaseIterable, Identifiable {
     case mistral = "mistral"
     case miniMax = "minimax"
     case miniMaxCN = "minimax-cn"
+    case qwen = "qwen"
     case githubCopilot = "github-copilot"
     case ollama = "ollama"
     case lmStudio = "lmstudio"

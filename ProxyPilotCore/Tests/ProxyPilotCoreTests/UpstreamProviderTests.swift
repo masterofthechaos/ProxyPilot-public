@@ -8,7 +8,7 @@ struct UpstreamProviderTests {
     @Test func lmStudioIsLocal() { #expect(UpstreamProvider.lmStudio.isLocal == true) }
     @Test func githubCopilotIsLocal() { #expect(UpstreamProvider.githubCopilot.isLocal == true) }
     @Test func cloudProvidersAreNotLocal() {
-        for provider in [UpstreamProvider.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN] {
+        for provider in [UpstreamProvider.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen] {
             #expect(provider.isLocal == false)
         }
     }
@@ -28,6 +28,7 @@ struct UpstreamProviderTests {
         #expect(UpstreamProvider.xAI.secretKey == SecretKey.xAIAPIKey)
         #expect(UpstreamProvider.chutes.secretKey == SecretKey.chutesAPIKey)
         #expect(UpstreamProvider.google.secretKey == SecretKey.googleAPIKey)
+        #expect(UpstreamProvider.qwen.secretKey == SecretKey.qwenAPIKey)
     }
     @Test func secretKeyMappingForLocalProvidersIsNil() {
         #expect(UpstreamProvider.ollama.secretKey == nil)
@@ -37,6 +38,7 @@ struct UpstreamProviderTests {
     @Test func ollamaDefaultURL() { #expect(UpstreamProvider.ollama.defaultAPIBaseURL == "http://localhost:11434/v1") }
     @Test func lmStudioDefaultURL() { #expect(UpstreamProvider.lmStudio.defaultAPIBaseURL == "http://localhost:1234/v1") }
     @Test func googleDefaultURL() { #expect(UpstreamProvider.google.defaultAPIBaseURL == "https://generativelanguage.googleapis.com/v1beta/openai") }
+    @Test func qwenDefaultURL() { #expect(UpstreamProvider.qwen.defaultAPIBaseURL == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1") }
     @Test func githubCopilotDefaultURL() { #expect(UpstreamProvider.githubCopilot.defaultAPIBaseURL == "http://127.0.0.1:8080/v1") }
     @Test func ollamaTitle() { #expect(UpstreamProvider.ollama.title == "Ollama") }
     @Test func lmStudioTitle() { #expect(UpstreamProvider.lmStudio.title == "LM Studio") }

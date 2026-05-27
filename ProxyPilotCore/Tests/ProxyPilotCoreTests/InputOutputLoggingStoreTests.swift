@@ -101,6 +101,23 @@ final class InputOutputLoggingStoreTests: XCTestCase {
         XCTAssertEqual(try store.load(), preferences)
     }
 
+    func testPreferencesDefaultURLUsesXDGConfigHomeWhenProvided() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let url = InputOutputLoggingPreferencesStore.defaultURL(
+            environment: ["XDG_CONFIG_HOME": directory.path]
+        )
+
+        XCTAssertEqual(
+            url.path,
+            directory
+                .appendingPathComponent("proxypilot", isDirectory: true)
+                .appendingPathComponent("input-output-logging", isDirectory: true)
+                .appendingPathComponent("settings.json")
+                .path
+        )
+    }
+
     func testEncryptedStoreDoesNotWritePlainPromptOrOutputText() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

@@ -57,6 +57,11 @@ struct SessionStatsToolPayload: Encodable {
     let averageLatencyMs: Int?
     let uptimeSeconds: Int
     let models: [String: Int]
+    let promptCacheHitTokens: Int
+    let promptCacheMissTokens: Int
+    let promptCacheWriteTokens: Int
+    let cacheHitRate: Double?
+    let cacheAccountingAvailable: Bool
 
     enum CodingKeys: String, CodingKey {
         case requests
@@ -66,6 +71,10 @@ struct SessionStatsToolPayload: Encodable {
         case averageLatencyMs = "average_latency_ms"
         case uptimeSeconds = "uptime_seconds"
         case models
+        case promptCacheHitTokens = "prompt_cache_hit_tokens"
+        case promptCacheMissTokens = "prompt_cache_miss_tokens"
+        case promptCacheWriteTokens = "prompt_cache_write_tokens"
+        case cacheHitRate = "cache_hit_rate"
+        case cacheAccountingAvailable = "cache_accounting_available"
     }
 }
-

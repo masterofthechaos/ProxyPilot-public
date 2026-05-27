@@ -17,10 +17,26 @@ extension UpstreamProvider {
         case .mistral: return URL(string: "https://console.mistral.ai/api-keys")
         case .miniMax: return URL(string: "https://platform.minimax.io")
         case .miniMaxCN: return URL(string: "https://platform.minimaxi.com")
-        case .qwen: return URL(string: "https://dashscope.console.aliyun.com/apiKey")
+        case .qwen: return Self.qwenInternationalAPIKeyPageURL
         case .githubCopilot: return URL(string: "https://github.com/features/copilot")
         case .ollama, .lmStudio: return nil
         }
+    }
+
+    func apiKeyPageURL(apiBaseURL: URL?) -> URL? {
+        guard self == .qwen else { return apiKeyPageURL }
+        guard apiBaseURL?.host?.lowercased() == "dashscope.aliyuncs.com" else {
+            return Self.qwenInternationalAPIKeyPageURL
+        }
+        return Self.qwenChinaAPIKeyPageURL
+    }
+
+    func apiKeyRegionHint(apiBaseURL: URL?) -> String? {
+        guard self == .qwen else { return nil }
+        if apiBaseURL?.host?.lowercased() == "dashscope.aliyuncs.com" {
+            return "China (Beijing) DashScope endpoint selected. Use a China-region Model Studio API key."
+        }
+        return "International DashScope endpoint selected. Use an Alibaba Cloud Model Studio key from Singapore or another matching non-China region."
     }
 
     var keychainKey: KeychainService.Key? {
@@ -40,4 +56,7 @@ extension UpstreamProvider {
         case .githubCopilot, .ollama, .lmStudio: return nil
         }
     }
+
+    private static let qwenInternationalAPIKeyPageURL = URL(string: "https://modelstudio.console.alibabacloud.com/?tab=api#/api-key")
+    private static let qwenChinaAPIKeyPageURL = URL(string: "https://dashscope.console.aliyun.com/apiKey")
 }

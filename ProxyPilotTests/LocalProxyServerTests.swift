@@ -5,6 +5,15 @@ import ProxyPilotCore
 @testable import ProxyPilot
 
 private final class LocalHTTPStubServer: @unchecked Sendable {
+    struct RequestRecord {
+        let headers: [String: String]
+        let body: String
+
+        func headerValue(_ name: String) -> String? {
+            headers[name.lowercased()]
+        }
+    }
+
     private final class OneShotGate: @unchecked Sendable {
         private let lock = NSLock()
         private var claimed = false
@@ -23,6 +32,8 @@ private final class LocalHTTPStubServer: @unchecked Sendable {
     private let statusCode: Int
     private let queue = DispatchQueue(label: "proxypilot.local-http-stub")
     private var listener: NWListener?
+    private let requestLock = NSLock()
+    private var capturedRequests: [RequestRecord] = []
 
     init(statusCode: Int = 200, body: String, contentType: String = "application/json") {
         self.statusCode = statusCode
@@ -59,9 +70,7 @@ private final class LocalHTTPStubServer: @unchecked Sendable {
                     return
                 }
                 connection.start(queue: self.queue)
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { _, _, _, _ in
-                    self.respond(on: connection)
-                }
+                self.receiveRequest(on: connection)
             }
 
             listener.start(queue: queue)
@@ -71,6 +80,12 @@ private final class LocalHTTPStubServer: @unchecked Sendable {
     func stop() {
         listener?.cancel()
         listener = nil
+    }
+
+    func requests() -> [RequestRecord] {
+        requestLock.lock()
+        defer { requestLock.unlock() }
+        return capturedRequests
     }
 
     private func respond(on connection: NWConnection) {
@@ -87,6 +102,63 @@ private final class LocalHTTPStubServer: @unchecked Sendable {
         connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
             connection.cancel()
         })
+    }
+
+    private func receiveRequest(on connection: NWConnection, accumulated: Data = Data()) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            var next = accumulated
+            if let data {
+                next.append(data)
+            }
+            if isComplete || error != nil || self.hasCompleteHTTPRequest(next) {
+                self.captureRequest(next)
+                self.respond(on: connection)
+            } else {
+                self.receiveRequest(on: connection, accumulated: next)
+            }
+        }
+    }
+
+    private func hasCompleteHTTPRequest(_ data: Data) -> Bool {
+        guard let raw = String(data: data, encoding: .utf8),
+              let headerRange = raw.range(of: "\r\n\r\n") else {
+            return false
+        }
+        let headers = raw[..<headerRange.lowerBound]
+        let contentLength = headers
+            .components(separatedBy: "\r\n")
+            .compactMap { line -> Int? in
+                let pieces = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                guard pieces.count == 2,
+                      pieces[0].lowercased() == "content-length" else {
+                    return nil
+                }
+                return Int(pieces[1].trimmingCharacters(in: .whitespaces))
+            }
+            .first ?? 0
+        let bodyStart = raw.distance(from: raw.startIndex, to: headerRange.upperBound)
+        let bodyBytes = data.count - bodyStart
+        return bodyBytes >= contentLength
+    }
+
+    private func captureRequest(_ data: Data?) {
+        guard let data, let raw = String(data: data, encoding: .utf8) else { return }
+        let parts = raw.components(separatedBy: "\r\n\r\n")
+        let headerLines = parts.first?.components(separatedBy: "\r\n").dropFirst() ?? []
+        var headers: [String: String] = [:]
+        for line in headerLines {
+            let pieces = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pieces.count == 2 else { continue }
+            headers[String(pieces[0]).lowercased()] = pieces[1].trimmingCharacters(in: .whitespaces)
+        }
+        let body = parts.dropFirst().joined(separator: "\r\n\r\n")
+        requestLock.lock()
+        capturedRequests.append(RequestRecord(headers: headers, body: body))
+        requestLock.unlock()
     }
 }
 
@@ -880,6 +952,170 @@ final class LocalProxyServerTests: XCTestCase {
             googleThoughtSignatureStore: nil
         )
         XCTAssertTrue(config.isAnthropicPassthroughActive)
+    }
+
+    func testBuiltInProxyAppliesOpenAIComputeCacheHint() async throws {
+        let upstream = LocalHTTPStubServer(body: """
+        {"id":"chatcmpl-cache","model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}
+        """)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            sessionID: "gui-session",
+            masterKey: "test",
+            upstreamProvider: .openAI,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: nil,
+            allowedModels: [],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "",
+            googleThoughtSignatureStore: nil,
+            promptCaching: PromptCachingConfiguration(isEnabled: true, mode: .computeCacheHints)
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonBody([
+            "model": "test-model",
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+
+        let capturedRequest = try XCTUnwrap(upstream.requests().first)
+        let bodyData = try XCTUnwrap(capturedRequest.body.data(using: .utf8))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        XCTAssertEqual(json["prompt_cache_key"] as? String, "06647b462d27d54152e29781_1")
+        XCTAssertEqual(json["model"] as? String, "test-model")
+        XCTAssertEqual(capturedRequest.headerValue("content-type"), "application/json")
+        XCTAssertEqual(capturedRequest.headerValue("accept"), "application/json")
+    }
+
+    func testBuiltInProxyBufferedChatRecordsCacheWriteTokens() async throws {
+        let upstream = LocalHTTPStubServer(body: """
+        {"id":"chatcmpl-cache","model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19,"prompt_tokens_details":{"cached_tokens":5},"cache_creation_input_tokens":3}}
+        """)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            sessionID: "gui-cache-write-session",
+            masterKey: "test",
+            upstreamProvider: .openAI,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: nil,
+            allowedModels: [],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "",
+            googleThoughtSignatureStore: nil,
+            promptCaching: PromptCachingConfiguration(isEnabled: true, mode: .computeCacheHints)
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonBody([
+            "model": "test-model",
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let didRecord = await waitForReportCard(server, requestCount: 1)
+        XCTAssertTrue(didRecord)
+
+        let (record, totalWriteTokens) = try await MainActor.run {
+            (
+                try XCTUnwrap(server.reportCard.requests.last),
+                server.reportCard.totalPromptCacheWriteTokens
+            )
+        }
+        XCTAssertEqual(record.promptTokens, 12)
+        XCTAssertEqual(record.completionTokens, 7)
+        XCTAssertEqual(record.promptCacheHitTokens, 5)
+        XCTAssertEqual(record.promptCacheMissTokens, 7)
+        XCTAssertEqual(record.promptCacheWriteTokens, 3)
+        XCTAssertEqual(totalWriteTokens, 3)
+    }
+
+    func testBuiltInProxyOffModeSuppressesBufferedChatCacheTelemetry() async throws {
+        let upstream = LocalHTTPStubServer(body: """
+        {"id":"chatcmpl-cache","model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19,"prompt_tokens_details":{"cached_tokens":5},"cache_creation_input_tokens":3}}
+        """)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            sessionID: "gui-cache-off-session",
+            masterKey: "test",
+            upstreamProvider: .openAI,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: nil,
+            allowedModels: [],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "",
+            googleThoughtSignatureStore: nil,
+            promptCaching: PromptCachingConfiguration(isEnabled: false, mode: .off)
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonBody([
+            "model": "test-model",
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let didRecord = await waitForReportCard(server, requestCount: 1)
+        XCTAssertTrue(didRecord)
+
+        let (record, totalWriteTokens) = try await MainActor.run {
+            (
+                try XCTUnwrap(server.reportCard.requests.last),
+                server.reportCard.totalPromptCacheWriteTokens
+            )
+        }
+        XCTAssertEqual(record.promptTokens, 12)
+        XCTAssertEqual(record.completionTokens, 7)
+        XCTAssertNil(record.promptCacheHitTokens)
+        XCTAssertNil(record.promptCacheMissTokens)
+        XCTAssertNil(record.promptCacheWriteTokens)
+        XCTAssertEqual(totalWriteTokens, 0)
     }
 
     func testDeepSeekBufferedPassthroughRecordsNativeAnthropicUsage() async throws {

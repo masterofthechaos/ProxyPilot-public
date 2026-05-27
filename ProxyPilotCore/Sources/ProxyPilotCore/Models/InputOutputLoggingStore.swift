@@ -83,6 +83,19 @@ public struct InputOutputLoggingPreferencesStore: Sendable {
     }
 
     public static var defaultURL: URL {
+        defaultURL(environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func defaultURL(environment: [String: String]) -> URL {
+        if let xdgConfigHome = environment["XDG_CONFIG_HOME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !xdgConfigHome.isEmpty {
+            return URL(fileURLWithPath: (xdgConfigHome as NSString).expandingTildeInPath, isDirectory: true)
+                .appendingPathComponent("proxypilot", isDirectory: true)
+                .appendingPathComponent("input-output-logging", isDirectory: true)
+                .appendingPathComponent("settings.json")
+        }
+
         #if os(macOS)
         if let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
             return applicationSupport
@@ -437,7 +450,18 @@ public struct InputOutputLoggingRecorder: Sendable {
     }
 
     public static func productionIfConfigured(source: String, sessionID: String? = nil) throws -> InputOutputLoggingRecorder? {
-        let preferencesStore = InputOutputLoggingPreferencesStore()
+        try productionIfConfigured(
+            source: source,
+            sessionID: sessionID,
+            preferencesStore: InputOutputLoggingPreferencesStore()
+        )
+    }
+
+    public static func productionIfConfigured(
+        source: String,
+        sessionID: String? = nil,
+        preferencesStore: InputOutputLoggingPreferencesStore
+    ) throws -> InputOutputLoggingRecorder? {
         let preferences = try preferencesStore.load()
         guard preferences.isEffective(for: source) else { return nil }
 
