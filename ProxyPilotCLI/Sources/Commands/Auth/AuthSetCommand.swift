@@ -53,7 +53,7 @@ struct AuthSetCommand: AsyncParsableCommand {
                 command: "auth set",
                 code: "E041",
                 message: "Provider \(upstreamProvider.rawValue) does not require an API key.",
-                suggestion: "Choose a cloud provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn).",
+                suggestion: "Choose a cloud provider (openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, qwen).",
                 json: json
             )
             throw ExitCode.failure

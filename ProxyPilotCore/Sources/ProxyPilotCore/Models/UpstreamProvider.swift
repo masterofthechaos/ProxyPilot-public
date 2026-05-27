@@ -13,6 +13,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     case mistral    = "mistral"
     case miniMax    = "minimax"
     case miniMaxCN  = "minimax-cn"
+    case qwen       = "qwen"
     case githubCopilot = "github-copilot"
     case ollama     = "ollama"
     case lmStudio   = "lmstudio"
@@ -32,6 +33,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .mistral:    return "Mistral"
         case .miniMax:    return "MiniMax"
         case .miniMaxCN:  return "MiniMax CN"
+        case .qwen:       return "Qwen"
         case .githubCopilot: return "GitHub Copilot"
         case .ollama:     return "Ollama"
         case .lmStudio:   return "LM Studio"
@@ -51,6 +53,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .mistral:    return "https://api.mistral.ai/v1"
         case .miniMax:    return "https://api.minimax.io/v1"
         case .miniMaxCN:  return "https://api.minimaxi.com/v1"
+        case .qwen:       return "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
         case .githubCopilot: return "http://127.0.0.1:8080/v1"
         case .ollama:     return "http://localhost:11434/v1"
         case .lmStudio:   return "http://localhost:1234/v1"
@@ -233,6 +236,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .mistral:    return SecretKey.mistralAPIKey
         case .miniMax:    return SecretKey.minimaxAPIKey
         case .miniMaxCN:  return SecretKey.minimaxCNAPIKey
+        case .qwen:       return SecretKey.qwenAPIKey
         case .githubCopilot, .ollama, .lmStudio:
             return nil
         }
