@@ -5,19 +5,22 @@ public struct SessionReportEvent: Sendable, Codable, Equatable {
     public let schemaVersion: Int
     public let source: String
     public let sessionID: String
+    public let role: String?
     public let record: RequestRecord
 
     public init(
         id: UUID = UUID(),
-        schemaVersion: Int = 1,
+        schemaVersion: Int = 2,
         source: String,
         sessionID: String,
+        role: String? = nil,
         record: RequestRecord
     ) {
         self.id = id
         self.schemaVersion = schemaVersion
         self.source = source
         self.sessionID = sessionID
+        self.role = role
         self.record = record
     }
 }
@@ -26,6 +29,10 @@ public enum SessionReportStore {
     public static let maximumFileBytes = 8 * 1_024 * 1_024
     public static let maximumEventBytes = 64 * 1_024
     public static var defaultURL: URL {
+        if let override = ProcessInfo.processInfo.environment["PROXYPILOT_SESSION_REPORT_PATH"],
+           !override.isEmpty {
+            return URL(fileURLWithPath: override)
+        }
         #if os(macOS)
         if let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
             return applicationSupport
@@ -60,7 +67,9 @@ public enum SessionReportStore {
             )
         } else if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize),
                   size + data.count > maximumFileBytes {
-            try Data().write(to: url, options: .atomic)
+            let archive = freshArchiveURL(for: url)
+            try FileManager.default.moveItem(at: url, to: archive)
+            FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
         }
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
 
@@ -71,7 +80,16 @@ public enum SessionReportStore {
     }
 
     public static func readEvents(from url: URL = defaultURL) throws -> [SessionReportEvent] {
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        let urls = archiveURLs(for: url) + [url].filter { FileManager.default.fileExists(atPath: $0.path) }
+        var events: [SessionReportEvent] = []
+        var seen = Set<UUID>()
+        for source in urls {
+            for event in try readOne(source) where seen.insert(event.id).inserted { events.append(event) }
+        }
+        return events
+    }
+
+    private static func readOne(_ url: URL) throws -> [SessionReportEvent] {
 
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
@@ -95,8 +113,32 @@ public enum SessionReportStore {
             }
     }
 
+    private static func archiveURL(for url: URL) -> URL {
+        url.deletingPathExtension().appendingPathExtension("archive.jsonl")
+    }
+
+    private static func freshArchiveURL(for url: URL) -> URL {
+        url.deletingPathExtension().appendingPathExtension("archive.\(UUID().uuidString.lowercased()).jsonl")
+    }
+
+    private static func archiveURLs(for url: URL) -> [URL] {
+        let directory = url.deletingLastPathComponent()
+        let base = url.deletingPathExtension().lastPathComponent + ".archive"
+        return ((try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? [])
+            .filter { candidate in
+                let name = candidate.lastPathComponent
+                return name == "\(base).jsonl" || (name.hasPrefix("\(base).") && name.hasSuffix(".jsonl"))
+            }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
     public static func reset(at url: URL = defaultURL) throws {
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        try FileManager.default.removeItem(at: url)
+        for target in archiveURLs(for: url) + [url] where FileManager.default.fileExists(atPath: target.path) {
+            try FileManager.default.removeItem(at: target)
+        }
     }
 }

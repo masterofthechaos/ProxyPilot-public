@@ -18,7 +18,13 @@ struct ProxyPilotAgent {
                 bootstrap.outcome == .started ? "proxy_started" : "proxy_already_running",
                 settings: settings
             )
-            let plan = try AgentAdapterLaunchPlan.make(settings: settings)
+            let localProxyCredential = try LocalProxyCredential.resolveOrCreate(
+                using: SecretsProviderFactory.make()
+            )
+            let plan = try AgentAdapterLaunchPlan.make(
+                settings: settings,
+                localProxyCredential: localProxyCredential
+            )
             record("adapter_exec", settings: settings, detail: plan.adapterTelemetryDetail)
             exec(plan: plan, settings: settings)
         } catch {

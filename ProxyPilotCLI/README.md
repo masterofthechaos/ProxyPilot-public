@@ -53,6 +53,11 @@ proxypilot start --provider zai --model glm-4.7
 proxypilot config install --port 4000
 ```
 
+When a stored provider key is present, ProxyPilot automatically creates a
+separate local client credential and requires it for inference. `setup xcode`,
+`config install`, managed Agent launch, and daemon restarts supply or migrate
+that credential automatically; users do not enter it during routine use.
+
 LAN Ollama flow:
 
 ```sh
@@ -109,7 +114,7 @@ proxypilot start [--port <port>] [--provider <provider>] [--upstream-url <url>] 
 | Flag | Default | Description |
 |---|---|---|
 | `--port`, `-p` | `4000` | Port to listen on |
-| `--provider` | `openai` | Upstream provider. Valid: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `deepseek`, `mistral`, `minimax`, `minimax-cn`, `qwen`, `9router`, `github-copilot`, `ollama`, `lmstudio` |
+| `--provider` | `openai` | Upstream provider. Valid: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `deepseek`, `mistral`, `minimax`, `minimax-cn`, `qwen`, `9router`, `ollama`, `lmstudio` |
 | `--upstream-url` | provider default | Override upstream API base URL |
 | `--key` | — | Upstream API key. Falls back to environment variable, then keychain/secrets store |
 | `--key-stdin` | false | Read one API key line from stdin |
@@ -156,7 +161,11 @@ proxypilot status [--port <port>] [--json]
 
 ### `config install`
 
-Install Xcode Agent config that routes Xcode through ProxyPilot (`ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`).
+Install Xcode Agent config that routes Xcode through ProxyPilot
+(`ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`) and supplies ProxyPilot's generated
+local client credential through `ANTHROPIC_AUTH_TOKEN`. The settings file is
+owner-only and later proxy starts migrate its managed token without discarding
+unknown settings.
 
 ```
 proxypilot config install [--port <port>] [--json]
@@ -214,7 +223,7 @@ proxypilot auth set --provider <provider> [--key <value>] [--stdin] [--json]
 
 If neither `--key` nor `--stdin` is passed, `auth set` prompts securely in a TTY.  
 Prefer `--stdin` for non-interactive use. Use `--key` only when shell history retention is acceptable.
-Local/helper providers that do not accept ProxyPilot-managed credentials (`github-copilot`, `ollama`, `lmstudio`) are rejected with `E041`. `9router` does not require an upstream provider key, but `proxypilot auth set --provider 9router` can store an optional endpoint bearer token for 9Router gateways configured with `REQUIRE_API_KEY` or remote gateway auth.
+Local providers that do not accept ProxyPilot-managed credentials (`ollama`, `lmstudio`) are rejected with `E041`. `9router` does not require an upstream provider key, but `proxypilot auth set --provider 9router` can store an optional endpoint bearer token for 9Router gateways configured with `REQUIRE_API_KEY` or remote gateway auth.
 
 ---
 
@@ -398,7 +407,6 @@ The server inherits `--provider` and `--key` defaults but tools can override bot
 | MiniMax CN | `minimax-cn` | `https://api.minimaxi.com/v1` |
 | Qwen | `qwen` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
 | 9Router | `9router` | `http://localhost:20128/v1` |
-| GitHub Copilot sidecar | `github-copilot` | `http://127.0.0.1:4141/v1` |
 | Ollama | `ollama` | `http://localhost:11434/v1` |
 | LM Studio | `lmstudio` | `http://localhost:1234/v1` |
 
@@ -471,7 +479,7 @@ Pass `--json` to any command to get machine-readable output on stdout.
 **Error:**
 
 ```json
-{"ok": false, "error": {"code": "E001", "message": "Unknown provider: foo", "suggestion": "Valid: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, qwen, 9router, github-copilot, ollama, lmstudio"}}
+{"ok": false, "error": {"code": "E001", "message": "Unknown provider: foo", "suggestion": "Valid: openai, groq, zai, openrouter, xai, chutes, google, deepseek, mistral, minimax, minimax-cn, qwen, 9router, ollama, lmstudio"}}
 ```
 
 Error codes:

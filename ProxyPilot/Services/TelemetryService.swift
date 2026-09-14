@@ -52,7 +52,6 @@ final class TelemetryService {
         "onboarding_started": [],
         "onboarding_completed": [],
         "first_successful_request": [],
-        "copilot_tool_test_succeeded": [],
         "proxy_models_fetch_succeeded": [],
         "provider_models_fetch_succeeded": [],
         "upstream_test_succeeded": [],

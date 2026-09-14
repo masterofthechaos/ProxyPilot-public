@@ -625,13 +625,28 @@ public struct InputOutputLoggingRecorder: Sendable {
             return nil
         }
 
+        return retentionCleanupRecorder(
+            source: source,
+            preferencesStore: preferencesStore,
+            encryptionKey: key
+        )
+    }
+
+    /// Opens the historical store without consulting current capture enablement.
+    /// Retention is a lifecycle obligation for already-written records, not a
+    /// side effect that disappears when the user later turns capture off.
+    static func retentionCleanupRecorder(
+        source: String,
+        preferencesStore: InputOutputLoggingPreferencesStore,
+        encryptionKey: Data
+    ) -> InputOutputLoggingRecorder {
         let preferences = (try? preferencesStore.load()) ?? InputOutputLoggingPreferences()
         return InputOutputLoggingRecorder(
             source: source,
             preferencesStore: preferencesStore,
             logStore: InputOutputLogStore(
                 url: InputOutputLogStore.resolvedURL(preferences: preferences),
-                encryptionKey: key
+                encryptionKey: encryptionKey
             )
         )
     }

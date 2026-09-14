@@ -680,6 +680,13 @@ enum MCPServerSetup {
                 await state.sessionStats.reset(clearReportStore: false)
                 let modelList = resolvedModels.models
                 let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
+                let localProxyCredential = LocalProxyCredential.requiresAuthentication(
+                    explicitlyRequired: false,
+                    upstreamAPIKey: apiKey
+                ) ? try LocalProxyCredential.resolveOrCreate(using: secrets) : nil
+                if let localProxyCredential {
+                    try XcodeConfigManager.synchronizeLocalProxyCredentialIfInstalled(localProxyCredential)
+                }
                 // Resolved per request, not frozen here: enabling MCP capture
                 // while the proxy is already running must take effect without a
                 // restart.
@@ -689,7 +696,9 @@ enum MCPServerSetup {
                     upstreamProvider: upstream,
                     upstreamAPIBaseURL: reqURL,
                     upstreamAPIKey: apiKey,
+                    masterKey: localProxyCredential,
                     allowedModels: allowedModels,
+                    requiresAuth: localProxyCredential != nil,
                     preferredAnthropicUpstreamModel: modelList.first ?? "",
                     sessionStats: state.sessionStats,
                     googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil,
@@ -860,6 +869,13 @@ enum MCPServerSetup {
 
                 let modelList = resolvedModels.models
                 let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
+                let localProxyCredential = LocalProxyCredential.requiresAuthentication(
+                    explicitlyRequired: false,
+                    upstreamAPIKey: apiKey
+                ) ? try LocalProxyCredential.resolveOrCreate(using: secrets) : nil
+                if let localProxyCredential {
+                    try XcodeConfigManager.synchronizeLocalProxyCredentialIfInstalled(localProxyCredential)
+                }
                 // Resolved per request, not frozen here: enabling MCP capture
                 // while the proxy is already running must take effect without a
                 // restart.
@@ -869,7 +885,9 @@ enum MCPServerSetup {
                     upstreamProvider: upstream,
                     upstreamAPIBaseURL: reqURL,
                     upstreamAPIKey: apiKey,
+                    masterKey: localProxyCredential,
                     allowedModels: allowedModels,
+                    requiresAuth: localProxyCredential != nil,
                     preferredAnthropicUpstreamModel: modelList.first ?? "",
                     sessionStats: state.sessionStats,
                     googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil,
@@ -1033,7 +1051,13 @@ enum MCPServerSetup {
                 }
 
                 do {
-                    let status = try XcodeConfigManager.install(port: configPort)
+                    let localProxyCredential = try LocalProxyCredential.resolveOrCreate(
+                        using: SecretsProviderFactory.make()
+                    )
+                    let status = try XcodeConfigManager.install(
+                        port: configPort,
+                        localProxyCredential: localProxyCredential
+                    )
                     let nextActions: [NextAction] = proxyRunning ? [] : [
                         NextAction(
                             id: "start_proxy",

@@ -149,6 +149,13 @@ struct StartCommand: AsyncParsableCommand {
         await sessionStats.reset(clearReportStore: false)
         let modelList = modelResolution.models
         let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
+        let localProxyCredential = LocalProxyCredential.requiresAuthentication(
+            explicitlyRequired: false,
+            upstreamAPIKey: resolvedCredential.apiKey
+        ) ? try LocalProxyCredential.resolveOrCreate(using: secrets) : nil
+        if let localProxyCredential {
+            try XcodeConfigManager.synchronizeLocalProxyCredentialIfInstalled(localProxyCredential)
+        }
         // Resolved per request, not frozen here: enabling CLI capture while the
         // daemon is already running must take effect without a restart.
         let inputOutputLoggerCache = InputOutputLoggerSessionCache()
@@ -157,7 +164,9 @@ struct StartCommand: AsyncParsableCommand {
             upstreamProvider: upstreamProvider,
             upstreamAPIBaseURL: upstreamUrl,
             upstreamAPIKey: resolvedCredential.apiKey,
+            masterKey: localProxyCredential,
             allowedModels: allowedModels,
+            requiresAuth: localProxyCredential != nil,
             preferredAnthropicUpstreamModel: modelList.first ?? "",
             sessionStats: sessionStats,
             googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil,

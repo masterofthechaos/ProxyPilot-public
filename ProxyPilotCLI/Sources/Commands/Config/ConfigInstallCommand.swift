@@ -28,7 +28,13 @@ struct ConfigInstallCommand: AsyncParsableCommand {
         }
 
         do {
-            let status = try XcodeConfigManager.install(port: port)
+            let localProxyCredential = try LocalProxyCredential.resolveOrCreate(
+                using: SecretsProviderFactory.make()
+            )
+            let status = try XcodeConfigManager.install(
+                port: port,
+                localProxyCredential: localProxyCredential
+            )
             let proxyReachable = await isProxyReachable(on: port)
             let warningSuffix = proxyReachable
                 ? ""

@@ -12,15 +12,25 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${0}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/release_channel.sh"
+
+CHANNEL="stable"
+if [[ "${1:-}" == "stable" || "${1:-}" == "alpha" ]]; then
+  CHANNEL="$(pp_require_release_channel "${1}")"
+  shift
+fi
+
 PROJECT="${ROOT_DIR}/ProxyPilot.xcodeproj"
 SCHEME="ProxyPilot-macOS"
 SPEC="${ROOT_DIR}/project.yml"
 DMG_DIR="${ROOT_DIR}/DMGs"
-# ── CHANGE THESE to match your Apple Developer account ───────────────
-# See scripts/SETUP-BEFORE-BUILDING.md for instructions.
 NOTARY_PROFILE="YOUR_NOTARY_PROFILE"
 SIGNING_IDENTITY_LABEL="Developer ID Application: Your Name (YOUR_TEAM_ID)"
 TEAM_ID="YOUR_TEAM_ID"
+CONFIGURATION="$(pp_release_configuration "${CHANNEL}")"
+APP_WRAPPER_NAME="$(pp_app_wrapper_name "${CHANNEL}")"
+APP_DISPLAY_NAME="$(pp_app_display_name "${CHANNEL}")"
+BUILD_NUMBER="$(sed -nE 's/.*CURRENT_PROJECT_VERSION: "(.+)"/\1/p' "${SPEC}" | head -n 1)"
 
 if [[ -n "${1:-}" ]]; then
   VERSION="$1"
@@ -28,7 +38,7 @@ else
   VERSION="$(sed -nE 's/.*MARKETING_VERSION: "(.+)"/\1/p' "${SPEC}" | head -n 1)"
 fi
 
-if [[ -z "${VERSION}" ]]; then
+if [[ -z "${VERSION}" || -z "${BUILD_NUMBER}" ]]; then
   echo "Error: Could not determine version from ${SPEC}" >&2
   exit 1
 fi
@@ -50,9 +60,9 @@ if [[ -z "${SIGNING_IDENTITY_HASH}" ]]; then
   exit 1
 fi
 
-DMG_NAME="ProxyPilot-v${VERSION}.dmg"
-ARCHIVE="/tmp/ProxyPilot-release.xcarchive"
-STAGING="/tmp/ProxyPilot-dmg-staging"
+DMG_NAME="$(pp_dmg_name "${CHANNEL}" "${VERSION}" "${BUILD_NUMBER}")"
+ARCHIVE="/tmp/ProxyPilot-${CHANNEL}-release.xcarchive"
+STAGING="/tmp/ProxyPilot-${CHANNEL}-dmg-staging"
 DMG_PATH="/tmp/${DMG_NAME}"
 NOTARY_LOG="/tmp/notarytool-proxypilot-output.txt"
 
@@ -62,19 +72,19 @@ rm -f "${DMG_PATH}" "${NOTARY_LOG}"
 echo "Regenerating Xcode project (ensure version numbers flow from project.yml)..."
 zsh "${ROOT_DIR}/scripts/update_xcodeproj.sh"
 
-echo "Building ProxyPilot v${VERSION}..."
+echo "Building ${APP_DISPLAY_NAME} v${VERSION}..."
 
 xcodebuild archive \
   -project "${PROJECT}" \
   -scheme "${SCHEME}" \
   -archivePath "${ARCHIVE}" \
-  -configuration Release \
+  -configuration "${CONFIGURATION}" \
   CODE_SIGN_STYLE=Automatic \
   DEVELOPMENT_TEAM="${TEAM_ID}" \
   ENABLE_HARDENED_RUNTIME=YES \
   -quiet
 
-APP_PATH="${ARCHIVE}/Products/Applications/ProxyPilot.app"
+APP_PATH="${ARCHIVE}/Products/Applications/${APP_WRAPPER_NAME}"
 if [[ ! -d "${APP_PATH}" ]]; then
   echo "Error: Archive succeeded but app not found at ${APP_PATH}" >&2
   exit 1
@@ -107,10 +117,49 @@ done
 codesign --force --sign "${SIGNING_IDENTITY_HASH}" --options runtime --timestamp \
   "${APP_PATH}/Contents/Frameworks/Sparkle.framework"
 
+# Sign any loose dynamic libraries in Frameworks/ (e.g., libswiftCompatibilitySpan.dylib)
+for dylib in "${APP_PATH}/Contents/Frameworks"/*.dylib; do
+  [[ -f "${dylib}" ]] || continue
+  echo "  Signing $(basename "${dylib}")..."
+  codesign --force --sign "${SIGNING_IDENTITY_HASH}" --options runtime --timestamp "${dylib}"
+done
+
+# Sign embedded ProxyPilot CLI/Agent helpers before signing the containing app.
+for helper in "${APP_PATH}/Contents/Helpers/proxypilot" "${APP_PATH}/Contents/Helpers/proxypilot-agent"; do
+  [[ -f "${helper}" ]] || { echo "Error: Missing embedded helper: ${helper}" >&2; exit 1; }
+  echo "  Signing $(basename "${helper}")..."
+  codesign --force --sign "${SIGNING_IDENTITY_HASH}" --options runtime --timestamp "${helper}"
+done
+
+# Sign the independently updatable RepoGPS payload, then regenerate its
+# checksum manifest without replacing the immutable RepoGPS source commit.
+REPOGPS_PAYLOAD="${APP_PATH}/Contents/Resources/RepoGPSPayload"
+REPOGPS_BINARY="${REPOGPS_PAYLOAD}/bin/rgps"
+[[ -x "${REPOGPS_BINARY}" ]] || { echo "Error: Missing embedded RepoGPS binary: ${REPOGPS_BINARY}" >&2; exit 1; }
+REPOGPS_SOURCE_RELEASE="$(/usr/bin/plutil -extract source_release raw -o - "${REPOGPS_PAYLOAD}/payload.json")"
+if [[ ! "${REPOGPS_SOURCE_RELEASE}" =~ ^[0-9a-f]{7,40}$ ]]; then
+  echo "Error: Embedded RepoGPS source_release is not an immutable Git SHA" >&2
+  exit 1
+fi
+echo "  Signing RepoGPS ${REPOGPS_SOURCE_RELEASE}..."
+codesign --force --sign "${SIGNING_IDENTITY_HASH}" --options runtime --timestamp "${REPOGPS_BINARY}"
+"${REPOGPS_BINARY}" distribution make-manifest \
+  --payload "${REPOGPS_PAYLOAD}" \
+  --source-release "${REPOGPS_SOURCE_RELEASE}"
+REPOGPS_EXPECTED_HASH="$(/usr/bin/jq -er '.files[] | select(.path == "bin/rgps") | .sha256' "${REPOGPS_PAYLOAD}/payload.json")"
+REPOGPS_ACTUAL_HASH="$(shasum -a 256 "${REPOGPS_BINARY}" | awk '{print $1}')"
+if [[ "${REPOGPS_EXPECTED_HASH}" != "${REPOGPS_ACTUAL_HASH}" ]]; then
+  echo "Error: Embedded RepoGPS manifest does not match the signed binary" >&2
+  exit 1
+fi
+
 echo "Signing main app bundle..."
 codesign --force --sign "${SIGNING_IDENTITY_HASH}" --options runtime --timestamp "${APP_PATH}"
 
 echo "Verifying signatures..."
+codesign --verify --strict --verbose=2 "${APP_PATH}/Contents/Helpers/proxypilot"
+codesign --verify --strict --verbose=2 "${APP_PATH}/Contents/Helpers/proxypilot-agent"
+codesign --verify --strict --verbose=2 "${REPOGPS_BINARY}"
 codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
 
 SIGN_FLAGS="$(codesign -dvv "${APP_PATH}" 2>&1 | grep 'flags=' || true)"
@@ -125,7 +174,7 @@ cp -R "${APP_PATH}" "${STAGING}/"
 ln -s /Applications "${STAGING}/Applications"
 
 hdiutil create \
-  -volname "ProxyPilot" \
+  -volname "${APP_DISPLAY_NAME}" \
   -srcfolder "${STAGING}" \
   -ov -format UDZO \
   "${DMG_PATH}" \
@@ -179,6 +228,11 @@ if [[ -n "${SPARKLE_SIGN}" ]]; then
   echo ""
   echo "Sparkle EdDSA signature (paste into appcast.xml <enclosure>):"
   "${SPARKLE_SIGN}" "${DMG_DIR}/${DMG_NAME}"
+  echo ""
+  echo "Authenticated CLI metadata (paste into proxypilot-versions.json):"
+  echo "  sha256_cli: $(shasum -a 256 "${APP_PATH}/Contents/Helpers/proxypilot" | awk '{print $1}')"
+  echo -n "  ed_signature_cli: "
+  "${SPARKLE_SIGN}" "${APP_PATH}/Contents/Helpers/proxypilot" | sed -nE 's/.*sparkle:edSignature="([^"]+)".*/\1/p'
   echo ""
 else
   echo ""

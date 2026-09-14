@@ -19,7 +19,6 @@ extension UpstreamProvider {
         case .miniMaxCN: return URL(string: "https://platform.minimaxi.com")
         case .qwen: return Self.qwenInternationalAPIKeyPageURL
         case .nineRouter: return URL(string: "https://9router.com")
-        case .githubCopilot: return URL(string: "https://github.com/features/copilot")
         case .ollama, .lmStudio: return nil
         }
     }
@@ -55,7 +54,7 @@ extension UpstreamProvider {
         case .miniMaxCN: return .minimaxCNAPIKey
         case .qwen: return .qwenAPIKey
         case .nineRouter: return .nineRouterAPIKey
-        case .githubCopilot, .ollama, .lmStudio: return nil
+        case .ollama, .lmStudio: return nil
         }
     }
 

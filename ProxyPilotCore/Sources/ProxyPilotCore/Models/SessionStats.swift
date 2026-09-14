@@ -65,6 +65,7 @@ public actor SessionStats {
         let event = SessionReportEvent(
             source: attribution?.client ?? sessionSource,
             sessionID: attribution?.sessionID ?? sessionID,
+            role: attribution?.role,
             record: record
         )
         try? SessionReportStore.append(event, to: sessionReportURL)

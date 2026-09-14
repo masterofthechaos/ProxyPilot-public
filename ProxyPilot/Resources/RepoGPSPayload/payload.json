@@ -1,26 +1,46 @@
 {
-  "behavior_pack_version" : "1",
+  "behavior_pack_version" : "2",
   "engine_version" : "1.18.4",
   "files" : [
     {
       "executable" : false,
       "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Info.plist",
-      "sha256" : "150c4a1c84f5b29fd6cc5262aa3b0e82827ca5908da6890ce60c0ddd3226e789"
+      "sha256" : "8468f39236036f095cf32d94c861b9d931e6f4e993e4d93b25821f1859ddc4c3"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/plugins\/bearings-server.js",
+      "sha256" : "c0b45e62d04520565d02f8190d84b6b2fc9eb62d3936d445bfea63739c5908d6"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/plugins\/bearings-tui.tsx",
+      "sha256" : "86dc3055e9ca014f24a94b4a4f76a7baf36179c0c4f307ea2cfe05218dd33490"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/plugins\/support\/continuity.mjs",
+      "sha256" : "9bf1061fe864679f74425c7c5932b7375fb31da28ac468ea51ef8020e76e7389"
     },
     {
       "executable" : false,
       "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/skills\/repogps-basecamp\/SKILL.md",
-      "sha256" : "1910a09b62b49d85a476d338d585c0494ee89914c9812bef9e5350825ab2e24f"
+      "sha256" : "9c4b5f434cf29221ff7a3e06f8f44e609a2616a1b98e91dffd568b9d286bbed9"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/skills\/repogps-navigator\/SKILL.md",
+      "sha256" : "7502dcc40ef48b21b0763528b82d97c1ce93c721758d7a69edfbc8f1b29cf090"
     },
     {
       "executable" : false,
       "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/skills\/repogps-resurface\/SKILL.md",
-      "sha256" : "64e5eb810a8bc6e27e233df48dc9c32f2287f57fa5134ab474d14a323b4437f6"
+      "sha256" : "795c2cd4911ba5719b3d376b168f81a0e1b0de2b51d41cf89cdb8e27c5a95a97"
     },
     {
       "executable" : false,
       "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/skills\/repogps-retrace\/SKILL.md",
-      "sha256" : "1397e95511df82582df7c2514662cc9143283b9cd9ca35db39ce5aba2da4198f"
+      "sha256" : "7dddab46e9775d32994fb803b1e7e936a6f59aa138e8b9fedbf540b39142345e"
     },
     {
       "executable" : false,
@@ -75,7 +95,7 @@
     {
       "executable" : true,
       "path" : "bin\/rgps",
-      "sha256" : "67f42856c77f8559a7bce6f5407d3a3f6f6bc30c847847b51bea64e56faca363"
+      "sha256" : "f7a232320b61db901dc582d44743627899c975c90603bdc026d1a4429b913dc2"
     }
   ],
   "minimum_proxypilot_capabilities" : {
@@ -84,8 +104,8 @@
     "route_control" : 1,
     "session_storage" : 1
   },
-  "payload_version" : "0.4.0",
-  "repogps_version" : "0.4.0",
+  "payload_version" : "0.5.0",
+  "repogps_version" : "0.5.0",
   "schema_version" : 1,
-  "source_release" : "1747010"
+  "source_release" : "606d0c615e625bff01c8f0f1201c89c43f142429"
 }

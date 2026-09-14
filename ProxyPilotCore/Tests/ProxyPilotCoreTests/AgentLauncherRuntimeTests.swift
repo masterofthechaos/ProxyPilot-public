@@ -79,6 +79,7 @@ import Testing
 
     let plan = try AgentAdapterLaunchPlan.make(
         settings: AgentLaunchSettings(port: 4555, modelID: "test-model"),
+        localProxyCredential: "pp_local_test-capability",
         layout: layout,
         inheritedEnvironment: [
             "PATH": "/attacker/bin",
@@ -92,7 +93,8 @@ import Testing
     #expect(plan.arguments == [layout.nodeExecutable.path, layout.adapterEntryPoint.path])
     #expect(plan.environment["PATH"] == "\(runtime.appendingPathComponent("bin").path):/usr/bin:/bin")
     #expect(plan.environment["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4555")
-    #expect(plan.environment["ANTHROPIC_AUTH_TOKEN"] == " ")
+    #expect(plan.environment["ANTHROPIC_AUTH_TOKEN"] == "pp_local_test-capability")
+    #expect(plan.environment["ANTHROPIC_AUTH_TOKEN"] != "real-secret")
     #expect(plan.environment["ANTHROPIC_MODEL"] == "test-model")
     #expect(plan.environment["CLAUDE_CONFIG_DIR"] == claudeConfig.path)
     #expect(plan.environment["TMPDIR"] == "/tmp/test")
@@ -109,6 +111,7 @@ import Testing
     #expect(throws: AgentAdapterLaunchError.nodeMissing(layout.nodeExecutable.path)) {
         try AgentAdapterLaunchPlan.make(
             settings: AgentLaunchSettings(),
+            localProxyCredential: "pp_local_test-capability",
             layout: layout,
             home: root
         )

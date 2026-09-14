@@ -236,7 +236,10 @@ final class LocalProxyServer: @unchecked Sendable {
         }
 
         var requiresAuthForProtectedRoutes: Bool {
-            requiresAuth
+            LocalProxyCredential.requiresAuthentication(
+                explicitlyRequired: requiresAuth,
+                upstreamAPIKey: upstreamAPIKey
+            )
         }
 
         var upstreamAPIBaseURL: String {
@@ -458,14 +461,31 @@ final class LocalProxyServer: @unchecked Sendable {
         let path = rawPath.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? rawPath
 
         var parsedHeaders: [String: String] = [:]
+        var headerFields: [LocalHTTPHeaderField] = []
         for line in lines.dropFirst() {
             if line.isEmpty { continue }
             guard let idx = line.firstIndex(of: ":") else { continue }
             let name = line[..<idx].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let value = line[line.index(after: idx)...].trimmingCharacters(in: .whitespacesAndNewlines)
             parsedHeaders[name] = value
+            headerFields.append(LocalHTTPHeaderField(name: name, value: value))
         }
         let headers = parsedHeaders
+
+        if let rejection = LocalRequestAdmissionPolicy.rejection(
+            method: method,
+            requestTarget: rawPath,
+            headers: headerFields,
+            listenerPort: config.port
+        ) {
+            respond(
+                connection: connection,
+                status: rejection.statusCode,
+                body: ProxyErrorResponse.openAI(message: rejection.message),
+                contentType: "application/json"
+            )
+            return
+        }
 
         let contentLength: Int
         switch LocalProxyServerHelpers.contentLengthOutcome(
@@ -706,7 +726,6 @@ final class LocalProxyServer: @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         applyPromptCacheMutation(path: config.upstreamProvider.chatCompletionsPath, model: requestModel, config: config, request: &request)
-        applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
         applyUpstreamAuth(config: config, request: &request)
         request.timeoutInterval = 60
 
@@ -719,19 +738,8 @@ final class LocalProxyServer: @unchecked Sendable {
                 provider: config.upstreamProvider
             )
             let text = String(decoding: normalized.data, as: UTF8.self)
-            let responseBody: String
-            let responseData: Data
-            if let entitlementMessage = LocalProxyServerHelpers.githubCopilotEntitlementMessage(
-                statusCode: normalized.statusCode,
-                body: text,
-                provider: config.upstreamProvider
-            ) {
-                responseBody = LocalProxyServerHelpers.openAIErrorJSON(message: entitlementMessage)
-                responseData = Data(responseBody.utf8)
-            } else {
-                responseBody = text
-                responseData = normalized.data
-            }
+            let responseBody = text
+            let responseData = normalized.data
 
             respond(connection: connection, status: normalized.statusCode, body: responseBody, contentType: "application/json")
             await recordInputOutputLog(
@@ -831,7 +839,6 @@ final class LocalProxyServer: @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         applyPromptCacheMutation(path: config.upstreamProvider.chatCompletionsPath, model: requestModel, config: config, request: &request)
-        applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
         applyUpstreamAuth(config: config, request: &request)
         request.timeoutInterval = 120
 
@@ -842,13 +849,6 @@ final class LocalProxyServer: @unchecked Sendable {
             if httpStatus != 200 {
                 var errorBody = ""
                 for try await line in bytes.lines { errorBody += line }
-                if let entitlementMessage = LocalProxyServerHelpers.githubCopilotEntitlementMessage(
-                    statusCode: httpStatus,
-                    body: errorBody,
-                    provider: config.upstreamProvider
-                ) {
-                    errorBody = LocalProxyServerHelpers.openAIErrorJSON(message: entitlementMessage)
-                }
                 respond(connection: connection, status: httpStatus, body: errorBody, contentType: "application/json")
                 await failTrackedRequest(id: trackingID)
                 return
@@ -1035,7 +1035,6 @@ final class LocalProxyServer: @unchecked Sendable {
             if isStreaming {
                 request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                 applyPromptCacheMutation(path: "/v1/messages", model: upstreamModel, config: config, request: &request)
-                applyProviderCompatibilityHeaders(config: config, path: "/v1/messages", request: &request)
                 applyUpstreamAuth(config: config, request: &request)
                 await handleAnthropicPassthroughStreaming(
                     request: request,
@@ -1051,7 +1050,6 @@ final class LocalProxyServer: @unchecked Sendable {
             } else {
                 request.setValue("application/json", forHTTPHeaderField: "Accept")
                 applyPromptCacheMutation(path: "/v1/messages", model: upstreamModel, config: config, request: &request)
-                applyProviderCompatibilityHeaders(config: config, path: "/v1/messages", request: &request)
                 applyUpstreamAuth(config: config, request: &request)
                 await handleAnthropicPassthroughBuffered(
                     request: request,
@@ -1122,7 +1120,6 @@ final class LocalProxyServer: @unchecked Sendable {
         if isStreaming {
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
             applyPromptCacheMutation(path: config.upstreamProvider.chatCompletionsPath, model: upstreamModel, config: config, request: &request)
-            applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
             applyUpstreamAuth(config: config, request: &request)
             switch config.anthropicTranslatorMode {
             case .hardened:
@@ -1154,7 +1151,6 @@ final class LocalProxyServer: @unchecked Sendable {
         } else {
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             applyPromptCacheMutation(path: config.upstreamProvider.chatCompletionsPath, model: upstreamModel, config: config, request: &request)
-            applyProviderCompatibilityHeaders(config: config, path: config.upstreamProvider.chatCompletionsPath, request: &request)
             applyUpstreamAuth(config: config, request: &request)
             await handleAnthropicBuffered(
                 request: request,
@@ -2162,19 +2158,6 @@ final class LocalProxyServer: @unchecked Sendable {
         request.httpBody = mutation.body
         for (name, value) in mutation.headers {
             request.setValue(value, forHTTPHeaderField: name)
-        }
-    }
-
-    private func applyProviderCompatibilityHeaders(config: Config, path: String, request: inout URLRequest) {
-        guard config.upstreamProvider == .githubCopilot else { return }
-
-        let userAgent = request.value(forHTTPHeaderField: "User-Agent") ?? ""
-        if path.contains("/messages") {
-            if !userAgent.hasPrefix("claude-cli/") {
-                request.setValue("claude-cli/2.1.14 (external, sdk-cli)", forHTTPHeaderField: "User-Agent")
-            }
-        } else if !userAgent.hasPrefix("Xcode/") {
-            request.setValue("Xcode/24577 CFNetwork/3860.300.31 Darwin/25.2.0", forHTTPHeaderField: "User-Agent")
         }
     }
 

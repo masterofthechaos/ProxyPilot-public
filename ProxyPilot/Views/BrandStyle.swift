@@ -5,7 +5,7 @@ enum SlicewriteStudioBrand {
     static let name = "Slicewrite Studio"
     static let attributionLeadIn = "a developer tool by "
     static let attributionText = attributionLeadIn + name
-    static let websiteURL = URL(string: "https://slicewrite.com/")!
+    static let websiteURL = URL(string: "https://slicewrite.dev")!
 }
 
 /// Hues sampled directly from the app icon's circuit trail (pink -> violet -> blue-violet).

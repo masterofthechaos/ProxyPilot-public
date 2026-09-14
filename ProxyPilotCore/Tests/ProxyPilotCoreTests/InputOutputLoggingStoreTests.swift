@@ -2,6 +2,54 @@ import XCTest
 @testable import ProxyPilotCore
 
 final class InputOutputLoggingStoreTests: XCTestCase {
+    func testRetentionCleanupRunsWhenCaptureIsCurrentlyDisabled() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let preferencesStore = InputOutputLoggingPreferencesStore(
+            url: directory.appendingPathComponent("settings.json")
+        )
+        try preferencesStore.save(InputOutputLoggingPreferences(
+            enabled: false,
+            recordInputs: false,
+            recordOutputs: false,
+            cliEnabled: false,
+            retention: .untilQuit,
+            externalStorageEnabled: false
+        ))
+
+        let key = Data(repeating: 0x41, count: 32)
+        let logStore = InputOutputLogStore(
+            url: InputOutputLogStore.resolvedURL(
+                preferences: try preferencesStore.load()
+            ),
+            encryptionKey: key
+        )
+        let untilQuit = InputOutputLogRecord(
+            timestamp: Date(timeIntervalSince1970: 1_714_000_000),
+            source: "gui",
+            path: "/v1/messages",
+            model: "test-model",
+            provider: "test-provider",
+            wasStreaming: false,
+            statusCode: 200,
+            retentionExpiresAt: nil,
+            deleteOnQuit: true,
+            input: .utf8("sensitive prompt"),
+            output: nil
+        )
+        try await logStore.append(untilQuit)
+
+        let cleanup = InputOutputLoggingRecorder.retentionCleanupRecorder(
+            source: "gui",
+            preferencesStore: preferencesStore,
+            encryptionKey: key
+        )
+        try await cleanup.pruneExpired(includeUntilQuit: true)
+
+        let remaining = try await logStore.readRecords()
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
     func testLogKeyProviderUsesOverriddenKeychainServiceName() {
         XCTAssertEqual(
             InputOutputLogKeyProvider.keychainServiceName(

@@ -81,7 +81,6 @@ final class AppViewModel: ObservableObject {
     static let visibleKeysProvidersDefaultsKey = "proxypilot.customization.visibleKeysProviders"
     static let didMigrateQwenVisibleProviderDefaultsKey = "proxypilot.customization.didMigrateQwenVisibleProvider"
     static let didMigrateNineRouterVisibleProviderDefaultsKey = "proxypilot.customization.didMigrateNineRouterVisibleProvider"
-    static let copilotSidecarExpandedDefaultsKey = "proxypilot.customization.copilotSidecarExpanded"
     // autoRestartEnabled defaults key: kept here for resetToFreshInstall cleanup
     private static let autoRestartEnabledDefaultsKey = "proxypilot.autoRestartEnabled"
     private static let requireLocalAuthDefaultsKey = "proxypilot.requireLocalAuth"
@@ -137,7 +136,6 @@ final class AppViewModel: ObservableObject {
     private let diagnosticsService: DiagnosticsService
     private let telemetryService: TelemetryService
     private let healthMonitor: HealthMonitor
-    private let copilotSidecarService: CopilotSidecarService
     private let xcodeAgentConfigStateProvider: (() -> Bool)?
     private let xcodeDetectionService = XcodeDetectionService()
     private let agentRuntimeManager: AgentRuntimeManager
@@ -382,34 +380,6 @@ final class AppViewModel: ObservableObject {
         objectWillChange.send()
     }
 
-    @Published var copilotSidecarStatusText: String = ""
-    @Published var copilotSidecarExecutablePath: String = ""
-    @Published var copilotSidecarSupportsLaunchAgent: Bool = false
-    @Published var isCopilotSidecarAgentInstalled: Bool = false
-    @Published var isCopilotSidecarEndpointResponding: Bool = false
-    @Published var isCopilotSidecarExternal: Bool = false
-    @Published var isCopilotSidecarDirectProcessRunning: Bool = false
-    @Published var isCopilotSidecarRunning: Bool = false
-    @Published var isCopilotSidecarManaged: Bool = false
-    @Published var isStartingCopilotSidecar: Bool = false
-    @Published var copilotSidecarLoginCommand: String = ""
-    @Published var copilotSidecarLoginDescription: String = ""
-    @Published var isCopilotSidecarGitHubAuthenticated: Bool = false
-    @Published var copilotSidecarGitHubAccount: String = ""
-    @Published var isTestingCopilotToolCall: Bool = false
-    @Published var copilotToolCallTestOutput: String = ""
-    @Published var copilotToolCallTestModelUsed: String = ""
-    @Published var copilotToolCallTestSucceeded: Bool?
-    @Published var isCopilotSidecarLogVisible: Bool = false
-    @Published var copilotSidecarLogText: String = ""
-    @Published var copilotSidecarLogStatusText: String = ""
-    @Published var copilotSidecarInstalledVersion: String = ""
-    @Published var copilotSidecarLatestVersion: String = ""
-    @Published var copilotSidecarUpdateAvailable: Bool = false
-    @Published var isCheckingCopilotSidecarUpdate: Bool = false
-    @Published var isUpdatingCopilotSidecar: Bool = false
-    @Published var copilotSidecarUpdateStatusText: String = ""
-
     @Published var launchAtLogin: Bool = false
     @Published private(set) var sessionHistorySessions: [SessionHistorySession] = []
     @Published private(set) var allTimeUsage: AllTimeUsage = .empty
@@ -546,7 +516,9 @@ final class AppViewModel: ObservableObject {
         return providerManager.hasUpstreamKey
     }
     var hasMasterKey: Bool { KeychainService.exists(key: .litellmMasterKey) }
-    var requiresMasterKey: Bool { !useBuiltInProxy || requireLocalAuth }
+    /// External proxy backends still need a user-supplied key. The built-in
+    /// server creates its own client capability when authentication is needed.
+    var requiresMasterKey: Bool { !useBuiltInProxy }
     var hasRequiredMasterKey: Bool { !requiresMasterKey || hasMasterKey }
 
     var isRunning: Bool {
@@ -854,7 +826,6 @@ final class AppViewModel: ObservableObject {
     }
 
     func resetKeysProvidersCustomization() {
-        copilotSidecarExpanded = true
         keysProviderOrder = KeysProviderViewItem.defaultOrder
         visibleKeysProviders = Set(KeysProviderViewItem.defaultOrder)
     }
@@ -946,7 +917,6 @@ final class AppViewModel: ObservableObject {
         proxyLifecycle.resetForFreshInstall()
 
         await stopProxy()
-        await stopCopilotSidecar()
         removeXcodeAgentConfig()
 
         for key in KeychainService.Key.allCases {
@@ -980,7 +950,6 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.visibleKeysProvidersDefaultsKey)
         defaults.removeObject(forKey: Self.didMigrateQwenVisibleProviderDefaultsKey)
         defaults.removeObject(forKey: Self.didMigrateNineRouterVisibleProviderDefaultsKey)
-        defaults.removeObject(forKey: Self.copilotSidecarExpandedDefaultsKey)
         defaults.removeObject(forKey: Self.autoRestartEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.requireLocalAuthDefaultsKey)
         defaults.removeObject(forKey: Self.runInBackgroundDefaultsKey)
@@ -1026,29 +995,6 @@ final class AppViewModel: ObservableObject {
         selectedUpstreamModels = []
         selectedXcodeAgentModel = providerManager.preferredXcodeAgentModel(from: savedDefaultModels, provider: upstreamProvider)
         providerManager.reconcileXcodeAgentModelSelection()
-        copilotSidecarStatusText = ""
-        copilotSidecarExecutablePath = ""
-        isCopilotSidecarRunning = false
-        isCopilotSidecarManaged = false
-        isStartingCopilotSidecar = false
-        copilotSidecarLoginCommand = ""
-        copilotSidecarLoginDescription = ""
-        isCopilotSidecarGitHubAuthenticated = false
-        copilotSidecarGitHubAccount = ""
-        isTestingCopilotToolCall = false
-        copilotToolCallTestOutput = ""
-        copilotToolCallTestModelUsed = ""
-        copilotToolCallTestSucceeded = nil
-        isCopilotSidecarLogVisible = false
-        copilotSidecarLogText = ""
-        copilotSidecarLogStatusText = ""
-        copilotSidecarInstalledVersion = ""
-        copilotSidecarLatestVersion = ""
-        copilotSidecarUpdateAvailable = false
-        isCheckingCopilotSidecarUpdate = false
-        isUpdatingCopilotSidecar = false
-        copilotSidecarUpdateStatusText = ""
-
         launchAtLogin = false
         anthropicTranslatorFallbackEnabled = false
         requireLocalAuth = false
@@ -1078,7 +1024,6 @@ final class AppViewModel: ObservableObject {
         defaultSettingsSection = .home
         keysProviderOrder = KeysProviderViewItem.defaultOrder
         visibleKeysProviders = Set(KeysProviderViewItem.defaultOrder)
-        copilotSidecarExpanded = true
         showKeychainAccessPrimer = false
         suppressKeychainAccessPrimer = false
         autoRestartEnabled = true
@@ -1180,224 +1125,6 @@ final class AppViewModel: ObservableObject {
         if case .failure = providerManager.providerKeyTestStates[provider] {
             trackProviderEndpointFailure(provider: provider, operation: .keyTest, issue: nil)
         }
-    }
-
-    func refreshCopilotSidecarStatus() async {
-        let status = await copilotSidecarService.status()
-        copilotSidecarExecutablePath = status.executablePath ?? ""
-        copilotSidecarSupportsLaunchAgent = status.supportsLaunchAgent
-        isCopilotSidecarAgentInstalled = status.isLaunchAgentInstalled
-        isCopilotSidecarEndpointResponding = status.endpointResponding
-        isCopilotSidecarExternal = status.isExternal
-        isCopilotSidecarDirectProcessRunning = status.isDirectProcessRunning
-        isCopilotSidecarRunning = status.isRunning
-        isCopilotSidecarManaged = status.isManaged
-        copilotSidecarStatusText = status.message
-        copilotSidecarLoginCommand = status.loginCommand ?? ""
-        copilotSidecarLoginDescription = status.loginCommandDescription
-        isCopilotSidecarGitHubAuthenticated = status.isGitHubAuthenticated
-        copilotSidecarGitHubAccount = status.githubAccount ?? ""
-    }
-
-    func startCopilotSidecar() async {
-        isStartingCopilotSidecar = true
-        defer { isStartingCopilotSidecar = false }
-        do {
-            try await copilotSidecarService.installOrStart()
-            upstreamProvider = .githubCopilot
-            upstreamAPIBaseURLString = UpstreamProvider.githubCopilot.defaultAPIBaseURL
-            await refreshCopilotSidecarStatus()
-        } catch {
-            copilotSidecarStatusText = error.localizedDescription
-            isCopilotSidecarAgentInstalled = false
-            isCopilotSidecarEndpointResponding = false
-            isCopilotSidecarExternal = false
-            isCopilotSidecarDirectProcessRunning = false
-            isCopilotSidecarRunning = false
-            isCopilotSidecarManaged = false
-        }
-    }
-
-    func stopCopilotSidecar() async {
-        do {
-            try await copilotSidecarService.uninstallOrStop()
-            await refreshCopilotSidecarStatus()
-            if !isCopilotSidecarAgentInstalled && !isCopilotSidecarEndpointResponding && !isCopilotSidecarDirectProcessRunning {
-                copilotSidecarStatusText = "Copilot helper stopped."
-            }
-        } catch {
-            copilotSidecarStatusText = error.localizedDescription
-        }
-    }
-
-    func openCopilotSidecarLog() {
-        let snapshot = copilotSidecarService.logSnapshot()
-        copilotSidecarLogText = snapshot.text
-        copilotSidecarLogStatusText = snapshot.summary
-        isCopilotSidecarLogVisible = true
-    }
-
-    func checkCopilotSidecarUpdate() async {
-        isCheckingCopilotSidecarUpdate = true
-        defer { isCheckingCopilotSidecarUpdate = false }
-
-        let status = await copilotSidecarService.checkForUpdate()
-        copilotSidecarInstalledVersion = status.installedVersion ?? ""
-        copilotSidecarLatestVersion = status.latestVersion ?? ""
-        copilotSidecarUpdateAvailable = status.updateAvailable
-
-        if status.installedVersion == nil {
-            copilotSidecarUpdateStatusText = "Install xcode-copilot-server to check its version."
-        } else if status.latestVersion == nil {
-            copilotSidecarUpdateStatusText = "Could not reach the npm registry to check for updates."
-        } else if status.updateAvailable {
-            copilotSidecarUpdateStatusText = "Update available: \(status.installedVersion ?? "?") → \(status.latestVersion ?? "?")."
-        } else {
-            copilotSidecarUpdateStatusText = "xcode-copilot-server is up to date (\(status.installedVersion ?? "?"))."
-        }
-    }
-
-    func updateCopilotSidecar() async {
-        isUpdatingCopilotSidecar = true
-        copilotSidecarUpdateStatusText = "Updating xcode-copilot-server..."
-        defer { isUpdatingCopilotSidecar = false }
-
-        do {
-            try await copilotSidecarService.updateToLatest()
-            await checkCopilotSidecarUpdate()
-            await refreshCopilotSidecarStatus()
-            copilotSidecarUpdateStatusText = "Updated to \(copilotSidecarInstalledVersion). Restart the helper to use it."
-        } catch {
-            copilotSidecarUpdateStatusText = "Update failed: \(error.localizedDescription) Try `npm install -g xcode-copilot-server@latest` manually in Terminal."
-        }
-    }
-
-    func openCopilotLoginTerminal() async {
-        guard !copilotSidecarLoginCommand.isEmpty else { return }
-        await copilotSidecarService.openLoginTerminal(command: copilotSidecarLoginCommand)
-    }
-
-    func openCopilotSidecarProject() {
-        if let url = URL(string: "https://github.com/theblixguy/xcode-copilot-server") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    func testCopilotToolCall() async {
-        clearIssue()
-        isTestingCopilotToolCall = true
-        copilotToolCallTestOutput = "Testing Copilot tool-call endpoint..."
-        copilotToolCallTestModelUsed = ""
-        copilotToolCallTestSucceeded = nil
-        defer { isTestingCopilotToolCall = false }
-
-        let apiBase: URL
-        if upstreamProvider == .githubCopilot {
-            do {
-                apiBase = try validatedUpstreamBaseURL()
-            } catch {
-                let issue = issueFor(
-                    error,
-                    fallbackCode: .invalidProxyURL,
-                    fallbackTitle: String(localized: "Invalid Copilot Sidecar URL"),
-                    fallbackActions: [.resetUpstreamURL]
-                )
-                copilotToolCallTestSucceeded = false
-                copilotToolCallTestOutput = "Tool-call test failed: \(issue.message)"
-                applyIssue(issue)
-                return
-            }
-        } else {
-            guard let defaultBase = URL(string: UpstreamProvider.githubCopilot.defaultAPIBaseURL) else {
-                let issue = AppIssue(
-                    code: .invalidProxyURL,
-                    title: String(localized: "Invalid Copilot Sidecar URL"),
-                    message: String(localized: "ProxyPilot's GitHub Copilot sidecar URL is invalid."),
-                    actions: [.exportDiagnostics]
-                )
-                copilotToolCallTestSucceeded = false
-                copilotToolCallTestOutput = "Tool-call test failed: \(issue.message)"
-                applyIssue(issue)
-                return
-            }
-            apiBase = defaultBase
-        }
-
-        var selectedModel = upstreamProvider == .githubCopilot ? effectiveXcodeAgentModel : ""
-        if selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            do {
-                let models = try await proxyService.fetchUpstreamModels(
-                    apiBase: apiBase,
-                    apiKey: "",
-                    provider: .githubCopilot
-                )
-                providerManager.applyFetchedUpstreamModels(models)
-                providerManager.reconcileXcodeAgentModelSelection()
-                selectedModel = effectiveXcodeAgentModel
-            } catch {
-                let issue = upstreamIssueFor(
-                    error,
-                    fallbackCode: .generic,
-                    fallbackTitle: String(localized: "Copilot Model Fetch Failed"),
-                    fallbackActions: [.resetUpstreamURL, .exportDiagnostics],
-                    provider: .githubCopilot,
-                    apiBase: apiBase,
-                    path: UpstreamProvider.githubCopilot.modelsPath,
-                    operation: .modelFetch
-                )
-                copilotToolCallTestSucceeded = false
-                copilotToolCallTestOutput = copilotToolCallFailureMessage(issue.message)
-                applyIssue(issue)
-                return
-            }
-        }
-
-        let model = selectedModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !model.isEmpty else {
-            let issue = AppIssue(
-                code: .generic,
-                title: String(localized: "No Copilot Models Available"),
-                message: String(localized: "ProxyPilot could not get a model list from the GitHub Copilot sidecar. Sign in, refresh models, then try the tool-call test again."),
-                actions: [.openCopilotLogin, .exportDiagnostics]
-            )
-            copilotToolCallTestSucceeded = false
-            copilotToolCallTestOutput = "Tool-call test failed: \(issue.message)"
-            applyIssue(issue)
-            return
-        }
-
-        do {
-            let result = try await proxyService.testGitHubCopilotToolCall(apiBase: apiBase, model: model)
-            copilotToolCallTestModelUsed = model
-            copilotToolCallTestSucceeded = result.sawToolCall
-            copilotToolCallTestOutput = result.summary
-            if result.sawToolCall {
-                trackSuccessfulEngagement("copilot_tool_test_succeeded")
-            }
-        } catch {
-            let issue = upstreamIssueFor(
-                error,
-                fallbackCode: .generic,
-                fallbackTitle: String(localized: "Copilot Tool-Call Test Failed"),
-                fallbackActions: [.resetUpstreamURL, .exportDiagnostics],
-                provider: .githubCopilot,
-                apiBase: apiBase,
-                path: UpstreamProvider.githubCopilot.chatCompletionsPath,
-                operation: .upstreamTest
-            )
-            copilotToolCallTestModelUsed = model
-            copilotToolCallTestSucceeded = false
-            copilotToolCallTestOutput = copilotToolCallFailureMessage(issue.message)
-            applyIssue(issue)
-        }
-    }
-
-    private func copilotToolCallFailureMessage(_ baseMessage: String) -> String {
-        var message = "Tool-call test failed: \(baseMessage)"
-        if upstreamProvider == .githubCopilot, let detail = copilotSidecarService.recentFailureDetail() {
-            message += "\n\nSidecar log: \(detail)"
-        }
-        return message
     }
 
     @Published var useBuiltInProxy: Bool = true {
@@ -1920,12 +1647,6 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    @Published var copilotSidecarExpanded: Bool = true {
-        didSet {
-            defaults.set(copilotSidecarExpanded, forKey: Self.copilotSidecarExpandedDefaultsKey)
-        }
-    }
-
     @Published var showKeychainAccessPrimer: Bool = false
     @Published var showAnalyticsPrompt: Bool = false
     @Published var showHarnessOnboarding: Bool = false
@@ -1998,14 +1719,14 @@ final class AppViewModel: ObservableObject {
         if requiresMasterKey {
             return String(localized: "Local Proxy Password (Master Key)")
         }
-        return String(localized: "Local Proxy Password (Optional in Built-In Mode)")
+        return String(localized: "Local Proxy Credential (Managed Automatically)")
     }
 
     var masterKeyChecklistTitle: String {
         if requiresMasterKey {
             return String(localized: "Local proxy password saved in Keychain")
         }
-        return String(localized: "Local proxy password (optional when local auth is off)")
+        return String(localized: "Automatic local proxy credential available in Keychain")
     }
 
     var xcodeAgentModelCandidates: [String] {
@@ -2279,12 +2000,18 @@ final class AppViewModel: ObservableObject {
     }
 
     var localProxyAuthStateText: String {
-        requireLocalAuth ? "Required" : "Disabled for local Xcode compatibility"
+        if requireLocalAuth {
+            return "Required for inference"
+        }
+        if hasUpstreamKey {
+            return "Automatic for credential-backed inference"
+        }
+        return "Off for credential-free local inference"
     }
 
     var localProxyWhoCanConnectText: String {
         if useBuiltInProxy {
-            return "Built-in mode accepts loopback clients only. LAN clients are rejected before request parsing."
+            return "Built-in mode accepts native loopback clients only. Browser-origin and LAN requests are rejected; cloud-backed inference also requires ProxyPilot's generated local credential."
         }
         if isLoopbackHost(validatedProxySummary.host) {
             return "Loopback URL: only apps on this Mac should connect."
@@ -2368,7 +2095,7 @@ final class AppViewModel: ObservableObject {
         \(xcodeAgentConfigSettingsURL.path)
 
         JSON keys written:
-        env.ANTHROPIC_AUTH_TOKEN = proxypilot
+        env.ANTHROPIC_AUTH_TOKEN = [generated local credential]
         env.ANTHROPIC_BASE_URL = \(proxyBase)
 
         Defaults write:
@@ -2383,10 +2110,6 @@ final class AppViewModel: ObservableObject {
 
     func localProviderStatusText(for provider: UpstreamProvider) -> String {
         switch provider {
-        case .githubCopilot:
-            if isCopilotSidecarEndpointResponding { return "Responding on \(provider.defaultAPIBaseURL)" }
-            if isCopilotSidecarAgentInstalled { return "Background helper installed; refresh or start to confirm endpoint response." }
-            return "Helper not confirmed running."
         case .nineRouter, .ollama, .lmStudio:
             guard let base = URL(string: provider.defaultAPIBaseURL) else {
                 return "Default URL could not be parsed."
@@ -2409,8 +2132,6 @@ final class AppViewModel: ObservableObject {
             return "Open LM Studio, load a model, and start the Local Server with OpenAI-compatible mode enabled."
         case .nineRouter:
             return "Start 9Router, configure its dashboard providers, then use its local OpenAI-compatible endpoint."
-        case .githubCopilot:
-            return "Install or start the Copilot helper above; ProxyPilot uses your existing GitHub Copilot account."
         default:
             return ""
         }
@@ -2913,7 +2634,6 @@ final class AppViewModel: ObservableObject {
         diagnosticsService: DiagnosticsService = DiagnosticsService(),
         telemetryService: TelemetryService = .shared,
         healthMonitor: HealthMonitor = HealthMonitor(),
-        copilotSidecarService: CopilotSidecarService = CopilotSidecarService(),
         xcodeAgentConfigStateProvider: (() -> Bool)? = nil,
         cliExecutableResolver: CLIExecutableResolver? = nil,
         cliUpdateRunner: CLIUpdateRunner? = nil,
@@ -2934,7 +2654,6 @@ final class AppViewModel: ObservableObject {
         self.diagnosticsService = diagnosticsService
         self.telemetryService = telemetryService
         self.healthMonitor = healthMonitor
-        self.copilotSidecarService = copilotSidecarService
         self.xcodeAgentConfigStateProvider = xcodeAgentConfigStateProvider
         self.cliExecutableResolver = cliExecutableResolver
         self.cliUpdateRunner = cliUpdateRunner
@@ -3017,7 +2736,6 @@ final class AppViewModel: ObservableObject {
             from: defaults,
             storedOrderRawValues: storedKeysProviderOrderRawValues
         )
-        copilotSidecarExpanded = defaults.object(forKey: Self.copilotSidecarExpandedDefaultsKey) as? Bool ?? true
         suppressKeychainAccessPrimer = defaults.bool(forKey: Self.suppressKeychainPrimerDefaultsKey)
         requireLocalAuth = defaults.bool(forKey: Self.requireLocalAuthDefaultsKey)
 
@@ -3140,22 +2858,17 @@ final class AppViewModel: ObservableObject {
         applyBackgroundActivationPolicy()
     }
 
-    func applicationWillTerminate() {
+    func applicationWillTerminate() async {
         telemetryService.endSession()
         stopLogUpdates()
-        pruneInputOutputLogsForQuit()
+        await pruneInputOutputLogsForQuit()
     }
 
-    private func pruneInputOutputLogsForQuit() {
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            defer { semaphore.signal() }
-            guard let recorder = try? InputOutputLoggingRecorder.productionIfConfigured(source: "gui") else {
-                return
-            }
-            try? await recorder.pruneExpired(includeUntilQuit: true)
+    private func pruneInputOutputLogsForQuit() async {
+        guard let recorder = try? InputOutputLoggingRecorder.productionIfKeyExists(source: "gui") else {
+            return
         }
-        _ = semaphore.wait(timeout: .now() + 2)
+        try? await recorder.pruneExpired(includeUntilQuit: true)
     }
 
     func shouldPromptBeforeQuit() -> Bool {
@@ -3550,8 +3263,6 @@ final class AppViewModel: ObservableObject {
             Task { await startProxy() }
         case .exportDiagnostics:
             exportDiagnostics()
-        case .openCopilotLogin:
-            Task { await openCopilotLoginTerminal() }
         case .openReadme:
             openReadme()
         case .openWebsite:
@@ -3570,8 +3281,6 @@ final class AppViewModel: ObservableObject {
             performIssueAction(.openMasterKeyEditor)
         case .openUpstreamKeyEditor:
             performIssueAction(.openUpstreamKeyEditor)
-        case .openCopilotLogin:
-            Task { await openCopilotLoginTerminal() }
         case .resetProxyURL:
             performIssueAction(.resetProxyURL)
         case .resetUpstreamURL:
@@ -3594,9 +3303,7 @@ final class AppViewModel: ObservableObject {
             upstreamAPIBaseURLString: upstreamAPIBaseURLString,
             fallbackUpstreamBaseURLString: selectedUpstreamProviderDefaultAPIBaseURL,
             hasMasterKey: hasMasterKey,
-            hasUpstreamKey: hasUpstreamKey,
-            isCopilotSidecarInstalled: !copilotSidecarExecutablePath.isEmpty,
-            isCopilotGitHubAuthenticated: isCopilotSidecarGitHubAuthenticated
+            hasUpstreamKey: hasUpstreamKey
         )
 
         let checks = preflightService.run(context: context)
@@ -3732,7 +3439,11 @@ final class AppViewModel: ObservableObject {
         modelsJSON = ""
 
         let masterKey: String?
-        if requiresMasterKey {
+        if useBuiltInProxy {
+            masterKey = try? LocalProxyCredential.resolveOrCreate(
+                using: SecretsProviderFactory.make()
+            )
+        } else if requiresMasterKey {
             guard let saved = KeychainService.get(key: .litellmMasterKey)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
                 !saved.isEmpty else {
@@ -3784,7 +3495,11 @@ final class AppViewModel: ObservableObject {
         }
 
         let masterKey: String?
-        if requiresMasterKey {
+        if useBuiltInProxy {
+            masterKey = try? LocalProxyCredential.resolveOrCreate(
+                using: SecretsProviderFactory.make()
+            )
+        } else if requiresMasterKey {
             masterKey = KeychainService.get(key: .litellmMasterKey)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         } else {
@@ -4513,7 +4228,7 @@ final class AppViewModel: ObservableObject {
     private func pendingProxyModelIDs() -> [String] {
         let provider = selectedUpstreamProviderForNetworking
         var ids: Set<String> = []
-        ids.formUnion(provider == .githubCopilot ? proxySyncModelCandidates : Array(selectedUpstreamModels))
+        ids.formUnion(selectedUpstreamModels)
         ids.formUnion(upstreamModels.map(\.id))
         ids.formUnion(savedDefaultModels)
         if let fallback = provider.fallbackModelIDs {
@@ -4555,19 +4270,25 @@ final class AppViewModel: ObservableObject {
         }
 
         let upstreamKey = selectedUpstreamAPIKey()
+        let protectedRoutesRequireAuth = LocalProxyCredential.requiresAuthentication(
+            explicitlyRequired: requireLocalAuth,
+            upstreamAPIKey: upstreamKey
+        )
         let masterKey: String
-        if requireLocalAuth {
-            guard let configuredMasterKey = KeychainService.get(key: .litellmMasterKey)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-                !configuredMasterKey.isEmpty else {
+        if protectedRoutesRequireAuth {
+            do {
+                masterKey = try LocalProxyCredential.resolveOrCreate(
+                    using: SecretsProviderFactory.make()
+                )
+                try synchronizeManagedXcodeAgentCredentialIfInstalled(masterKey)
+            } catch {
                 throw IssueError(issue: AppIssue(
                     code: .missingMasterKey,
-                    title: String(localized: "Local Proxy Password Missing"),
-                    message: String(localized: "Set Local Proxy Password in Keys (Keychain), then start the proxy again."),
-                    actions: [.openMasterKeyEditor]
+                    title: String(localized: "Local Proxy Credential Unavailable"),
+                    message: String(localized: "ProxyPilot could not create or load the local client credential needed to protect your upstream account."),
+                    actions: [.openMasterKeyEditor, .exportDiagnostics]
                 ))
             }
-            masterKey = configuredMasterKey
         } else {
             masterKey = "proxypilot-local-noauth"
         }
@@ -4575,7 +4296,6 @@ final class AppViewModel: ObservableObject {
         let hasFetchedModels = !upstreamModels.isEmpty
         let allowedModels: Set<String> = {
             if hasActiveCustomProvider { return selectedUpstreamModels.union(savedDefaultModels) }
-            if provider == .githubCopilot { return Set(proxySyncModelCandidates) }
             if !selectedUpstreamModels.isEmpty {
                 let visibleIDs = Set(providerManager.modelSelectionRows.map(\.id))
                 return selectedUpstreamModels.intersection(visibleIDs)
@@ -4620,7 +4340,7 @@ final class AppViewModel: ObservableObject {
             upstreamAPIKey: upstreamKey,
             allowedModels: allowedModels,
             denyRequestsWhenAllowlistEmpty: true,
-            requiresAuth: requireLocalAuth,
+            requiresAuth: protectedRoutesRequireAuth,
             anthropicTranslatorMode: anthropicTranslatorFallbackEnabled ? .legacyFallback : .hardened,
             miniMaxRoutingMode: providerManager.miniMaxRoutingMode,
             preferredAnthropicUpstreamModel: preferredModel.isEmpty
@@ -4958,19 +4678,6 @@ final class AppViewModel: ObservableObject {
 
         if let serviceError = error as? ProxyServiceError,
            case .httpStatus(let status, let body) = serviceError {
-            if let entitlementMessage = LocalProxyServerHelpers.githubCopilotEntitlementMessage(
-                statusCode: status,
-                body: body,
-                provider: provider
-            ) {
-                return AppIssue(
-                    code: .upstreamUnauthorized,
-                    title: String(localized: "GitHub Copilot Access Required"),
-                    message: entitlementMessage,
-                    actions: [.exportDiagnostics, .openReadme]
-                )
-            }
-
             return AppIssue(
                 code: fallbackCode,
                 title: fallbackTitle,
@@ -4999,8 +4706,6 @@ final class AppViewModel: ObservableObject {
             return String(localized: "Start LM Studio's local server or change the base URL.")
         case .ollama:
             return String(localized: "Start Ollama with ollama serve, check the base URL, or pull a model locally.")
-        case .githubCopilot:
-            return String(localized: "Sign in with the Copilot or GitHub CLI, confirm the account has Copilot access, then start or reinstall the helper.")
         case .nineRouter:
             return String(localized: "Start 9Router, confirm its dashboard is configured, or change the base URL.")
         default:
@@ -5312,9 +5017,12 @@ final class AppViewModel: ObservableObject {
 
     var diyInstallCommands: String {
         let proxyBase = proxyURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let localCredential = (try? LocalProxyCredential.resolveOrCreate(
+            using: SecretsProviderFactory.make()
+        )) ?? "LOCAL_CREDENTIAL_UNAVAILABLE"
         let settingsObject: [String: Any] = [
             "env": [
-                "ANTHROPIC_AUTH_TOKEN": "proxypilot",
+                "ANTHROPIC_AUTH_TOKEN": localCredential,
                 "ANTHROPIC_BASE_URL": proxyBase
             ]
         ]
@@ -5342,16 +5050,24 @@ final class AppViewModel: ObservableObject {
             try FileManager.default.createDirectory(at: xcodeAgentConfigDirectoryURL, withIntermediateDirectories: true)
 
             let proxyBase = proxyURLString.trimmingCharacters(in: .whitespacesAndNewlines)
-            let settingsContent = """
-            {
-              "env": {
-                "ANTHROPIC_AUTH_TOKEN": "proxypilot",
-                "ANTHROPIC_BASE_URL": "\(proxyBase)"
-              }
-            }
-            """
-
-            try settingsContent.write(to: xcodeAgentConfigSettingsURL, atomically: true, encoding: .utf8)
+            let localCredential = try LocalProxyCredential.resolveOrCreate(
+                using: SecretsProviderFactory.make()
+            )
+            let settingsObject: [String: Any] = [
+                "env": [
+                    "ANTHROPIC_AUTH_TOKEN": localCredential,
+                    "ANTHROPIC_BASE_URL": proxyBase
+                ]
+            ]
+            let settingsData = try JSONSerialization.data(
+                withJSONObject: settingsObject,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+            try settingsData.write(to: xcodeAgentConfigSettingsURL, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: xcodeAgentConfigSettingsURL.path
+            )
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
@@ -5369,6 +5085,26 @@ final class AppViewModel: ObservableObject {
                 actions: [.exportDiagnostics]
             ))
         }
+    }
+
+    /// Refreshes only ProxyPilot's managed auth value and preserves any unknown
+    /// keys a newer Xcode or user customization added to the settings object.
+    private func synchronizeManagedXcodeAgentCredentialIfInstalled(_ credential: String) throws {
+        guard FileManager.default.fileExists(atPath: xcodeAgentConfigSettingsURL.path) else {
+            return
+        }
+        let data = try Data(contentsOf: xcodeAgentConfigSettingsURL)
+        guard let updated = try LocalProxyCredential.updatingManagedXcodeSettings(
+            data,
+            credential: credential
+        ) else {
+            return
+        }
+        try updated.write(to: xcodeAgentConfigSettingsURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: xcodeAgentConfigSettingsURL.path
+        )
     }
 
     func removeXcodeAgentConfig() {

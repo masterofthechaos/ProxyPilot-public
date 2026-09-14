@@ -277,6 +277,7 @@ public struct AgentAdapterLaunchPlan: Equatable, Sendable {
 
     public static func make(
         settings: AgentLaunchSettings,
+        localProxyCredential: String,
         layout: ManagedAgentRuntimeLayout = .standard(),
         inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
@@ -301,7 +302,7 @@ public struct AgentAdapterLaunchPlan: Equatable, Sendable {
             "PATH": "\(layout.root.appendingPathComponent("bin").path):/usr/bin:/bin",
             "HOME": home.path,
             "ANTHROPIC_BASE_URL": "http://127.0.0.1:\(settings.port)",
-            "ANTHROPIC_AUTH_TOKEN": " ",
+            "ANTHROPIC_AUTH_TOKEN": localProxyCredential,
             "CLAUDE_CONFIG_DIR": layout.claudeConfigDirectory.path,
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         ]

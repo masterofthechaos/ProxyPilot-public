@@ -55,13 +55,13 @@ See `ProxyPilotCLI/README.md` for full CLI documentation.
 
 ## Xcode Setup
 
-1. In ProxyPilot, set your upstream provider and API key, then click **Start**
-2. In Xcode -> Settings -> Intelligence -> Add a Model Provider:
-   - Choose **Locally Hosted**
-   - Port: `4000`
-   - Description: any label (e.g. `ProxyPilot`)
+1. In ProxyPilot, choose your provider and add its API key if needed, then click **Start**.
+2. For a cloud provider, use ProxyPilot Agent or the credentialed **Internet Hosted** fields shown in ProxyPilot. A separate local credential is generated and managed automatically.
+3. For Ollama, LM Studio, or another credential-free local provider, choose **Locally Hosted** in Xcode and use port `4000`.
 
-Xcode validates by calling `GET /v1/models` on the local proxy.
+Model discovery remains available on loopback; cloud-backed inference requires the local credential. Browser-origin inference requests are rejected.
+
+The experimental GitHub Copilot integration was removed in v1.15.1. Independently installed helpers are left untouched.
 
 ## Features
 
@@ -71,7 +71,7 @@ Xcode validates by calling `GET /v1/models` on the local proxy.
 - **Watchdog auto-recovery** -- detects unexpected stops and retries startup with backoff
 - **Auto-start on login** -- register via SMAppService (toggle in Settings)
 - **SSE streaming** -- full `stream: true` support for `/v1/chat/completions`
-- **Multi-provider** -- 16 upstream providers including direct Google Gemini support
+- **Multi-provider** -- 15 upstream providers including direct Google Gemini support
 - **Anthropic API translation** -- `POST /v1/messages` translated to OpenAI format, supports both buffered and streaming responses
 - **Xcode Agent config** -- one-click install for Claude Agent in Xcode routing through ProxyPilot
 - **Safety limits** -- request/concurrency caps with explicit `413`/`429` responses
@@ -93,7 +93,6 @@ Xcode validates by calling `GET /v1/models` on the local proxy.
 | MiniMax CN | Cloud | Yes |
 | Qwen | Cloud | Yes |
 | 9Router | Local helper | No |
-| GitHub Copilot | Local helper | No |
 | Ollama | Local | No |
 | LM Studio | Local | No |
 

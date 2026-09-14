@@ -303,7 +303,7 @@ final class AppViewModelTests: XCTestCase {
         }
     }
 
-    func testBuiltInProxyConfigDoesNotRequireMasterKeyForStoredUpstreamKeyWhenAuthDisabled() throws {
+    func testBuiltInProxyConfigAutomaticallyProtectsStoredUpstreamKey() throws {
         try KeychainService.set("sk-test", forKey: .zaiAPIKey)
         let vm = AppViewModel(defaults: defaults)
         vm.requireLocalAuth = false
@@ -311,12 +311,13 @@ final class AppViewModelTests: XCTestCase {
         let config = try vm.buildBuiltInProxyConfig()
 
         XCTAssertEqual(config.upstreamAPIKey, "sk-test")
-        XCTAssertFalse(config.requiresAuth)
-        XCTAssertFalse(config.requiresAuthForProtectedRoutes)
-        XCTAssertEqual(config.masterKey, "proxypilot-local-noauth")
+        XCTAssertTrue(config.requiresAuth)
+        XCTAssertTrue(config.requiresAuthForProtectedRoutes)
+        XCTAssertTrue(config.masterKey.hasPrefix(LocalProxyCredential.generatedPrefix))
+        XCTAssertEqual(KeychainService.get(key: .litellmMasterKey), config.masterKey)
     }
 
-    func testBuiltInProxyConfigKeepsAuthDisabledWhenUnusedMasterKeyExists() throws {
+    func testBuiltInProxyConfigUsesExistingLocalCredentialForStoredUpstreamKey() throws {
         try KeychainService.set("sk-test", forKey: .zaiAPIKey)
         try KeychainService.set("local-secret", forKey: .litellmMasterKey)
         let vm = AppViewModel(defaults: defaults)
@@ -325,21 +326,21 @@ final class AppViewModelTests: XCTestCase {
         let config = try vm.buildBuiltInProxyConfig()
 
         XCTAssertEqual(config.upstreamAPIKey, "sk-test")
-        XCTAssertFalse(config.requiresAuth)
-        XCTAssertEqual(config.masterKey, "proxypilot-local-noauth")
-        XCTAssertFalse(config.requiresAuthForProtectedRoutes)
+        XCTAssertTrue(config.requiresAuth)
+        XCTAssertEqual(config.masterKey, "local-secret")
+        XCTAssertTrue(config.requiresAuthForProtectedRoutes)
         XCTAssertTrue(config.denyRequestsWhenAllowlistEmpty)
     }
 
-    func testBuiltInProxyConfigRequiresMasterKeyWhenLocalAuthEnabled() throws {
+    func testBuiltInProxyConfigGeneratesCredentialWhenLocalAuthEnabled() throws {
         try KeychainService.set("sk-test", forKey: .zaiAPIKey)
         let vm = AppViewModel(defaults: defaults)
         vm.requireLocalAuth = true
 
-        XCTAssertThrowsError(try vm.buildBuiltInProxyConfig()) { error in
-            let issue = (error as? AppIssueError)?.issue
-            XCTAssertEqual(issue?.code, .missingMasterKey)
-        }
+        let config = try vm.buildBuiltInProxyConfig()
+
+        XCTAssertTrue(config.requiresAuthForProtectedRoutes)
+        XCTAssertTrue(config.masterKey.hasPrefix(LocalProxyCredential.generatedPrefix))
     }
 
     func testBuiltInProxyConfigDoesNotAllowAllFetchedModelsWhenSelectionIsEmpty() throws {
@@ -539,7 +540,6 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.defaultSettingsSection, .home)
         XCTAssertEqual(vm.keysProviderOrder, KeysProviderViewItem.defaultOrder)
         XCTAssertEqual(vm.visibleKeysProviders, Set(KeysProviderViewItem.defaultOrder))
-        XCTAssertTrue(vm.copilotSidecarExpanded)
     }
 
     func testRunInBackgroundDefaultsToFalse() {
@@ -621,9 +621,8 @@ final class AppViewModelTests: XCTestCase {
         vm?.visibleMenuBarSections = [.statusDetails, .quickActions]
         vm?.visibleHomeDashboardSections = [.sessionSummary, .sessionReportCard]
         vm?.defaultSettingsSection = .customization
-        vm?.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen, .nineRouter, .ollama, .lmStudio]
-        vm?.visibleKeysProviders = [.openAI, .githubCopilot]
-        vm?.copilotSidecarExpanded = false
+        vm?.keysProviderOrder = [.openAI, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen, .nineRouter, .ollama, .lmStudio]
+        vm?.visibleKeysProviders = [.openAI, .zAI]
         vm = nil
 
         let relaunched = AppViewModel(defaults: defaults)
@@ -641,9 +640,8 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(relaunched.visibleHomeDashboardSections, [.sessionSummary, .sessionReportCard])
         XCTAssertEqual(relaunched.defaultSettingsSection, .customization)
         XCTAssertEqual(relaunched.keysProviderOrder.first, .openAI)
-        XCTAssertEqual(relaunched.keysProviderOrder.dropFirst().first, .githubCopilot)
-        XCTAssertEqual(relaunched.visibleKeysProviders, [.openAI, .githubCopilot])
-        XCTAssertFalse(relaunched.copilotSidecarExpanded)
+        XCTAssertEqual(relaunched.keysProviderOrder.dropFirst().first, .zAI)
+        XCTAssertEqual(relaunched.visibleKeysProviders, [.openAI, .zAI])
     }
 
     func testCustomizationResetRestoresDefaults() async {
@@ -655,9 +653,8 @@ final class AppViewModelTests: XCTestCase {
         vm.visibleMenuBarSections = [.statusDetails, .quickActions]
         vm.visibleHomeDashboardSections = [.sessionSummary]
         vm.defaultSettingsSection = .customization
-        vm.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen, .nineRouter, .ollama, .lmStudio]
+        vm.keysProviderOrder = [.openAI, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen, .nineRouter, .ollama, .lmStudio]
         vm.visibleKeysProviders = [.openAI]
-        vm.copilotSidecarExpanded = false
 
         await vm.resetToFreshInstall()
 
@@ -670,7 +667,6 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.defaultSettingsSection, .home)
         XCTAssertEqual(vm.keysProviderOrder, KeysProviderViewItem.defaultOrder)
         XCTAssertEqual(vm.visibleKeysProviders, Set(KeysProviderViewItem.defaultOrder))
-        XCTAssertTrue(vm.copilotSidecarExpanded)
     }
 
     /// The real upgrade path: preferences written by a build that predates
@@ -761,7 +757,7 @@ final class AppViewModelTests: XCTestCase {
                 KeysProviderViewItem.openAI.rawValue,
                 "unknown",
                 KeysProviderViewItem.openAI.rawValue,
-                KeysProviderViewItem.githubCopilot.rawValue
+                "github-copilot"
             ],
             forKey: AppViewModel.keysProviderOrderDefaultsKey
         )
@@ -776,7 +772,8 @@ final class AppViewModelTests: XCTestCase {
 
         let vm = AppViewModel(defaults: defaults)
 
-        XCTAssertEqual(vm.keysProviderOrder.prefix(2), [.openAI, .githubCopilot])
+        XCTAssertEqual(vm.keysProviderOrder.first, .openAI)
+        XCTAssertFalse(vm.keysProviderOrder.map(\.rawValue).contains("github-copilot"))
         XCTAssertEqual(vm.keysProviderOrder.count, KeysProviderViewItem.defaultOrder.count)
         XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .qwen, .nineRouter])
     }
@@ -785,7 +782,7 @@ final class AppViewModelTests: XCTestCase {
         defaults.set(
             [
                 KeysProviderViewItem.openAI.rawValue,
-                KeysProviderViewItem.githubCopilot.rawValue,
+                "github-copilot",
                 KeysProviderViewItem.zAI.rawValue
             ],
             forKey: AppViewModel.keysProviderOrderDefaultsKey
@@ -827,7 +824,7 @@ final class AppViewModelTests: XCTestCase {
         defaults.set(
             [
                 KeysProviderViewItem.openAI.rawValue,
-                KeysProviderViewItem.githubCopilot.rawValue,
+                "github-copilot",
                 KeysProviderViewItem.qwen.rawValue
             ],
             forKey: AppViewModel.keysProviderOrderDefaultsKey
@@ -845,7 +842,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.keysProviderOrder.contains(.nineRouter))
         XCTAssertTrue(vm.visibleKeysProviders.contains(.nineRouter))
         XCTAssertTrue(vm.visibleKeysProviders.contains(.openAI))
-        XCTAssertFalse(vm.visibleKeysProviders.contains(.githubCopilot))
+        XCTAssertFalse(vm.visibleKeysProviders.map(\.rawValue).contains("github-copilot"))
         XCTAssertTrue(defaults.bool(forKey: AppViewModel.didMigrateNineRouterVisibleProviderDefaultsKey))
     }
 
@@ -869,7 +866,7 @@ final class AppViewModelTests: XCTestCase {
             [
                 KeysProviderViewItem.openAI.rawValue,
                 KeysProviderViewItem.qwen.rawValue,
-                KeysProviderViewItem.githubCopilot.rawValue
+                "github-copilot"
             ],
             forKey: AppViewModel.keysProviderOrderDefaultsKey
         )
@@ -959,23 +956,6 @@ final class AppViewModelTests: XCTestCase {
         )
     }
 
-    func testKeysProviderCustomizationCanHideAndResetCopilotSidecar() {
-        let vm = AppViewModel(defaults: defaults)
-
-        XCTAssertTrue(vm.isKeysProviderVisible(.githubCopilot))
-        vm.setKeysProvider(.githubCopilot, isVisible: false)
-        vm.copilotSidecarExpanded = false
-
-        XCTAssertFalse(vm.isKeysProviderVisible(.githubCopilot))
-
-        vm.resetKeysProvidersCustomization()
-
-        XCTAssertTrue(vm.isKeysProviderVisible(.githubCopilot))
-        XCTAssertEqual(vm.keysProviderOrder, KeysProviderViewItem.defaultOrder)
-        XCTAssertEqual(vm.visibleKeysProviders, Set(KeysProviderViewItem.defaultOrder))
-        XCTAssertTrue(vm.copilotSidecarExpanded)
-    }
-
     func testResetAllViewCustomizationsRestoresViewDefaultsWithoutNuclearReset() {
         let vm = AppViewModel(defaults: defaults)
         vm.appearancePreference = .dark
@@ -987,9 +967,8 @@ final class AppViewModelTests: XCTestCase {
         vm.visibleMenuBarSections = [.statusDetails]
         vm.visibleHomeDashboardSections = [.sessionSummary]
         vm.defaultSettingsSection = .customization
-        vm.keysProviderOrder = [.openAI, .githubCopilot, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen, .nineRouter, .ollama, .lmStudio]
+        vm.keysProviderOrder = [.openAI, .zAI, .openRouter, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen, .nineRouter, .ollama, .lmStudio]
         vm.visibleKeysProviders = [.openAI]
-        vm.copilotSidecarExpanded = false
 
         vm.resetAllViewCustomizations()
 
@@ -1004,7 +983,6 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.defaultSettingsSection, .home)
         XCTAssertEqual(vm.keysProviderOrder, KeysProviderViewItem.defaultOrder)
         XCTAssertEqual(vm.visibleKeysProviders, Set(KeysProviderViewItem.defaultOrder))
-        XCTAssertTrue(vm.copilotSidecarExpanded)
     }
 
     func testLocalProviderFetchFailureDoesNotOfferAPIKeyAction() async {
@@ -1233,7 +1211,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(vm.isStoppingCLIProxy)
     }
 
-    func testPreflightMasterKeyOptionalWhenUpstreamCredentialStoredAndBuiltInAuthDisabled() {
+    func testPreflightUsesAutomaticCredentialWhenUpstreamCredentialStored() {
         let preflight = PreflightService()
         let context = PreflightContext(
             proxyURLString: "http://127.0.0.1:4000",
@@ -1253,7 +1231,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(masterKeyCheck?.fixAction, PreflightFixAction.none)
         XCTAssertEqual(
             masterKeyCheck?.detail,
-            "Optional in built-in mode when local auth is disabled. No action required."
+            "ProxyPilot will create an automatic local client credential when the proxy starts."
         )
     }
 
@@ -1301,52 +1279,6 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(keyCheck?.fixAction, PreflightFixAction.none)
         XCTAssertEqual(reachability?.status, .warning)
         XCTAssertTrue(reachability?.detail.contains("9Router is not listening") == true)
-    }
-
-    func testPreflightWarnsWhenCopilotSidecarInstalledButGitHubAuthMissing() {
-        let preflight = PreflightService()
-        let context = PreflightContext(
-            proxyURLString: "http://127.0.0.1:4000",
-            useBuiltInProxy: true,
-            requireLocalAuth: false,
-            upstreamProvider: .githubCopilot,
-            upstreamAPIBaseURLString: "http://127.0.0.1:8080/v1",
-            fallbackUpstreamBaseURLString: "http://127.0.0.1:8080/v1",
-            hasMasterKey: false,
-            hasUpstreamKey: false,
-            isCopilotSidecarInstalled: true,
-            isCopilotGitHubAuthenticated: false
-        )
-
-        let results = preflight.run(context: context)
-        let copilotAuth = results.first { $0.id == "copilot_auth" }
-
-        XCTAssertEqual(copilotAuth?.status, .warning)
-        XCTAssertEqual(copilotAuth?.fixAction, PreflightFixAction.openCopilotLogin)
-        XCTAssertTrue(copilotAuth?.detail.contains("Sign in") == true)
-    }
-
-    func testPreflightShowsConfirmedCopilotSignInOnProviderKeyRowWhenReady() {
-        let preflight = PreflightService()
-        let context = PreflightContext(
-            proxyURLString: "http://127.0.0.1:4000",
-            useBuiltInProxy: true,
-            requireLocalAuth: false,
-            upstreamProvider: .githubCopilot,
-            upstreamAPIBaseURLString: "http://127.0.0.1:8080/v1",
-            fallbackUpstreamBaseURLString: "http://127.0.0.1:8080/v1",
-            hasMasterKey: false,
-            hasUpstreamKey: false,
-            isCopilotSidecarInstalled: true,
-            isCopilotGitHubAuthenticated: true
-        )
-
-        let results = preflight.run(context: context)
-        let keyCheck = results.first { $0.id == "upstream_key" }
-
-        XCTAssertEqual(keyCheck?.status, .confirmed)
-        XCTAssertEqual(keyCheck?.fixAction, PreflightFixAction.none)
-        XCTAssertTrue(keyCheck?.detail.contains("(GitHub sign-in detected.)") == true)
     }
 
     // MARK: - Saved Default Models
@@ -1456,18 +1388,6 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(manager.isModelSelected("llama3:8b"))
         XCTAssertTrue(manager.isModelSelected("qwen2.5-coder:7b"))
         XCTAssertEqual(manager.selectedUpstreamModels, ["llama3:8b", "qwen2.5-coder:7b"])
-    }
-
-    func testGitHubCopilotDoesNotAutoSelectAllFetchedModels() {
-        let manager = makeProviderManager()
-        manager.upstreamProvider = .githubCopilot
-
-        manager.applyFetchedUpstreamModels([
-            UpstreamModel(id: "copilot-cloud-a", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
-            UpstreamModel(id: "copilot-cloud-b", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
-        ])
-
-        XCTAssertTrue(manager.selectedUpstreamModels.isEmpty)
     }
 
     func testCloudProviderDoesNotAutoSelectFetchedModels() {
@@ -1595,6 +1515,69 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.proxySyncModelCandidates.contains("saved-model-2"))
     }
 
+    func testProxySyncPreservesSelectedVirtualExactoIdentity() {
+        defaults.set(UpstreamProvider.openRouter.rawValue, forKey: ProviderManager.upstreamProviderDefaultsKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.exactoFilterEnabled = true
+        vm.upstreamModels = [
+            UpstreamModel(
+                id: "anthropic/claude:foo",
+                contextLength: nil,
+                promptPricePer1M: nil,
+                completionPricePer1M: nil,
+                supportedParameters: ["tools"]
+            )
+        ]
+        vm.selectedUpstreamModels = ["anthropic/claude:foo:exacto"]
+
+        XCTAssertEqual(vm.proxySyncModelCandidates, ["anthropic/claude:foo:exacto"])
+        XCTAssertTrue(vm.canSyncProxyModels)
+    }
+
+    func testProxySyncKeepsDefaultsWhilePreservingVirtualExactoSelection() {
+        defaults.set(UpstreamProvider.openRouter.rawValue, forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(
+            ["saved-default"],
+            forKey: ProviderManager.defaultModelsKey(for: .openRouter)
+        )
+        let vm = AppViewModel(defaults: defaults)
+        vm.exactoFilterEnabled = true
+        vm.upstreamModels = [
+            UpstreamModel(
+                id: "anthropic/claude:foo",
+                contextLength: nil,
+                promptPricePer1M: nil,
+                completionPricePer1M: nil,
+                supportedParameters: ["tools"]
+            )
+        ]
+        vm.selectedUpstreamModels = ["anthropic/claude:foo:exacto", "saved-default"]
+
+        XCTAssertEqual(
+            Set(vm.proxySyncModelCandidates),
+            ["anthropic/claude:foo:exacto", "saved-default"]
+        )
+        XCTAssertFalse(vm.proxySyncModelCandidates.contains("anthropic/claude:foo"))
+    }
+
+    func testProxySyncPreservesExplicitExactoCatalogIdentity() {
+        defaults.set(UpstreamProvider.openRouter.rawValue, forKey: ProviderManager.upstreamProviderDefaultsKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.exactoFilterEnabled = true
+        vm.upstreamModels = [
+            UpstreamModel(
+                id: "openai/gpt:exacto",
+                contextLength: nil,
+                promptPricePer1M: nil,
+                completionPricePer1M: nil,
+                supportedParameters: ["tools"]
+            )
+        ]
+        vm.selectedUpstreamModels = ["openai/gpt:exacto"]
+
+        XCTAssertEqual(vm.proxySyncModelCandidates, ["openai/gpt:exacto"])
+    }
+
     func testCanSyncFalseWithNoModelsConfigured() {
         let vm = AppViewModel(defaults: defaults)
         vm.selectedXcodeAgentModel = ""
@@ -1640,56 +1623,13 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.canSyncProxyModels)
     }
 
-    func testGitHubCopilotDropsStaleStoredModelWithoutLiveFetch() {
-        defaults.set(
-            UpstreamProvider.githubCopilot.rawValue,
-            forKey: ProviderManager.upstreamProviderDefaultsKey
-        )
-        defaults.set(
-            "copilot-chat",
-            forKey: ProviderManager.xcodeAgentModelDefaultsKey(for: .githubCopilot)
-        )
-        defaults.set(
-            ["copilot-chat"],
-            forKey: ProviderManager.defaultModelsKey(for: .githubCopilot)
-        )
+    func testRetiredProviderStoredSelectionFallsBackToDefault() {
+        defaults.set("github-copilot", forKey: ProviderManager.upstreamProviderDefaultsKey)
 
         let vm = AppViewModel(defaults: defaults)
 
-        XCTAssertEqual(vm.upstreamProvider, .githubCopilot)
-        XCTAssertEqual(vm.effectiveXcodeAgentModel, "")
-        XCTAssertFalse(vm.xcodeAgentModelCandidates.contains("copilot-chat"))
-        XCTAssertFalse(vm.proxySyncModelCandidates.contains("auto"))
-        XCTAssertFalse(vm.proxySyncModelCandidates.contains("copilot-chat"))
-        XCTAssertFalse(vm.canSyncProxyModels)
-    }
-
-    func testGitHubCopilotLiveModelsReplaceStaleStoredModel() {
-        defaults.set(
-            UpstreamProvider.githubCopilot.rawValue,
-            forKey: ProviderManager.upstreamProviderDefaultsKey
-        )
-        defaults.set(
-            "copilot-chat",
-            forKey: ProviderManager.xcodeAgentModelDefaultsKey(for: .githubCopilot)
-        )
-        defaults.set(
-            ["copilot-chat"],
-            forKey: ProviderManager.defaultModelsKey(for: .githubCopilot)
-        )
-        let manager = makeProviderManager()
-
-        manager.applyFetchedUpstreamModels([
-            UpstreamModel(id: "auto", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
-            UpstreamModel(id: "gpt-4.1", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
-            UpstreamModel(id: "gpt-5-mini", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
-        ])
-
-        XCTAssertEqual(manager.effectiveXcodeAgentModel, "auto")
-        XCTAssertFalse(manager.xcodeAgentModelCandidates.contains("copilot-chat"))
-        XCTAssertFalse(manager.modelSelectionRows.contains { $0.id == "copilot-chat" })
-        XCTAssertFalse(manager.proxySyncModelCandidates.contains("copilot-chat"))
-        XCTAssertEqual(defaults.stringArray(forKey: ProviderManager.defaultModelsKey(for: .githubCopilot)), [])
+        XCTAssertEqual(vm.upstreamProvider, .zAI)
+        XCTAssertEqual(defaults.string(forKey: ProviderManager.upstreamProviderDefaultsKey), UpstreamProvider.zAI.rawValue)
     }
 
     // MARK: - MiniMax Routing Mode (v1.4.16)
@@ -2232,13 +2172,6 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(UpstreamProvider.nineRouter.requiresAPIKey)
     }
 
-    func testGitHubCopilotProviderUsesProjectURLWithoutKeychainKey() {
-        XCTAssertEqual(UpstreamProvider.githubCopilot.defaultAPIBaseURL, "http://127.0.0.1:8080/v1")
-        XCTAssertNotNil(UpstreamProvider.githubCopilot.apiKeyPageURL)
-        XCTAssertNil(UpstreamProvider.githubCopilot.keychainKey)
-        XCTAssertFalse(UpstreamProvider.githubCopilot.requiresAPIKey)
-    }
-
     func testAllCloudProvidersHaveKeychainKeys() {
         let cloudProviders: [UpstreamProvider] = [.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen]
         for provider in cloudProviders {
@@ -2286,266 +2219,13 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testLocalProvidersDontRequireKeys() {
-        let localProviders: [UpstreamProvider] = [.ollama, .lmStudio, .nineRouter, .githubCopilot]
+        let localProviders: [UpstreamProvider] = [.ollama, .lmStudio, .nineRouter]
         for provider in localProviders {
             XCTAssertFalse(provider.requiresAPIKey, "\(provider.title) should not require API key")
         }
         XCTAssertNil(UpstreamProvider.ollama.keychainKey)
         XCTAssertNil(UpstreamProvider.lmStudio.keychainKey)
-        XCTAssertNil(UpstreamProvider.githubCopilot.keychainKey)
         XCTAssertEqual(UpstreamProvider.nineRouter.keychainKey, .nineRouterAPIKey)
-    }
-
-    // MARK: - Copilot Sidecar Lifecycle
-
-    func testCopilotSidecarMissingExecutableState() async {
-        let service = makeCopilotSidecarService(executable: nil, endpointResponding: false)
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-
-        await vm.refreshCopilotSidecarStatus()
-
-        XCTAssertEqual(vm.copilotSidecarExecutablePath, "")
-        XCTAssertFalse(vm.copilotSidecarSupportsLaunchAgent)
-        XCTAssertFalse(vm.isCopilotSidecarAgentInstalled)
-        XCTAssertFalse(vm.isCopilotSidecarRunning)
-        XCTAssertTrue(vm.copilotSidecarStatusText.contains("Install xcode-copilot-server"))
-    }
-
-    func testCopilotSidecarDetectsLaunchAgentSupport() async {
-        let service = makeCopilotSidecarService(endpointResponding: false)
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-
-        await vm.refreshCopilotSidecarStatus()
-
-        XCTAssertTrue(vm.copilotSidecarSupportsLaunchAgent)
-        XCTAssertFalse(vm.isCopilotSidecarAgentInstalled)
-        XCTAssertTrue(vm.copilotSidecarStatusText.contains("Install the background helper"))
-    }
-
-    func testCopilotSidecarRefreshExposesLoginCommand() async {
-        let service = makeCopilotSidecarService(
-            endpointResponding: false,
-            shellRunner: { command in
-                if command.contains("command -v copilot") {
-                    return .init(terminationStatus: 1, stdout: "", stderr: "")
-                }
-                if command.contains("command -v gh") {
-                    return .init(terminationStatus: 0, stdout: "/opt/homebrew/bin/gh\n", stderr: "")
-                }
-                return .init(terminationStatus: 1, stdout: "", stderr: "")
-            }
-        )
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-
-        await vm.refreshCopilotSidecarStatus()
-
-        XCTAssertEqual(vm.copilotSidecarLoginCommand, "gh auth login")
-        XCTAssertTrue(vm.copilotSidecarLoginDescription.contains("GitHub CLI fallback"))
-    }
-
-    func testCopilotSidecarLaunchAgentInstalledButEndpointAsleep() async {
-        let service = makeCopilotSidecarService(
-            endpointResponding: false,
-            fileExists: { $0.hasSuffix("com.xcode-copilot-server.plist") }
-        )
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-
-        await vm.refreshCopilotSidecarStatus()
-
-        XCTAssertTrue(vm.isCopilotSidecarAgentInstalled)
-        XCTAssertFalse(vm.isCopilotSidecarEndpointResponding)
-        XCTAssertTrue(vm.isCopilotSidecarManaged)
-        XCTAssertTrue(vm.isCopilotSidecarRunning)
-        XCTAssertTrue(vm.copilotSidecarStatusText.contains("launchd will wake it"))
-    }
-
-    func testCopilotSidecarEndpointRespondingExternally() async {
-        let service = makeCopilotSidecarService(endpointResponding: true)
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-
-        await vm.refreshCopilotSidecarStatus()
-
-        XCTAssertTrue(vm.isCopilotSidecarEndpointResponding)
-        XCTAssertTrue(vm.isCopilotSidecarExternal)
-        XCTAssertFalse(vm.isCopilotSidecarManaged)
-        XCTAssertTrue(vm.copilotSidecarStatusText.contains("started elsewhere"))
-    }
-
-    func testCopilotSidecarLogActionShowsInlineLogSnapshot() throws {
-        let logURL = URL(fileURLWithPath: "/tmp/proxypilot_copilot_sidecar.log")
-        let originalData = try? Data(contentsOf: logURL)
-        try? FileManager.default.removeItem(at: logURL)
-        defer {
-            try? FileManager.default.removeItem(at: logURL)
-            if let originalData {
-                try? originalData.write(to: logURL)
-            }
-        }
-
-        try "2026-05-17 WARN Rejected request from unexpected user-agent: curl/8.7.1\n"
-            .write(to: logURL, atomically: true, encoding: .utf8)
-        let service = makeCopilotSidecarService(
-            endpointResponding: false,
-            fileExists: { FileManager.default.fileExists(atPath: $0) }
-        )
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-
-        vm.openCopilotSidecarLog()
-
-        XCTAssertTrue(vm.isCopilotSidecarLogVisible)
-        XCTAssertTrue(vm.copilotSidecarLogText.contains("Rejected request from unexpected user-agent"))
-        XCTAssertTrue(vm.copilotSidecarLogStatusText.contains("Showing"))
-        XCTAssertTrue(vm.copilotSidecarLogStatusText.contains("Copilot sidecar log file"))
-    }
-
-    func testCheckCopilotSidecarUpdateReportsUpdateAvailable() async {
-        let service = makeCopilotSidecarService(
-            endpointResponding: false,
-            commandRunner: { _, arguments in
-                if arguments == ["--version"] {
-                    return .init(terminationStatus: 0, stdout: "5.0.1\n", stderr: "")
-                }
-                return .init(terminationStatus: 0, stdout: "", stderr: "")
-            },
-            shellRunner: { command in
-                if command.contains("npm view xcode-copilot-server version") {
-                    return .init(terminationStatus: 0, stdout: "5.0.2\n", stderr: "")
-                }
-                return .init(terminationStatus: 1, stdout: "", stderr: "")
-            }
-        )
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-
-        await vm.checkCopilotSidecarUpdate()
-
-        XCTAssertEqual(vm.copilotSidecarInstalledVersion, "5.0.1")
-        XCTAssertEqual(vm.copilotSidecarLatestVersion, "5.0.2")
-        XCTAssertTrue(vm.copilotSidecarUpdateAvailable)
-        XCTAssertTrue(vm.copilotSidecarUpdateStatusText.contains("Update available"))
-    }
-
-    func testUpdateCopilotSidecarSucceeds() async {
-        let service = makeCopilotSidecarService(
-            endpointResponding: false,
-            commandRunner: { _, arguments in
-                if arguments == ["--version"] {
-                    return .init(terminationStatus: 0, stdout: "5.0.2\n", stderr: "")
-                }
-                return .init(terminationStatus: 0, stdout: "", stderr: "")
-            },
-            shellRunner: { command in
-                if command.contains("npm install -g xcode-copilot-server@latest") {
-                    return .init(terminationStatus: 0, stdout: "", stderr: "")
-                }
-                if command.contains("npm view xcode-copilot-server version") {
-                    return .init(terminationStatus: 0, stdout: "5.0.2\n", stderr: "")
-                }
-                return .init(terminationStatus: 1, stdout: "", stderr: "")
-            }
-        )
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-
-        await vm.updateCopilotSidecar()
-
-        XCTAssertFalse(vm.isUpdatingCopilotSidecar)
-        XCTAssertTrue(vm.copilotSidecarUpdateStatusText.contains("Updated to 5.0.2"))
-    }
-
-    func testUpdateCopilotSidecarSurfacesFailure() async {
-        let service = makeCopilotSidecarService(
-            endpointResponding: false,
-            shellRunner: { command in
-                if command.contains("npm install -g xcode-copilot-server@latest") {
-                    return .init(terminationStatus: 1, stdout: "", stderr: "EACCES: permission denied")
-                }
-                return .init(terminationStatus: 1, stdout: "", stderr: "")
-            }
-        )
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-
-        await vm.updateCopilotSidecar()
-
-        XCTAssertFalse(vm.isUpdatingCopilotSidecar)
-        XCTAssertTrue(vm.copilotSidecarUpdateStatusText.contains("Update failed"))
-        XCTAssertTrue(vm.copilotSidecarUpdateStatusText.contains("EACCES"))
-    }
-
-    func testCopilotSidecarInstallSwitchesProviderAndURL() async throws {
-        var installed = false
-        let service = makeCopilotSidecarService(
-            endpointResponding: false,
-            fileExists: { path in installed && path.hasSuffix("com.xcode-copilot-server.plist") },
-            commandRunner: { _, arguments in
-                if arguments == ["--help"] {
-                    return .init(terminationStatus: 0, stdout: "install-agent\nuninstall-agent", stderr: "")
-                }
-                if arguments.first == "install-agent" {
-                    installed = true
-                }
-                return .init(terminationStatus: 0, stdout: "", stderr: "")
-            }
-        )
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-        vm.addCustomProvider(name: "Together", apiBaseURL: "https://api.together.xyz/v1", apiKey: "sk-custom")
-        let customProvider = try XCTUnwrap(vm.customProviders.first)
-        vm.activateCustomProvider(customProvider)
-
-        await vm.startCopilotSidecar()
-
-        XCTAssertEqual(vm.upstreamProvider, .githubCopilot)
-        XCTAssertEqual(vm.selectedUpstreamSelection, .builtIn(.githubCopilot))
-        XCTAssertNil(vm.activeCustomProvider)
-        XCTAssertEqual(vm.upstreamAPIBaseURLString, UpstreamProvider.githubCopilot.defaultAPIBaseURL)
-        XCTAssertTrue(vm.isCopilotSidecarAgentInstalled)
-        XCTAssertTrue(vm.isCopilotSidecarManaged)
-    }
-
-    func testCopilotSidecarUninstallClearsManagedLaunchAgent() async {
-        var installed = true
-        let service = makeCopilotSidecarService(
-            endpointResponding: false,
-            fileExists: { path in installed && path.hasSuffix("com.xcode-copilot-server.plist") },
-            commandRunner: { _, arguments in
-                if arguments == ["--help"] {
-                    return .init(terminationStatus: 0, stdout: "install-agent\nuninstall-agent", stderr: "")
-                }
-                if arguments.first == "uninstall-agent" {
-                    installed = false
-                }
-                return .init(terminationStatus: 0, stdout: "", stderr: "")
-            }
-        )
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-
-        await vm.refreshCopilotSidecarStatus()
-        XCTAssertTrue(vm.isCopilotSidecarAgentInstalled)
-
-        await vm.stopCopilotSidecar()
-
-        XCTAssertFalse(vm.isCopilotSidecarAgentInstalled)
-        XCTAssertFalse(vm.isCopilotSidecarManaged)
-        XCTAssertEqual(vm.copilotSidecarStatusText, "Copilot helper stopped.")
-    }
-
-    func testCopilotSidecarStopDoesNotTouchExternalHelper() async {
-        var commandArguments: [[String]] = []
-        let service = makeCopilotSidecarService(
-            endpointResponding: true,
-            commandRunner: { _, arguments in
-                commandArguments.append(arguments)
-                if arguments == ["--help"] {
-                    return .init(terminationStatus: 0, stdout: "install-agent\nuninstall-agent", stderr: "")
-                }
-                return .init(terminationStatus: 0, stdout: "", stderr: "")
-            }
-        )
-        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
-
-        await vm.refreshCopilotSidecarStatus()
-        await vm.stopCopilotSidecar()
-
-        XCTAssertTrue(vm.isCopilotSidecarExternal)
-        XCTAssertFalse(commandArguments.contains(["uninstall-agent"]))
     }
 
     // MARK: - Per-Provider Key Management
@@ -2738,7 +2418,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(vm.hasKey(for: .openRouter))
     }
 
-    func testPreflightMasterKeyRequiredWhenBuiltInAuthEnabled() {
+    func testPreflightGeneratesCredentialWhenBuiltInAuthEnabled() {
         let preflight = PreflightService()
         let context = PreflightContext(
             proxyURLString: "http://127.0.0.1:4000",
@@ -2754,8 +2434,8 @@ final class AppViewModelTests: XCTestCase {
         let results = preflight.run(context: context)
         let masterKeyCheck = results.first { $0.id == "master_key" }
 
-        XCTAssertEqual(masterKeyCheck?.status, .fail)
-        XCTAssertEqual(masterKeyCheck?.fixAction, .openMasterKeyEditor)
+        XCTAssertEqual(masterKeyCheck?.status, .info)
+        XCTAssertEqual(masterKeyCheck?.fixAction, .some(.none))
     }
 
     func testAgentConfigInstalledHydratesFromStateProviderOnInit() {
@@ -3387,28 +3067,6 @@ final class AppViewModelTests: XCTestCase {
 
     private func makeProviderManager() -> ProviderManager {
         ProviderManager(defaults: defaults, proxyService: ProxyService())
-    }
-
-    private func makeCopilotSidecarService(
-        executable: URL? = URL(fileURLWithPath: "/tmp/xcode-copilot-server"),
-        endpointResponding: Bool,
-        fileExists: @escaping CopilotSidecarService.FileExists = { _ in false },
-        commandRunner: CopilotSidecarService.CommandRunner? = nil,
-        shellRunner: CopilotSidecarService.ShellRunner? = nil
-    ) -> CopilotSidecarService {
-        CopilotSidecarService(
-            executableResolver: { executable },
-            endpointProbe: { endpointResponding },
-            commandRunner: commandRunner ?? { _, arguments in
-                if arguments == ["--help"] {
-                    return .init(terminationStatus: 0, stdout: "install-agent\nuninstall-agent", stderr: "")
-                }
-                return .init(terminationStatus: 0, stdout: "", stderr: "")
-            },
-            shellRunner: shellRunner ?? { _ in .init(terminationStatus: 1, stdout: "", stderr: "") },
-            fileExists: fileExists,
-            workspaceOpener: { _ in }
-        )
     }
 
     // MARK: - Coding Harness Tour

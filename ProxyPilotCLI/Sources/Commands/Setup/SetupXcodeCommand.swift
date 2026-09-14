@@ -162,7 +162,13 @@ struct SetupXcodeCommand: AsyncParsableCommand {
 
         let configStatus: XcodeConfigManager.Status
         do {
-            configStatus = try XcodeConfigManager.install(port: port)
+            let localProxyCredential = try LocalProxyCredential.resolveOrCreate(
+                using: SecretsProviderFactory.make()
+            )
+            configStatus = try XcodeConfigManager.install(
+                port: port,
+                localProxyCredential: localProxyCredential
+            )
         } catch {
             OutputFormatter.error(
                 command: "setup xcode",

@@ -1,10 +1,14 @@
+# Public build settings: customize signing and optional integrations; see BUILDING.md.
 name: ProxyPilot
-# ── CHANGE bundleIdPrefix to your own reverse-domain identifier ──────
-# See BUILDING.md for instructions.
 options:
   bundleIdPrefix: com.yourname
   deploymentTarget:
     macOS: "15.0"
+configs:
+  Debug: debug
+  Release: release
+  Debug-Alpha: debug
+  Release-Alpha: release
 packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
@@ -14,8 +18,8 @@ packages:
 settings:
   base:
     SWIFT_VERSION: 6.0
-    MARKETING_VERSION: "1.12.1"
-    CURRENT_PROJECT_VERSION: "132"
+    MARKETING_VERSION: "1.15.1"
+    CURRENT_PROJECT_VERSION: "139"
 targets:
   ProxyPilot-macOS:
     type: application
@@ -40,16 +44,83 @@ targets:
         NSHumanReadableDescription: "Local OpenAI-compatible proxy for Xcode Intelligence and Agent Mode. Supports z.ai, OpenRouter, OpenAI, Google, Qwen, xAI, Chutes, Groq, and more with per-provider API keys."
         NSSupportsAutomaticTermination: true
         NSSupportsSuddenTermination: true
-        # ── CHANGE these to your own Sparkle + analytics keys ────────
-        # See BUILDING.md for instructions. Remove lines you don't use.
+        PROXYPILOT_RELEASE_CHANNEL: "$(PROXYPILOT_RELEASE_CHANNEL)"
         SUFeedURL: "https://yoursite.com/appcast.xml"
         SUPublicEDKey: "YOUR_SPARKLE_EDDSA_PUBLIC_KEY"
         POSTHOG_API_KEY: "YOUR_POSTHOG_API_KEY_OR_REMOVE"
     settings:
       base:
+        PROXYPILOT_RELEASE_CHANNEL: stable
         PRODUCT_NAME: ProxyPilot
+        PRODUCT_MODULE_NAME: ProxyPilot
         PRODUCT_BUNDLE_IDENTIFIER: com.yourname.ProxyPilot
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        Debug-Alpha:
+          PROXYPILOT_RELEASE_CHANNEL: alpha
+          PRODUCT_NAME: ProxyPilot Alpha
+          PRODUCT_MODULE_NAME: ProxyPilot
+          PRODUCT_BUNDLE_IDENTIFIER: com.yourname.ProxyPilot-alpha
+          ASSETCATALOG_COMPILER_APPICON_NAME: AlphaAppIcon
+          WRAPPER_NAME: ProxyPilot-alpha.app
+          EXECUTABLE_NAME: ProxyPilot-alpha
+        Release-Alpha:
+          PROXYPILOT_RELEASE_CHANNEL: alpha
+          PRODUCT_NAME: ProxyPilot Alpha
+          PRODUCT_MODULE_NAME: ProxyPilot
+          PRODUCT_BUNDLE_IDENTIFIER: com.yourname.ProxyPilot-alpha
+          ASSETCATALOG_COMPILER_APPICON_NAME: AlphaAppIcon
+          WRAPPER_NAME: ProxyPilot-alpha.app
+          EXECUTABLE_NAME: ProxyPilot-alpha
+    postBuildScripts:
+      - name: Embed ProxyPilot Agent Helpers
+        basedOnDependencyAnalysis: false
+        script: |
+          REPOGPS_SOURCE="$SRCROOT/ProxyPilot/Resources/RepoGPSPayload"
+          REPOGPS_PAYLOAD="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/RepoGPSPayload"
+          if [[ ! -x "$REPOGPS_SOURCE/bin/rgps" ]]; then
+            echo "error: staged RepoGPS payload is missing; run scripts/stage_repogps_payload.sh" >&2
+            exit 1
+          fi
+          REPOGPS_SOURCE_RELEASE="$(/usr/bin/plutil -extract source_release raw -o - "$REPOGPS_SOURCE/payload.json")"
+          if [[ ! "$REPOGPS_SOURCE_RELEASE" =~ ^[0-9a-f]{7,40}$ ]]; then
+            echo "error: staged RepoGPS payload source_release must be an immutable Git SHA" >&2
+            exit 1
+          fi
+          rm -rf "$REPOGPS_PAYLOAD"
+          ditto "$REPOGPS_SOURCE" "$REPOGPS_PAYLOAD"
+
+          if [[ "$CONFIGURATION" != "Release" && "$CONFIGURATION" != "Release-Alpha" ]]; then
+            exit 0
+          fi
+
+          HELPERS_DIR="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
+          ARM64_SCRATCH="$DERIVED_FILE_DIR/proxypilot-cli-arm64"
+          X86_64_SCRATCH="$DERIVED_FILE_DIR/proxypilot-cli-x86_64"
+          ARM64_PRODUCTS="$ARM64_SCRATCH/out/Products/Release"
+          X86_64_PRODUCTS="$X86_64_SCRATCH/out/Products/Release"
+
+          swift build --package-path "$SRCROOT/ProxyPilotCLI" --scratch-path "$ARM64_SCRATCH" -c release --triple arm64-apple-macosx15.0
+          swift build --package-path "$SRCROOT/ProxyPilotCLI" --scratch-path "$X86_64_SCRATCH" -c release --triple x86_64-apple-macosx15.0
+
+          mkdir -p "$HELPERS_DIR"
+          lipo -create "$ARM64_PRODUCTS/proxypilot" "$X86_64_PRODUCTS/proxypilot" -output "$HELPERS_DIR/proxypilot"
+          lipo -create "$ARM64_PRODUCTS/proxypilot-agent" "$X86_64_PRODUCTS/proxypilot-agent" -output "$HELPERS_DIR/proxypilot-agent"
+
+          lipo -verify_arch arm64 "$HELPERS_DIR/proxypilot"
+          lipo -verify_arch x86_64 "$HELPERS_DIR/proxypilot"
+          lipo -verify_arch arm64 "$HELPERS_DIR/proxypilot-agent"
+          lipo -verify_arch x86_64 "$HELPERS_DIR/proxypilot-agent"
+
+          SIGNING_IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
+          codesign --force --sign "$SIGNING_IDENTITY" --options runtime "$HELPERS_DIR/proxypilot"
+          codesign --force --sign "$SIGNING_IDENTITY" --options runtime "$HELPERS_DIR/proxypilot-agent"
+
+          REPOGPS_BINARY="$REPOGPS_PAYLOAD/bin/rgps"
+          codesign --force --sign "$SIGNING_IDENTITY" --options runtime "$REPOGPS_BINARY"
+          "$REPOGPS_BINARY" distribution make-manifest \
+            --payload "$REPOGPS_PAYLOAD" \
+            --source-release "$REPOGPS_SOURCE_RELEASE"
 
   ProxyPilotTests:
     type: bundle.unit-test
@@ -64,3 +135,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.yourname.ProxyPilotTests
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ProxyPilot.app/Contents/MacOS/ProxyPilot"
         BUNDLE_LOADER: "$(TEST_HOST)"
+      configs:
+        Debug-Alpha:
+          TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ProxyPilot-alpha.app/Contents/MacOS/ProxyPilot-alpha"
+          BUNDLE_LOADER: "$(TEST_HOST)"
+        Release-Alpha:
+          TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ProxyPilot-alpha.app/Contents/MacOS/ProxyPilot-alpha"
+          BUNDLE_LOADER: "$(TEST_HOST)"

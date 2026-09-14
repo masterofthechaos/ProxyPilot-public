@@ -65,7 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task { @MainActor in
             await viewModel.stopProxy()
-            viewModel.applicationWillTerminate()
+            await viewModel.applicationWillTerminate()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

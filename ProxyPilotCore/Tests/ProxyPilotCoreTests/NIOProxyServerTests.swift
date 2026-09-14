@@ -241,6 +241,26 @@ struct NIOProxyServerTests {
         try await server.stop()
     }
 
+    @Test func serverFailsClosedWhenCloudCredentialHasNoLocalCapability() async throws {
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamAPIKey: "cloud-secret",
+            masterKey: nil,
+            requiresAuth: false
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("{}".utf8)
+        let (_, response) = try await URLSession.shared.data(for: request)
+
+        #expect((response as? HTTPURLResponse)?.statusCode == 401)
+        try await server.stop()
+    }
+
     @Test func modelsEndpointAlsoWorksAtSlashModels() async throws {
         let config = ProxyConfiguration(port: 0, allowedModels: ["test-model"])
         let server = NIOProxyServer()
@@ -618,7 +638,7 @@ struct NIOProxyServerTests {
         let streamBody = """
         data: {"id":"chatcmpl-zai-stream","object":"chat.completion.chunk","model":"glm-5.1","choices":[{"index":0,"delta":{"content":"zai stream"},"finish_reason":null}]}
 
-        data: {"id":"chatcmpl-zai-stream","object":"chat.completion.chunk","model":"glm-5.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11}}
+        data: {"id":"chatcmpl-zai-stream","object":"chat.completion.chunk","model":"glm-5.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11,"cost":0.006}}
 
         data: [DONE]
 
@@ -631,13 +651,17 @@ struct NIOProxyServerTests {
             requireJSONRequest: true,
             contentType: "text/event-stream"
         )
+        let reportURL = FileManager.default.temporaryDirectory.appendingPathComponent("stream-cost-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: reportURL) }
+        let stats = SessionStats(sessionReportURL: reportURL, sessionSource: "repogps", sessionID: "stream-cost")
 
         let config = ProxyConfiguration(
             port: 0,
             upstreamProvider: .zAI,
             upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)/api/coding/paas/v4",
             requiresAuth: false,
-            preferredAnthropicUpstreamModel: "glm-5.1"
+            preferredAnthropicUpstreamModel: "glm-5.1",
+            sessionStats: stats
         )
         let server = NIOProxyServer()
         let port = try await server.start(config: config)
@@ -666,6 +690,8 @@ struct NIOProxyServerTests {
         #expect(capturedRequest.uri.hasSuffix("/chat/completions"))
         #expect(capturedRequest.headerValue("Content-Type") == "application/json")
         #expect(capturedRequest.headerValue("Accept") == "text/event-stream")
+        let events = try SessionReportStore.readEvents(from: reportURL)
+        #expect(events.last?.record.providerReportedCostUSD == 0.006)
 
         try await server.stop()
         try await stub.stop()
@@ -819,6 +845,7 @@ struct NIOProxyServerTests {
             upstreamProvider: .xAI,
             upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)/v1",
             upstreamAPIKey: "xai-test",
+            masterKey: "local-test-capability",
             requiresAuth: false,
             promptCaching: PromptCachingConfiguration(isEnabled: true, mode: .computeCacheHints),
             sessionID: "nio-session"
@@ -829,6 +856,7 @@ struct NIOProxyServerTests {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer local-test-capability", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": "grok-4",
             "messages": [["role": "user", "content": "hi"]]
@@ -1455,6 +1483,7 @@ struct NIOProxyServerTests {
             upstreamProvider: .deepSeek,
             upstreamAPIBaseURL: "http://127.0.0.1:\(stubPort)/v1",
             upstreamAPIKey: "sk-test",
+            masterKey: "local-test-capability",
             requiresAuth: false,
             preferredAnthropicUpstreamModel: "deepseek-v4-pro"
         )
@@ -1464,6 +1493,7 @@ struct NIOProxyServerTests {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer local-test-capability", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": "claude-sonnet-4-5-20250514",
             "max_tokens": 100,

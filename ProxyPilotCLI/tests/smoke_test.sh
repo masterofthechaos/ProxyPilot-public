@@ -23,6 +23,7 @@ AUTH_SECRETS_DIR=""
 SMOKE_CONFIG_HOME="$(mktemp -d)"
 SMOKE_MODULE_CACHE="$(mktemp -d)"
 export XDG_CONFIG_HOME="$SMOKE_CONFIG_HOME"
+export PROXYPILOT_SECRETS_DIR="$SMOKE_CONFIG_HOME/secrets"
 PID_FILE="$XDG_CONFIG_HOME/proxypilot/proxypilot.pid"
 
 # ---------------------------------------------------------------------------
@@ -712,11 +713,33 @@ fi
 
 sleep 0.5
 
+VALID_LOCAL_CREDENTIAL="$(python3 - "$PROXYPILOT_SECRETS_DIR/secrets.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle).get("LITELLM_MASTER_KEY", ""))
+PY
+)"
+
+run_test "Credential-backed proxy rejects anonymous inference"
+
+VALID_UNAUTH_HTTP_CODE="$(curl -s -o /tmp/pp_valid_unauth.json -w "%{http_code}" \
+    -X POST http://127.0.0.1:${VALID_PROXY_PORT}/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model":"smoke-model","messages":[{"role":"user","content":"ping"}]}' \
+    2>&1 || true)"
+if [[ "$VALID_UNAUTH_HTTP_CODE" == "401" ]]; then
+    pass "credential-backed proxy returns 401 without local capability"
+else
+    fail "credential-backed proxy rejects anonymous inference" "code=$VALID_UNAUTH_HTTP_CODE body=$(cat /tmp/pp_valid_unauth.json 2>/dev/null || true)"
+fi
+
 run_test "POST /v1/chat/completions returns assistant content from stub"
 
 VALID_CHAT_HTTP_CODE="$(curl -s -o /tmp/pp_valid_chat.json -w "%{http_code}" \
     -X POST http://127.0.0.1:${VALID_PROXY_PORT}/v1/chat/completions \
     -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $VALID_LOCAL_CREDENTIAL" \
     -d '{"model":"smoke-model","messages":[{"role":"user","content":"ping"}]}' \
     2>&1 || true)"
 VALID_CHAT_CHECK="$(python3 - "$VALID_CHAT_HTTP_CODE" /tmp/pp_valid_chat.json <<'PY'
@@ -746,6 +769,7 @@ run_test "POST /v1/messages returns Anthropic JSON content from stub"
 VALID_MSGS_HTTP_CODE="$(curl -s -o /tmp/pp_valid_messages.json -w "%{http_code}" \
     -X POST http://127.0.0.1:${VALID_PROXY_PORT}/v1/messages \
     -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $VALID_LOCAL_CREDENTIAL" \
     -H "anthropic-version: 2023-06-01" \
     -d '{"model":"smoke-model","max_tokens":10,"messages":[{"role":"user","content":"ping"}]}' \
     2>&1 || true)"
@@ -776,6 +800,7 @@ run_test "Streaming /v1/messages returns Anthropic SSE events from stub"
 VALID_STREAM_HTTP_CODE="$(curl -s -o /tmp/pp_valid_messages_stream.txt -w "%{http_code}" \
     -X POST http://127.0.0.1:${VALID_PROXY_PORT}/v1/messages \
     -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $VALID_LOCAL_CREDENTIAL" \
     -H "anthropic-version: 2023-06-01" \
     -d '{"model":"smoke-model","max_tokens":10,"stream":true,"messages":[{"role":"user","content":"ping"}]}' \
     2>&1 || true)"
@@ -923,8 +948,8 @@ try:
         raise SystemExit(0)
     providers = d.get("data", {}).get("providers", [])
     status = {p.get("provider"): p.get("status") for p in providers}
-    expected = {"openai", "groq", "zai", "openrouter", "xai", "chutes", "google", "deepseek", "mistral", "minimax", "minimax-cn", "qwen", "9router", "github-copilot", "ollama", "lmstudio"}
-    if expected.issubset(set(status.keys())) and status.get("9router") == "optional" and status.get("github-copilot") == "not_required" and status.get("ollama") == "not_required" and status.get("lmstudio") == "not_required":
+    expected = {"openai", "groq", "zai", "openrouter", "xai", "chutes", "google", "deepseek", "mistral", "minimax", "minimax-cn", "qwen", "9router", "ollama", "lmstudio"}
+    if expected.issubset(set(status.keys())) and "github-copilot" not in status and status.get("9router") == "optional" and status.get("ollama") == "not_required" and status.get("lmstudio") == "not_required":
         print("PASS")
     else:
         print(f"FAIL:providers={status}")
@@ -1107,29 +1132,6 @@ if [[ "$AUTH_SET_9ROUTER_CHECK" == "PASS" ]]; then
     pass "auth set --provider 9router --json stores optional endpoint key"
 else
     fail "auth set 9router stores optional endpoint key" "$AUTH_SET_9ROUTER_CHECK :: $AUTH_SET_9ROUTER_JSON"
-fi
-
-run_test "auth set rejects helper provider github-copilot (E041)"
-
-AUTH_SET_COPILOT_JSON="$(PROXYPILOT_SECRETS_DIR="$AUTH_SECRETS_DIR" "$BINARY" auth set --provider github-copilot --json 2>&1 || true)"
-AUTH_SET_COPILOT_CHECK="$(python3 - "$AUTH_SET_COPILOT_JSON" <<'PY'
-import json
-import sys
-raw = sys.argv[1]
-try:
-    d = json.loads(raw)
-    if d.get("ok") is False and d.get("error", {}).get("code") == "E041":
-        print("PASS")
-    else:
-        print(f"FAIL:{d}")
-except Exception as e:
-    print(f"PARSE_ERROR:{e}")
-PY
-)"
-if [[ "$AUTH_SET_COPILOT_CHECK" == "PASS" ]]; then
-    pass "auth set --provider github-copilot --json returns E041"
-else
-    fail "auth set github-copilot rejects helper provider" "$AUTH_SET_COPILOT_CHECK :: $AUTH_SET_COPILOT_JSON"
 fi
 
 # ===========================================================================

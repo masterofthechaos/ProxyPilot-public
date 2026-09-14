@@ -11,7 +11,7 @@ final class ProxyPilotDefaultsTests: XCTestCase {
         for provider in UpstreamProvider.allCases {
             XCTAssertTrue(UpstreamProvider.cliOptionsDescription.contains(provider.rawValue))
         }
-        XCTAssertTrue(UpstreamProvider.cliOptionsDescription.contains("github-copilot"))
+        XCTAssertFalse(UpstreamProvider.cliOptionsDescription.contains("github-copilot"))
     }
 
     func testDefaultAgentModelForXcodeProvider() {

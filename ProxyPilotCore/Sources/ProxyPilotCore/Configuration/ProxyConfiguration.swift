@@ -26,6 +26,15 @@ public struct ProxyConfiguration: Sendable {
     public let contextCompaction: ContextCompactionConfiguration
     public let sessionID: String
 
+    /// Protected routes must authenticate whenever an upstream credential would
+    /// be exercised, even if a caller forgot to set the explicit preference.
+    public var requiresAuthForProtectedRoutes: Bool {
+        LocalProxyCredential.requiresAuthentication(
+            explicitlyRequired: requiresAuth,
+            upstreamAPIKey: upstreamAPIKey
+        )
+    }
+
     public init(
         host: String = "127.0.0.1",
         port: UInt16 = 4000,

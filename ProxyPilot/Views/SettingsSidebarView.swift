@@ -81,7 +81,7 @@ struct AppVersionFooter: View {
             .buttonStyle(.plain)
             .help("Visit Slicewrite Studio")
             .accessibilityLabel(SlicewriteStudioBrand.attributionText)
-            .accessibilityHint("Opens slicewrite.com in your default browser")
+            .accessibilityHint("Opens slicewrite.dev in your default browser")
 
             if showsNewFeaturesPill, let onOpenNewFeatures {
                 NewFeaturesPill(action: onOpenNewFeatures)

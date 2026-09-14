@@ -715,37 +715,6 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertEqual(msg, "Upstream error: thought_signature error")
     }
 
-    func testUpstreamErrorGitHubCopilotEntitlementExplainsAccessRequirement() {
-        let msg = H.upstreamErrorMessage(
-            statusCode: 403,
-            body: #"{"error":{"message":"GitHub Copilot subscription required for this account"}}"#,
-            provider: .githubCopilot
-        )
-        XCTAssertTrue(msg.contains("GitHub authentication is present"))
-        XCTAssertTrue(msg.contains("does not appear to have GitHub Copilot access"))
-        XCTAssertTrue(msg.contains("Copilot Pro, Business, Enterprise"))
-    }
-
-    func testUpstreamErrorGitHubCopilotMaskedModelListFailureExplainsAccessRequirement() {
-        let msg = H.upstreamErrorMessage(
-            statusCode: 500,
-            body: #"{"error":{"message":"Failed to list models","type":"api_error"}}"#,
-            provider: .githubCopilot
-        )
-        XCTAssertTrue(msg.contains("GitHub Copilot sidecar could not access Copilot models"))
-        XCTAssertTrue(msg.contains("If GitHub authentication completed successfully"))
-        XCTAssertTrue(msg.contains("does not appear to have GitHub Copilot access"))
-    }
-
-    func testUpstreamErrorGitHubCopilotUnexpectedUserAgentStaysGeneric() {
-        let msg = H.upstreamErrorMessage(
-            statusCode: 403,
-            body: "Forbidden: unexpected user-agent curl/8.7.1",
-            provider: .githubCopilot
-        )
-        XCTAssertEqual(msg, "Upstream error: Forbidden: unexpected user-agent curl/8.7.1")
-    }
-
     // MARK: - Log Redaction
 
     func testScrubBearerReplacesToken() {
@@ -1203,7 +1172,7 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertTrue(config.requiresUpstreamAPIKey)
     }
 
-    func testProtectedRoutesRemainUnauthenticatedWhenUpstreamCredentialIsPresentAndAuthDisabled() {
+    func testProtectedRoutesRequireAuthWhenUpstreamCredentialIsPresent() {
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: 4000,
@@ -1219,7 +1188,7 @@ final class LocalProxyServerTests: XCTestCase {
             googleThoughtSignatureStore: nil
         )
 
-        XCTAssertFalse(config.requiresAuthForProtectedRoutes)
+        XCTAssertTrue(config.requiresAuthForProtectedRoutes)
     }
 
     func testProtectedRoutesRequireAuthWhenLocalAuthEnabled() {
@@ -1258,6 +1227,127 @@ final class LocalProxyServerTests: XCTestCase {
         )
 
         XCTAssertFalse(config.requiresAuthForProtectedRoutes)
+    }
+
+    func testCredentialBackedBuiltInProxyFailsClosedAndKeepsUpstreamKeySeparated() async throws {
+        let upstream = LocalHTTPStubServer(body: """
+        {"id":"chatcmpl-auth","model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}]}
+        """)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "local-capability",
+            upstreamProvider: .openAI,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: "upstream-secret",
+            allowedModels: [],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        var unauthenticated = URLRequest(url: url)
+        unauthenticated.httpMethod = "POST"
+        unauthenticated.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        unauthenticated.httpBody = jsonBody(["model": "test-model", "messages": []])
+
+        let (_, rejectedResponse) = try await URLSession.shared.data(for: unauthenticated)
+        XCTAssertEqual((rejectedResponse as? HTTPURLResponse)?.statusCode, 401)
+        XCTAssertTrue(upstream.requests().isEmpty)
+
+        var authenticated = unauthenticated
+        authenticated.setValue("Bearer local-capability", forHTTPHeaderField: "Authorization")
+        let (_, acceptedResponse) = try await URLSession.shared.data(for: authenticated)
+        XCTAssertEqual((acceptedResponse as? HTTPURLResponse)?.statusCode, 200)
+
+        let captured = try XCTUnwrap(upstream.requests().first)
+        XCTAssertEqual(captured.headerValue("authorization"), "Bearer upstream-secret")
+        XCTAssertNotEqual(captured.headerValue("authorization"), "Bearer local-capability")
+    }
+
+    func testBuiltInProxyRejectsBrowserOriginBeforeForwarding() async throws {
+        let upstream = LocalHTTPStubServer(body: #"{"ok":true}"#)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "",
+            upstreamProvider: .ollama,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: nil,
+            allowedModels: [],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("https://attacker.invalid", forHTTPHeaderField: "Origin")
+        request.httpBody = jsonBody(["model": "test-model", "messages": []])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 403)
+        XCTAssertTrue(upstream.requests().isEmpty)
+    }
+
+    func testBuiltInProxyRejectsSimpleBrowserMediaTypeBeforeForwarding() async throws {
+        let upstream = LocalHTTPStubServer(body: #"{"ok":true}"#)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "",
+            upstreamProvider: .ollama,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: nil,
+            allowedModels: [],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("text/plain", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data(#"{"model":"test-model","messages":[]}"#.utf8)
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 415)
+        XCTAssertTrue(upstream.requests().isEmpty)
     }
 
     func testDeepSeekUsesAnthropicPassthroughByDefault() {

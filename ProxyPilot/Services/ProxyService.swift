@@ -7,11 +7,6 @@ final class ProxyService {
         let statusCode: Int
         let isProxyPilot: Bool
     }
-    struct CopilotToolCallProbeResult: Equatable {
-        let sawToolCall: Bool
-        let summary: String
-    }
-
     init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) {
         _ = homeDirectory
     }
@@ -118,7 +113,6 @@ final class ProxyService {
         var request = URLRequest(url: modelsURL)
         request.httpMethod = "GET"
         applyUpstreamAuth(apiKey: apiKey, provider: provider, request: &request)
-        applyProviderCompatibilityHeaders(provider: provider, path: provider.modelsPath, request: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 10
 
@@ -211,7 +205,6 @@ final class ProxyService {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         applyUpstreamAuth(apiKey: apiKey, provider: provider, request: &request)
-        applyProviderCompatibilityHeaders(provider: provider, path: provider.chatCompletionsPath, request: &request)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 20
@@ -250,153 +243,6 @@ final class ProxyService {
         return decoded.text ?? ""
     }
 
-    func testGitHubCopilotToolCall(
-        apiBase: URL,
-        model: String
-    ) async throws -> CopilotToolCallProbeResult {
-        let request = try Self.githubCopilotToolCallProbeRequest(apiBase: apiBase, model: model)
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        let maximumProbeBytes = 1_048_576
-        var data = Data()
-        data.reserveCapacity(min(maximumProbeBytes, 64 * 1024))
-        for try await byte in bytes {
-            guard data.count < maximumProbeBytes else {
-                throw ProxyServiceError.responseTooLarge
-            }
-            data.append(byte)
-        }
-        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-            let bodyText = SensitiveTextSanitizer.sanitize(
-                String(decoding: data, as: UTF8.self),
-                maxCharacters: 2_048
-            )
-            throw ProxyServiceError.httpStatus(http.statusCode, bodyText)
-        }
-        return Self.parseGitHubCopilotToolCallProbeResponse(data)
-    }
-
-    static func githubCopilotToolCallProbeRequest(
-        apiBase: URL,
-        model: String
-    ) throws -> URLRequest {
-        let url = buildUpstreamURL(
-            base: normalizedUpstreamAPIBase(apiBase),
-            path: UpstreamProvider.githubCopilot.chatCompletionsPath
-        )
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.setValue("Xcode/24577 CFNetwork/3860.300.31 Darwin/25.2.0", forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 60
-
-        let body: [String: Any] = [
-            "model": model,
-            "stream": true,
-            "temperature": 0.0,
-            "max_tokens": 128,
-            "messages": [
-                [
-                    "role": "system",
-                    "content": "You are validating tool call support. When asked, call the provided tool; do not answer in natural language."
-                ],
-                [
-                    "role": "user",
-                    "content": "Call the proxypilot_probe tool with message 'ok'."
-                ]
-            ],
-            "tools": [
-                [
-                    "type": "function",
-                    "function": [
-                        "name": "proxypilot_probe",
-                        "description": "Records that the Copilot sidecar can emit an OpenAI-compatible tool call.",
-                        "parameters": [
-                            "type": "object",
-                            "properties": [
-                                "message": [
-                                    "type": "string",
-                                    "description": "Use the literal value ok."
-                                ]
-                            ],
-                            "required": ["message"],
-                            "additionalProperties": false
-                        ]
-                    ]
-                ]
-            ],
-            "tool_choice": [
-                "type": "function",
-                "function": ["name": "proxypilot_probe"]
-            ]
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        return request
-    }
-
-    static func parseGitHubCopilotToolCallProbeResponse(_ data: Data) -> CopilotToolCallProbeResult {
-        let text = String(decoding: data, as: UTF8.self)
-        var toolNames: Set<String> = []
-        var sawToolCall = false
-        var content = ""
-        var sawDone = false
-
-        for line in text.split(whereSeparator: \.isNewline) {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmed.hasPrefix("data:") else { continue }
-            let payload = trimmed.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
-            if payload == "[DONE]" {
-                sawDone = true
-                continue
-            }
-
-            guard let jsonData = payload.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                  let choices = object["choices"] as? [[String: Any]] else {
-                continue
-            }
-
-            for choice in choices {
-                guard let delta = choice["delta"] as? [String: Any] else { continue }
-                if let deltaContent = delta["content"] as? String {
-                    content += deltaContent
-                }
-                guard let toolCalls = delta["tool_calls"] as? [[String: Any]] else { continue }
-                sawToolCall = true
-                for toolCall in toolCalls {
-                    guard let function = toolCall["function"] as? [String: Any],
-                          let name = function["name"] as? String,
-                          !name.isEmpty else {
-                        continue
-                    }
-                    toolNames.insert(name)
-                }
-            }
-        }
-
-        if sawToolCall {
-            let names = toolNames.isEmpty ? "an unnamed tool" : toolNames.sorted().joined(separator: ", ")
-            return CopilotToolCallProbeResult(
-                sawToolCall: true,
-                summary: "Copilot tool call probe succeeded: response requested \(names)."
-            )
-        }
-
-        let contentSummary = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !contentSummary.isEmpty {
-            return CopilotToolCallProbeResult(
-                sawToolCall: false,
-                summary: "Copilot responded, but did not request the sample tool call. Response: \(contentSummary)"
-            )
-        }
-
-        let completionNote = sawDone ? "stream completed" : "stream ended without a completion marker"
-        return CopilotToolCallProbeResult(
-            sawToolCall: false,
-            summary: "Copilot responded, but no tool call was detected (\(completionNote))."
-        )
-    }
-
     private func fallbackModels(for provider: UpstreamProvider, statusCode: Int) -> [UpstreamModel]? {
         guard [404, 405, 410, 501].contains(statusCode),
               let fallback = provider.fallbackModelIDs else {
@@ -422,22 +268,6 @@ final class ProxyService {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
     }
 
-    private func applyProviderCompatibilityHeaders(
-        provider: UpstreamProvider,
-        path: String,
-        request: inout URLRequest
-    ) {
-        guard provider == .githubCopilot else { return }
-
-        let userAgent = request.value(forHTTPHeaderField: "User-Agent") ?? ""
-        if path.contains("/messages") {
-            if !userAgent.hasPrefix("claude-cli/") {
-                request.setValue("claude-cli/2.1.14 (external, sdk-cli)", forHTTPHeaderField: "User-Agent")
-            }
-        } else if !userAgent.hasPrefix("Xcode/") {
-            request.setValue("Xcode/24577 CFNetwork/3860.300.31 Darwin/25.2.0", forHTTPHeaderField: "User-Agent")
-        }
-    }
 }
 
 struct OpenAIModelsResponse: Decodable {
@@ -508,7 +338,6 @@ private struct ChatCompletionResponse: Decodable {
 
 enum ProxyServiceError: LocalizedError {
     case httpStatus(Int, String)
-    case responseTooLarge
 
     var errorDescription: String? {
         switch self {
@@ -517,8 +346,6 @@ enum ProxyServiceError: LocalizedError {
                 return "HTTP \(status)"
             }
             return "HTTP \(status): \(body)"
-        case .responseTooLarge:
-            return "Copilot tool-call probe exceeded the 1 MiB response limit"
         }
     }
 }

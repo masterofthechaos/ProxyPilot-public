@@ -15,7 +15,6 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     case miniMaxCN  = "minimax-cn"
     case qwen       = "qwen"
     case nineRouter = "9router"
-    case githubCopilot = "github-copilot"
     case ollama     = "ollama"
     case lmStudio   = "lmstudio"
 
@@ -36,7 +35,6 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .miniMaxCN:  return "MiniMax CN"
         case .qwen:       return "Qwen"
         case .nineRouter: return "9Router"
-        case .githubCopilot: return "GitHub Copilot"
         case .ollama:     return "Ollama"
         case .lmStudio:   return "LM Studio"
         }
@@ -57,7 +55,6 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .miniMaxCN:  return "https://api.minimaxi.com/v1"
         case .qwen:       return "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
         case .nineRouter: return "http://localhost:20128/v1"
-        case .githubCopilot: return "http://127.0.0.1:8080/v1"
         case .ollama:     return "http://localhost:11434/v1"
         case .lmStudio:   return "http://localhost:1234/v1"
         }
@@ -218,14 +215,12 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// Whether this provider runs on the local machine (no cloud API).
     public var isLocal: Bool {
         switch self {
-        case .nineRouter, .githubCopilot, .ollama, .lmStudio: return true
+        case .nineRouter, .ollama, .lmStudio: return true
         default: return false
         }
     }
 
     /// Whether every discovered model may be selected automatically.
-    /// GitHub Copilot is a local transport to cloud models, so it must retain
-    /// the user's explicit/default allowlist instead of widening on fetch.
     public var autoSelectDiscoveredModels: Bool {
         switch self {
         case .nineRouter, .ollama, .lmStudio: return true
@@ -238,9 +233,9 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
 
     /// Whether Active Context Compaction may rewrite the Xcode agent's
     /// system instructions for this provider. Narrower than `isLocal`:
-    /// 9Router and GitHub Copilot are local helpers that forward to cloud
-    /// inference, where prefill is cheap and the original prompt should
-    /// survive intact. Only true local-inference runtimes qualify.
+    /// 9Router is a local helper that forwards to cloud inference, where
+    /// prefill is cheap and the original prompt should survive intact. Only
+    /// true local-inference runtimes qualify.
     public var supportsContextCompaction: Bool {
         switch self {
         case .ollama, .lmStudio: return true
@@ -263,7 +258,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .miniMaxCN:  return SecretKey.minimaxCNAPIKey
         case .qwen:       return SecretKey.qwenAPIKey
         case .nineRouter: return SecretKey.nineRouterAPIKey
-        case .githubCopilot, .ollama, .lmStudio:
+        case .ollama, .lmStudio:
             return nil
         }
     }

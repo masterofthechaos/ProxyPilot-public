@@ -32,15 +32,13 @@ struct ContextCompactionAdapterTests {
     }
 
     @Test func localHelperProvidersThatForwardToCloudAreUnsupported() {
-        // nineRouter and githubCopilot are isLocal, but they proxy to cloud
-        // inference — compaction targets true local runtimes only.
-        for provider in [UpstreamProvider.nineRouter, .githubCopilot] {
-            let mutation = ContextCompactionAdapter.compactAnthropicSystem(
-                wall, provider: provider,
-                configuration: .enabled, ruleset: ruleset, cache: ContextCompactionCache()
-            )
-            #expect(mutation.strategy == "unsupported_provider")
-        }
+        // 9Router is local, but proxies to cloud inference — compaction targets
+        // true local runtimes only.
+        let mutation = ContextCompactionAdapter.compactAnthropicSystem(
+            wall, provider: .nineRouter,
+            configuration: .enabled, ruleset: ruleset, cache: ContextCompactionCache()
+        )
+        #expect(mutation.strategy == "unsupported_provider")
     }
 
     @Test func supportsContextCompactionTruthTable() {

@@ -1,4 +1,5 @@
 import Foundation
+import ProxyPilotCore
 
 enum XcodeConfigManager {
     static let xcodeDefaultsDomain = "com.apple.dt.Xcode"
@@ -51,21 +52,43 @@ enum XcodeConfigManager {
         )
     }
 
-    static func install(port: UInt16) throws -> Status {
+    static func install(port: UInt16, localProxyCredential: String) throws -> Status {
         try FileManager.default.createDirectory(at: configDirectoryURL, withIntermediateDirectories: true)
 
         let settingsContent = """
         {
           "env": {
-            "ANTHROPIC_AUTH_TOKEN": "proxypilot",
+            "ANTHROPIC_AUTH_TOKEN": "\(localProxyCredential)",
             "ANTHROPIC_BASE_URL": "http://127.0.0.1:\(port)"
           }
         }
         """
 
         try settingsContent.write(to: settingsFileURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: settingsFileURL.path
+        )
         try writeDefaultsOverride()
         return status()
+    }
+
+    static func synchronizeLocalProxyCredentialIfInstalled(_ credential: String) throws {
+        guard FileManager.default.fileExists(atPath: settingsFileURL.path) else {
+            return
+        }
+        let data = try Data(contentsOf: settingsFileURL)
+        guard let updated = try LocalProxyCredential.updatingManagedXcodeSettings(
+            data,
+            credential: credential
+        ) else {
+            return
+        }
+        try updated.write(to: settingsFileURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: settingsFileURL.path
+        )
     }
 
     static func remove() throws -> RemovalResult {

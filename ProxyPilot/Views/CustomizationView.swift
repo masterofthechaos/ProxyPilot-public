@@ -178,13 +178,6 @@ struct CustomizationView: View {
 
     private var keysProvidersSection: some View {
         Section("Keys & Providers") {
-            Toggle("Show GitHub Copilot sidecar and provider", isOn: Binding(
-                get: { vm.isKeysProviderVisible(.githubCopilot) },
-                set: { vm.setKeysProvider(.githubCopilot, isVisible: $0) }
-            ))
-            .toggleStyle(.switch)
-            .help("Hides the Copilot sidecar setup card and GitHub Copilot provider row without changing saved credentials.")
-
             Text("Choose which built-in providers appear in Keys & Providers and use the row controls to change their display order. This only changes the settings view; existing keys and provider routing settings are preserved.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

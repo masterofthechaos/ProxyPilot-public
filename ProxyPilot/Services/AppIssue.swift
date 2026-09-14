@@ -33,7 +33,6 @@ struct AppIssue: Identifiable, Equatable, Error {
         case runPreflight
         case retryStart
         case exportDiagnostics
-        case openCopilotLogin
         case openReadme
         case openWebsite
 
@@ -59,8 +58,6 @@ struct AppIssue: Identifiable, Equatable, Error {
                 return String(localized: "Retry Start")
             case .exportDiagnostics:
                 return String(localized: "Export Diagnostics")
-            case .openCopilotLogin:
-                return String(localized: "Sign In to GitHub")
             case .openReadme:
                 return String(localized: "Open README")
             case .openWebsite:

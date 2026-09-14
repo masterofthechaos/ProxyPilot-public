@@ -133,8 +133,8 @@ final class SettingsSectionTests: XCTestCase {
             "a developer tool by Slicewrite Studio"
         )
         XCTAssertEqual(SlicewriteStudioBrand.websiteURL.scheme, "https")
-        XCTAssertEqual(SlicewriteStudioBrand.websiteURL.host, "slicewrite.com")
-        XCTAssertEqual(SlicewriteStudioBrand.websiteURL.path, "/")
+        XCTAssertEqual(SlicewriteStudioBrand.websiteURL.host, "slicewrite.dev")
+        XCTAssertEqual(SlicewriteStudioBrand.websiteURL.path, "")
     }
 
     func testModelSelectionListLayoutStaysBoundedForLargeProviderCatalogs() {

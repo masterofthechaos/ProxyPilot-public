@@ -47,6 +47,17 @@ enum RouteStatusReporter {
         let selected = RouteState.load(); let selectedPort = selected?.port ?? 4000; let probe = await CLIProxyRuntime.probeProxy(on: selectedPort); let pid = PidFile.read()
         let applied = if let selected { await RouteReadiness.selected(port: selected.port, model: selected.model) } else { false }
         let verificationState = applied ? "models_ready" : (probe.reachable ? "mismatched" : "stopped")
+        let metadata = selected.flatMap { selection -> UpstreamModel? in
+            guard let provider = UpstreamProvider(rawValue: selection.provider) else { return nil }
+            return provider.knownModelMetadata(for: selection.model)
+        }
+        let contextValue: Any = (metadata?.contextLength as Any?) ?? NSNull()
+        let inputPriceValue: Any = (metadata?.promptPricePer1M as Any?) ?? NSNull()
+        let outputPriceValue: Any = (metadata?.completionPricePer1M as Any?) ?? NSNull()
+        let cacheReadPriceValue: Any = (metadata?.promptCacheHitPricePer1M as Any?) ?? NSNull()
+        let cacheMissPriceValue: Any = (metadata?.promptCacheMissPricePer1M as Any?) ?? NSNull()
+        let cacheWritePriceValue: Any = (metadata?.promptCacheWritePricePer1M as Any?) ?? NSNull()
+        let currencyValue: Any = metadata == nil ? (NSNull() as Any) : ("USD" as Any)
         guard json else {
             if let selected {
                 print("Route:   \(selected.provider) / \(selected.model) (port \(selected.port))")
@@ -58,7 +69,28 @@ enum RouteStatusReporter {
             print("State:   \(verificationState)")
             return
         }
-        let payload: [String: Any] = ["selected": selected != nil, "applied": applied, "reachable": probe.reachable, "owner": pid == nil ? "none" : "cli", "provider": selected?.provider ?? NSNull(), "model": selected?.model ?? NSNull(), "port": Int(selectedPort), "verification_state": verificationState]
+        let payload: [String: Any] = [
+            "selected": selected != nil,
+            "applied": applied,
+            "reachable": probe.reachable,
+            "owner": pid == nil ? "none" : "cli",
+            "provider": selected?.provider ?? NSNull(),
+            "model": selected?.model ?? NSNull(),
+            "selected_model": selected?.model ?? NSNull(),
+            "applied_model": applied ? (selected?.model ?? NSNull()) : NSNull(),
+            "port": Int(selectedPort),
+            "verification_state": verificationState,
+            "limits": ["context": contextValue, "output": NSNull()],
+            "pricing": [
+                "input_per_million": inputPriceValue,
+                "output_per_million": outputPriceValue,
+                "cache_read_per_million": cacheReadPriceValue,
+                "cache_miss_per_million": cacheMissPriceValue,
+                "cache_write_per_million": cacheWritePriceValue,
+                "currency": currencyValue,
+            ],
+            "metadata_provenance": metadata == nil ? "unavailable" : "provider_known_catalog",
+        ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]); print(String(decoding: data, as: UTF8.self))
     }
 }

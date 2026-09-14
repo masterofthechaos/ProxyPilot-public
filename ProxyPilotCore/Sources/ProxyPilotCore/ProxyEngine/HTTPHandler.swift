@@ -102,11 +102,28 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         head: HTTPRequestHead,
         body: ByteBuffer?
     ) {
+        let admissionHeaders = head.headers.map {
+            LocalHTTPHeaderField(name: $0.name, value: $0.value)
+        }
+        if let rejection = LocalRequestAdmissionPolicy.rejection(
+            method: head.method.rawValue,
+            requestTarget: head.uri,
+            headers: admissionHeaders,
+            listenerPort: config.port
+        ) {
+            sendErrorResponse(
+                context: context,
+                status: HTTPResponseStatus(statusCode: rejection.statusCode),
+                message: rejection.message
+            )
+            return
+        }
+
         let path = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
 
         // Auth check: skip for models endpoints (Xcode compatibility)
         let isModelsEndpoint = (path == "/v1/models" || path == "/models")
-        if !isModelsEndpoint && config.requiresAuth {
+        if !isModelsEndpoint && config.requiresAuthForProtectedRoutes {
             guard authenticateRequest(head) else {
                 sendErrorResponse(context: context, status: .unauthorized, message: "Unauthorized")
                 return
@@ -115,7 +132,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let attribution = RequestAttribution.validated(
             client: head.headers["X-ProxyPilot-Client"].first,
-            sessionID: head.headers["X-ProxyPilot-Session-ID"].first
+            sessionID: head.headers["X-ProxyPilot-Session-ID"].first,
+            role: head.headers["X-ProxyPilot-Role"].first
         )
         RequestAttributionContext.$current.withValue(attribution) {
             switch (head.method, path) {
@@ -135,7 +153,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func authenticateRequest(_ head: HTTPRequestHead) -> Bool {
         guard let masterKey = config.masterKey, !masterKey.isEmpty else {
-            return true
+            return false
         }
 
         // Check Authorization: Bearer <token>
@@ -459,6 +477,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             var lastSeenPromptCacheHitTokens: Int?
             var lastSeenPromptCacheMissTokens: Int?
             var lastSeenPromptCacheWriteTokens: Int?
+            var lastSeenProviderCostUSD: Double?
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             do {
@@ -489,6 +508,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         promptCacheMissTokens: &lastSeenPromptCacheMissTokens,
                         promptCacheWriteTokens: &lastSeenPromptCacheWriteTokens
                     )
+                    lastSeenProviderCostUSD = providerCost(fromStreamingLine: validatedLine) ?? lastSeenProviderCostUSD
 
                     let lineData = SSEFraming.terminatedData(validatedLine)
                     outputCapture.append(lineData)
@@ -526,6 +546,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         promptCacheHitTokens: lastSeenPromptCacheHitTokens,
                         promptCacheMissTokens: lastSeenPromptCacheMissTokens,
                         promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
+                        providerReportedCostUSD: lastSeenProviderCostUSD,
                         config: config
                     )
                     await recordInputOutputLog(
@@ -691,6 +712,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 requestID: UUID().uuidString,
                 messageID: messageID
             )
+            var lastSeenProviderCostUSD: Double?
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             do {
@@ -720,6 +742,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                           let chunkDict = try? JSONSerialization.jsonObject(with: chunkData) as? [String: Any] else {
                         continue
                     }
+                    lastSeenProviderCostUSD = providerCost(from: chunkDict) ?? lastSeenProviderCostUSD
 
                     // Translate chunk to Anthropic SSE events
                     let anthropicEvents = AnthropicTranslator.processStreamingChunk(
@@ -781,6 +804,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                             promptCacheHitTokens: state.lastSeenPromptCacheHitTokens,
                             promptCacheMissTokens: state.lastSeenPromptCacheMissTokens,
                             promptCacheWriteTokens: state.lastSeenPromptCacheWriteTokens,
+                            providerReportedCostUSD: lastSeenProviderCostUSD,
                             config: config
                         )
                     }
@@ -878,7 +902,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             envelopeHeader: head.headers[TutorRequestAdapter.headerName].first,
             attribution: RequestAttribution.validated(
                 client: head.headers["X-ProxyPilot-Client"].first,
-                sessionID: head.headers["X-ProxyPilot-Session-ID"].first
+                sessionID: head.headers["X-ProxyPilot-Session-ID"].first,
+                role: head.headers["X-ProxyPilot-Role"].first
             ),
             provider: config.upstreamProvider
         )
@@ -957,6 +982,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 if (200..<300).contains(normalized.statusCode) {
                     await recordSessionRequest(
                         model: modelFromResponse(normalized.data) ?? requestModel,
+                        requestedModel: requestModel,
                         path: path,
                         wasStreaming: false,
                         startedAt: requestStart,
@@ -1017,6 +1043,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             var lastSeenPromptCacheHitTokens: Int?
             var lastSeenPromptCacheMissTokens: Int?
             var lastSeenPromptCacheWriteTokens: Int?
+            var lastSeenProviderCostUSD: Double?
             var lastSeenModel = requestModel ?? config.preferredAnthropicUpstreamModel
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
             var streamingNormalizationContext = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
@@ -1041,6 +1068,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         promptCacheMissTokens: &lastSeenPromptCacheMissTokens,
                         promptCacheWriteTokens: &lastSeenPromptCacheWriteTokens
                     )
+                    lastSeenProviderCostUSD = providerCost(fromStreamingLine: rawLine) ?? lastSeenProviderCostUSD
                     let normalizedLine = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
                         rawLine,
                         provider: config.upstreamProvider,
@@ -1080,6 +1108,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 if didStart {
                     await recordSessionRequest(
                         model: lastSeenModel,
+                        requestedModel: requestModel,
                         path: path,
                         wasStreaming: true,
                         startedAt: requestStart,
@@ -1088,6 +1117,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         promptCacheHitTokens: lastSeenPromptCacheHitTokens,
                         promptCacheMissTokens: lastSeenPromptCacheMissTokens,
                         promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
+                        providerReportedCostUSD: lastSeenProviderCostUSD,
                         config: config
                     )
                     await recordInputOutputLog(
@@ -1251,6 +1281,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func recordSessionRequest(
         model: String?,
+        requestedModel: String? = nil,
         path: String,
         wasStreaming: Bool,
         startedAt: Date,
@@ -1260,6 +1291,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         promptCacheHitTokens: Int? = nil,
         promptCacheMissTokens: Int? = nil,
         promptCacheWriteTokens: Int? = nil,
+        providerReportedCostUSD: Double? = nil,
         config: ProxyConfiguration
     ) async {
         guard let sessionStats = config.sessionStats else { return }
@@ -1275,6 +1307,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         await sessionStats.record(RequestRecord(
             timestamp: startedAt,
             model: resolvedModel.isEmpty ? "unknown" : resolvedModel,
+            requestedModel: requestedModel ?? trimmedModel,
+            providerReportedCostUSD: providerReportedCostUSD ?? responseUsage?.providerCost,
             promptTokens: promptTokens ?? responseUsage?.prompt ?? 0,
             completionTokens: completionTokens ?? responseUsage?.completion ?? 0,
             promptCacheHitTokens: recordsCacheTelemetry ? (promptCacheHitTokens ?? responseUsage?.promptCacheHit) : nil,
@@ -1330,18 +1364,33 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         completion: Int,
         promptCacheHit: Int?,
         promptCacheMiss: Int?,
-        promptCacheWrite: Int?
+        promptCacheWrite: Int?,
+        providerCost: Double?
     )? {
         guard let usage = AnthropicTranslator.anthropicPassthroughUsage(from: data) else {
             return nil
         }
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let rawUsage = json?["usage"] as? [String: Any]
         return (
             usage.promptTokens ?? 0,
             usage.completionTokens ?? 0,
             usage.promptCacheHitTokens,
             usage.promptCacheMissTokens,
-            usage.promptCacheWriteTokens
+            usage.promptCacheWriteTokens,
+            (rawUsage?["cost"] as? NSNumber)?.doubleValue
         )
+    }
+
+    private func providerCost(fromStreamingLine line: String) -> Double? {
+        guard line.hasPrefix("data: "),
+              let data = String(line.dropFirst(6)).data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return providerCost(from: root)
+    }
+
+    private func providerCost(from root: [String: Any]) -> Double? {
+        ((root["usage"] as? [String: Any])?["cost"] as? NSNumber)?.doubleValue
     }
 
     private func updateStreamingUsage(

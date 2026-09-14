@@ -15,7 +15,7 @@ public extension UpstreamProvider {
         switch self {
         case .zAI:
             return "glm-4.7"
-        case .githubCopilot, .miniMax, .miniMaxCN:
+        case .miniMax, .miniMaxCN:
             return fallbackModelIDs?.first
         default:
             return nil

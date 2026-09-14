@@ -236,8 +236,6 @@ enum UpstreamClient {
         }
 
         applyJSONDefaults(body: body, request: &request)
-        applyProviderCompatibilityHeaders(path: path, config: config, request: &request)
-
         // Set upstream auth
         if let apiKey = config.upstreamAPIKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -290,23 +288,6 @@ enum UpstreamClient {
             throw ProxyEngineError.invalidUpstreamURL
         }
         return url
-    }
-
-    private static func applyProviderCompatibilityHeaders(
-        path: String,
-        config: ProxyConfiguration,
-        request: inout URLRequest
-    ) {
-        guard config.upstreamProvider == .githubCopilot else { return }
-
-        let userAgent = request.value(forHTTPHeaderField: "User-Agent") ?? ""
-        if path.contains("/messages") {
-            if !userAgent.hasPrefix("claude-cli/") {
-                request.setValue("claude-cli/2.1.14 (external, sdk-cli)", forHTTPHeaderField: "User-Agent")
-            }
-        } else if !userAgent.hasPrefix("Xcode/") {
-            request.setValue("Xcode/24577 CFNetwork/3860.300.31 Darwin/25.2.0", forHTTPHeaderField: "User-Agent")
-        }
     }
 
     // MARK: - Errors

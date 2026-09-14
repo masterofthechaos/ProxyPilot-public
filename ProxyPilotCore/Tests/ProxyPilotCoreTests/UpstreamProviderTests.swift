@@ -7,7 +7,6 @@ struct UpstreamProviderTests {
     @Test func ollamaIsLocal() { #expect(UpstreamProvider.ollama.isLocal == true) }
     @Test func lmStudioIsLocal() { #expect(UpstreamProvider.lmStudio.isLocal == true) }
     @Test func nineRouterIsLocal() { #expect(UpstreamProvider.nineRouter.isLocal == true) }
-    @Test func githubCopilotIsLocal() { #expect(UpstreamProvider.githubCopilot.isLocal == true) }
     @Test func cloudProvidersAreNotLocal() {
         for provider in [UpstreamProvider.zAI, .openRouter, .openAI, .xAI, .chutes, .groq, .google, .deepSeek, .mistral, .miniMax, .miniMaxCN, .qwen] {
             #expect(provider.isLocal == false)
@@ -17,7 +16,6 @@ struct UpstreamProviderTests {
         #expect(UpstreamProvider.ollama.requiresAPIKey == false)
         #expect(UpstreamProvider.lmStudio.requiresAPIKey == false)
         #expect(UpstreamProvider.nineRouter.requiresAPIKey == false)
-        #expect(UpstreamProvider.githubCopilot.requiresAPIKey == false)
     }
     @Test func cloudProvidersRequireAPIKey() {
         #expect(UpstreamProvider.openAI.requiresAPIKey == true)
@@ -36,14 +34,12 @@ struct UpstreamProviderTests {
     @Test func secretKeyMappingForLocalProvidersIsNil() {
         #expect(UpstreamProvider.ollama.secretKey == nil)
         #expect(UpstreamProvider.lmStudio.secretKey == nil)
-        #expect(UpstreamProvider.githubCopilot.secretKey == nil)
     }
     @Test func ollamaDefaultURL() { #expect(UpstreamProvider.ollama.defaultAPIBaseURL == "http://localhost:11434/v1") }
     @Test func lmStudioDefaultURL() { #expect(UpstreamProvider.lmStudio.defaultAPIBaseURL == "http://localhost:1234/v1") }
     @Test func nineRouterDefaultURL() { #expect(UpstreamProvider.nineRouter.defaultAPIBaseURL == "http://localhost:20128/v1") }
     @Test func googleDefaultURL() { #expect(UpstreamProvider.google.defaultAPIBaseURL == "https://generativelanguage.googleapis.com/v1beta/openai") }
     @Test func qwenDefaultURL() { #expect(UpstreamProvider.qwen.defaultAPIBaseURL == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1") }
-    @Test func githubCopilotDefaultURL() { #expect(UpstreamProvider.githubCopilot.defaultAPIBaseURL == "http://127.0.0.1:8080/v1") }
     @Test func ollamaTitle() { #expect(UpstreamProvider.ollama.title == "Ollama") }
     @Test func lmStudioTitle() { #expect(UpstreamProvider.lmStudio.title == "LM Studio") }
     @Test func nineRouterTitle() { #expect(UpstreamProvider.nineRouter.title == "9Router") }
@@ -166,9 +162,6 @@ struct UpstreamProviderTests {
             #expect(provider.fallbackModelIDs == nil, "\(provider.rawValue) should have nil fallbackModelIDs")
         }
     }
-    @Test func githubCopilotDoesNotInventFallbackModels() {
-        #expect(UpstreamProvider.githubCopilot.fallbackModelIDs == nil)
-    }
     @Test func temperatureClampForMiniMax() {
         var request: [String: Any] = ["model": "MiniMax-M2.5", "temperature": 0.0]
         AnthropicTranslator.clampTemperature(&request, for: .miniMax)
@@ -275,10 +268,6 @@ struct UpstreamProviderTests {
             upstreamProvider: .miniMax,
             miniMaxRoutingMode: .standard
         )
-        #expect(config.isAnthropicPassthroughActive == false)
-    }
-    @Test func isAnthropicPassthroughInactiveForGitHubCopilot() {
-        let config = ProxyConfiguration(upstreamProvider: .githubCopilot)
         #expect(config.isAnthropicPassthroughActive == false)
     }
 }
