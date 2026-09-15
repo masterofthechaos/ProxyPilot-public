@@ -129,8 +129,8 @@ public struct ProxyConfiguration: Sendable {
 
     /// Whether Anthropic passthrough is active for the current provider.
     public var isAnthropicPassthroughActive: Bool {
-        upstreamProvider.usesAnthropicPassthroughByDefault
-            || (miniMaxRoutingMode == .anthropicPassthrough && upstreamProvider.supportsAnthropicPassthrough)
+        upstreamProvider.usesAnthropicPassthrough(for: preferredAnthropicUpstreamModel)
+            || (miniMaxRoutingMode == .anthropicPassthrough && upstreamProvider.isMiniMax)
     }
 }
 

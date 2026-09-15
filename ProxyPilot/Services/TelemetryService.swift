@@ -403,7 +403,11 @@ final class TelemetryService {
         }
 
         remoteCaptureHook?(event.name, properties)
-        guard postHogDeliveryEnabled else { return }
+        // Internal installs keep local diagnostics but must never create PostHog
+        // events or persons, even after preferences (and the install ID) reset.
+        // Check both marker sources at delivery time so a newly installed marker
+        // also takes effect without restarting the app.
+        guard postHogDeliveryEnabled, !isMicahInternalInstall else { return }
 
         guard let apiKey = postHogAPIKeyProvider(),
               !apiKey.isEmpty,

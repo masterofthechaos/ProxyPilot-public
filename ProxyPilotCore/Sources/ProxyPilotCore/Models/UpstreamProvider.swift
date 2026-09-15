@@ -10,6 +10,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     case groq       = "groq"
     case google     = "google"
     case deepSeek   = "deepseek"
+    case moonshot   = "moonshot"
     case mistral    = "mistral"
     case miniMax    = "minimax"
     case miniMaxCN  = "minimax-cn"
@@ -30,6 +31,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .groq:       return "Groq"
         case .google:     return "Google (Gemini)"
         case .deepSeek:   return "DeepSeek"
+        case .moonshot:   return "Moonshot.ai (Kimi)"
         case .mistral:    return "Mistral"
         case .miniMax:    return "MiniMax"
         case .miniMaxCN:  return "MiniMax CN"
@@ -50,6 +52,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .groq:       return "https://api.groq.com/openai/v1"
         case .google:     return "https://generativelanguage.googleapis.com/v1beta/openai"
         case .deepSeek:   return "https://api.deepseek.com/v1"
+        case .moonshot:   return "https://api.moonshot.ai/v1"
         case .mistral:    return "https://api.mistral.ai/v1"
         case .miniMax:    return "https://api.minimax.io/v1"
         case .miniMaxCN:  return "https://api.minimaxi.com/v1"
@@ -66,6 +69,8 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
 
     public var unsupportedOpenAIParameters: [String] {
         switch self {
+        case .moonshot:
+            return ["temperature", "top_p", "n", "presence_penalty", "frequency_penalty"]
         case .google:
             return [
                 "logprobs",
@@ -106,6 +111,8 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// For example, Mistral uses `random_seed` instead of `seed`.
     public var parameterRewrites: [String: String] {
         switch self {
+        case .moonshot:
+            return ["max_completion_tokens": "max_tokens"]
         case .mistral:
             return ["seed": "random_seed", "max_completion_tokens": "max_tokens"]
         default:
@@ -253,6 +260,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .groq:       return SecretKey.groqAPIKey
         case .google:     return SecretKey.googleAPIKey
         case .deepSeek:   return SecretKey.deepSeekAPIKey
+        case .moonshot:   return SecretKey.moonshotAPIKey
         case .mistral:    return SecretKey.mistralAPIKey
         case .miniMax:    return SecretKey.minimaxAPIKey
         case .miniMaxCN:  return SecretKey.minimaxCNAPIKey
@@ -271,13 +279,18 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// Whether this provider has an official Anthropic-compatible endpoint that
     /// can receive `/v1/messages` requests directly.
     public var supportsAnthropicPassthrough: Bool {
-        isMiniMax || self == .deepSeek
+        isMiniMax || self == .deepSeek || self == .moonshot
     }
 
     /// Whether `/v1/messages` should use the provider's Anthropic-compatible
     /// endpoint without requiring a user-facing routing-mode toggle.
     public var usesAnthropicPassthroughByDefault: Bool {
         self == .deepSeek
+    }
+
+    /// Moonshot currently documents native Messages for K3 only.
+    public func usesAnthropicPassthrough(for model: String) -> Bool {
+        usesAnthropicPassthroughByDefault || (self == .moonshot && model == "kimi-k3")
     }
 
     /// Derives the Anthropic passthrough base URL from the OpenAI-compat base URL.
@@ -303,6 +316,8 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// provider `/anthropic` endpoints.
     public var unsupportedAnthropicParameters: [String] {
         switch self {
+        case .moonshot:
+            return ["temperature", "top_p", "top_k", "thinking", "service_tier", "mcp_servers", "container", "context_management"]
         case .miniMax, .miniMaxCN:
             return [
                 "top_k",

@@ -238,7 +238,10 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eventLoop = context.eventLoop
 
         // --- Anthropic Passthrough: forward directly to the provider /anthropic endpoint ---
-        if config.isAnthropicPassthroughActive {
+        let passthroughModel = config.preferredAnthropicUpstreamModel.isEmpty
+            ? (anthropicRequest["model"] as? String ?? "")
+            : config.preferredAnthropicUpstreamModel
+        if config.isAnthropicPassthroughActive || config.upstreamProvider.usesAnthropicPassthrough(for: passthroughModel) {
             // Remap model to the preferred upstream model.
             if !config.preferredAnthropicUpstreamModel.isEmpty {
                 anthropicRequest["model"] = config.preferredAnthropicUpstreamModel

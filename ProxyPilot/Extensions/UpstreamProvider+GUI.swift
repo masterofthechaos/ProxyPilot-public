@@ -13,6 +13,7 @@ extension UpstreamProvider {
         case .chutes: return URL(string: "https://chutes.ai/app/api-keys")
         case .groq: return URL(string: "https://console.groq.com/keys")
         case .google: return URL(string: "https://aistudio.google.com/apikey")
+        case .moonshot: return URL(string: "https://platform.kimi.ai/console/api-keys")
         case .deepSeek: return URL(string: "https://platform.deepseek.com/api_keys")
         case .mistral: return URL(string: "https://console.mistral.ai/api-keys")
         case .miniMax: return URL(string: "https://platform.minimax.io")
@@ -49,6 +50,7 @@ extension UpstreamProvider {
         case .groq: return .groqAPIKey
         case .google: return .googleAPIKey
         case .deepSeek: return .deepSeekAPIKey
+        case .moonshot: return .moonshotAPIKey
         case .mistral: return .mistralAPIKey
         case .miniMax: return .minimaxAPIKey
         case .miniMaxCN: return .minimaxCNAPIKey

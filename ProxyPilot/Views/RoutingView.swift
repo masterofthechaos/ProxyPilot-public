@@ -14,6 +14,7 @@ import ProxyPilotCore
 /// must not change the model RepoGPS uses, and vice versa.
 struct RoutingView: View {
     @EnvironmentObject private var vm: AppViewModel
+    var onOpenXcodeSetup: () -> Void = {}
 
     /// Shared with Home and the menu bar via `AppViewModel`. Previously a
     /// view-local `@StateObject`, which left Home unable to see the CLI route
@@ -58,6 +59,8 @@ struct RoutingView: View {
             }
             .pickerStyle(.menu)
 
+            Button("Open Xcode Setup", action: onOpenXcodeSetup)
+
             // Deliberately `vm.statusText` rather than a synthesized
             // "Serving on port N". `vm.isRunning` is true whenever *a* proxy
             // answers on the port — including a CLI daemon the GUI does not
@@ -68,12 +71,12 @@ struct RoutingView: View {
             routeStatusRow(
                 isLive: vm.isRunning,
                 title: vm.statusText,
-                caption: "GUI-owned · applies on proxy start or restart"
+                caption: vm.xcodeAgentRoutingSummaryText
             )
         } header: {
-            Text("Xcode / Claude Agent")
+            Text("Xcode")
         } footer: {
-            Text("Set from the menu bar or here. This route serves Xcode and does not affect RepoGPS.")
+            Text("This is your Xcode selection. Use Xcode Setup to choose a provider, discover models, and apply changes. A background proxy may also serve other clients.")
                 .font(.caption)
         }
     }
@@ -156,9 +159,8 @@ struct RoutingView: View {
             Text("RepoGPS")
         } footer: {
             Text(
-                "RepoGPS asks the CLI for this route, so applying it restarts the proxy daemon "
-                + "and ends any request in flight. Settable here, from the menu bar, or with "
-                + "`proxypilot route set`."
+                "Applying changes restarts the background proxy and interrupts requests using it, "
+                + "including Xcode requests if it shares this proxy. Wait for the current response to finish first."
             )
             .font(.caption)
         }
@@ -231,9 +233,9 @@ struct RoutingView: View {
     private var currentRouteCaption: String {
         guard let provider = routeControl.status.provider,
               let model = routeControl.status.model else {
-            return "CLI-owned · route.json"
+            return "No background model configured"
         }
-        return "CLI-owned · \(provider) / \(model)"
+        return "Background proxy · \(provider) / \(model)"
     }
 
     private var hasPendingChange: Bool {

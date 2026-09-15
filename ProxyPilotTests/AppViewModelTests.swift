@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 import SwiftUI
 import ProxyPilotCore
 @testable import ProxyPilot
@@ -1128,7 +1129,7 @@ final class AppViewModelTests: XCTestCase {
 
     func testProxyRuntimeStatusCopyDistinguishesOnlyExternalCLI() {
         XCTAssertEqual(AppViewModel.statusText(for: .runningInApp), "Running")
-        XCTAssertEqual(AppViewModel.statusText(for: .runningExternal), "Running (via CLI)")
+        XCTAssertEqual(AppViewModel.statusText(for: .runningExternal), "Running in background")
         XCTAssertEqual(AppViewModel.statusText(for: .stopped), "Stopped")
         XCTAssertEqual(AppViewModel.statusText(for: .portOccupied(statusCode: 418)), "Port occupied by another service (HTTP 418)")
     }
@@ -1136,11 +1137,11 @@ final class AppViewModelTests: XCTestCase {
     func testToolbarProxyStatusDistinguishesGUICLIAndRepoGPSOwnership() {
         XCTAssertEqual(
             AppViewModel.toolbarProxyStatus(for: .runningInApp, repoGPSActive: false),
-            .init(kind: .gui, compactText: "GUI", fullText: "Running (GUI)")
+            .init(kind: .gui, compactText: "Running", fullText: "Proxy running in app")
         )
         XCTAssertEqual(
             AppViewModel.toolbarProxyStatus(for: .runningExternal, repoGPSActive: false),
-            .init(kind: .cli, compactText: "CLI", fullText: "Running (CLI)")
+            .init(kind: .cli, compactText: "Running", fullText: "Proxy running in background")
         )
         XCTAssertEqual(
             AppViewModel.toolbarProxyStatus(for: .runningExternal, repoGPSActive: true),
@@ -1152,7 +1153,7 @@ final class AppViewModelTests: XCTestCase {
                 repoGPSActive: false,
                 repoGPSLeasePresent: true
             ),
-            .init(kind: .repoGPS, compactText: "RepoGPS", fullText: "RepoGPS route ready")
+            .init(kind: .cli, compactText: "Running", fullText: "Proxy running in background")
         )
     }
 
@@ -1172,7 +1173,7 @@ final class AppViewModelTests: XCTestCase {
 
         vm.applyProxyRuntimeStatus(.runningExternal)
 
-        XCTAssertEqual(vm.xcodeAgentAppliedModelText, "Inactive — external CLI owns the proxy")
+        XCTAssertEqual(vm.xcodeAgentAppliedModelText, "Not verified — proxy is running in background")
     }
 
     func testExternalCLIProxyCanBeStoppedFromGUI() {
@@ -1180,6 +1181,63 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(AppViewModel.canStopProxy(for: .runningInApp))
         XCTAssertFalse(AppViewModel.canStopProxy(for: .runningExternal, isStoppingCLIProxy: true))
         XCTAssertFalse(AppViewModel.canStopProxy(for: .stopped))
+    }
+
+    func testStartRecoversAfterPortConflictWithoutRelaunch() async throws {
+        let occupied = socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(occupied, 0)
+        var isOpen = true
+        defer { if isOpen { close(occupied) } }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = INADDR_ANY
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(occupied, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(bound, 0)
+        XCTAssertEqual(listen(occupied, 1), 0)
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(occupied, $0, &length)
+            }
+        }
+        let port = UInt16(bigEndian: address.sin_port)
+        let vm = AppViewModel(defaults: defaults)
+        vm.proxyURLString = "http://127.0.0.1:\(port)"
+        vm.upstreamProvider = .ollama
+        vm.selectedXcodeAgentModel = "test-model"
+        await vm.startProxy()
+        XCTAssertEqual(vm.activeIssue?.code, .portInUse)
+        close(occupied)
+        isOpen = false
+        await vm.startProxy()
+        XCTAssertNil(vm.activeIssue)
+        XCTAssertTrue(vm.isRunning)
+        await vm.stopProxy()
+    }
+
+    func testRestartDoesNotReplaceBackgroundProxyWhenStopFails() async {
+        var stops = 0
+        let vm = AppViewModel(
+            defaults: defaults,
+            cliExecutableResolver: { URL(fileURLWithPath: "/test/proxypilot") },
+            cliStopRunner: { _, _ in
+                stops += 1
+                return AppViewModel.CLIUpdateExecutionResult(
+                    terminationStatus: 1, stdout: "", stderr: "Cannot stop owned process"
+                )
+            }
+        )
+        vm.applyProxyRuntimeStatus(.runningExternal)
+        XCTAssertTrue(vm.canRestartProxy)
+        await vm.restartProxy()
+        XCTAssertEqual(stops, 1)
+        XCTAssertEqual(vm.proxyRuntimeStatus, .runningExternal)
+        XCTAssertEqual(vm.statusText, "Running in background")
     }
 
     func testStopProxyRunsInstalledCLIWhenExternalProxyIsRunning() async {
@@ -1833,6 +1891,75 @@ final class AppViewModelTests: XCTestCase {
             "app_version": "1.8.1",
             "build_number": "103"
         ])
+    }
+
+    func testInternalTelemetrySuppressesAllDeliveryAndSurvivesReset() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let marker = base.appendingPathComponent("internal-telemetry-marker")
+        var requests: [URLRequest] = []
+        let telemetry = TelemetryService(
+            defaults: defaults,
+            baseDirectory: base,
+            postHogDeliveryEnabled: true,
+            protectedInternalMarkerURL: marker,
+            postHogAPIKeyProvider: { "test-posthog-key" },
+            postHogRequestHook: { requests.append($0) }
+        )
+        func captureBoth() {
+            telemetry.trackCoreHealthAppOpen(appVersion: "1.16.2", buildNumber: "145")
+            telemetry.track(name: "onboarding_started", telemetryOptIn: true)
+            telemetry.track(name: "proxy_start_failed", payload: ["code": "E001"], telemetryOptIn: true)
+        }
+
+        // An unmarked public install still sends health and opted-in analytics.
+        captureBoth()
+        XCTAssertEqual(requests.count, 3)
+        let originalID = telemetry.installID
+        requests.removeAll()
+
+        // The legacy preference blocks every delivery kind too.
+        defaults.set(true, forKey: "proxypilot.telemetry.isMicah")
+        captureBoth()
+        XCTAssertTrue(requests.isEmpty)
+        defaults.removeObject(forKey: "proxypilot.telemetry.isMicah")
+
+        // The protected marker takes effect in an already-running service.
+        try "is_micah=true\n".write(to: marker, atomically: true, encoding: .utf8)
+        captureBoth()
+        XCTAssertTrue(requests.isEmpty)
+        telemetry.resetForFreshInstall()
+        XCTAssertNotEqual(originalID, telemetry.installID)
+        captureBoth()
+        XCTAssertTrue(requests.isEmpty)
+
+        let log = base.appendingPathComponent("ProxyPilotTelemetry/events.ndjson")
+        let events = try String(contentsOf: log, encoding: .utf8).split(separator: "\n")
+            .map { try JSONDecoder().decode(TelemetryEvent.self, from: Data($0.utf8)) }
+        XCTAssertEqual(events.map(\.name), ["app_opened", "onboarding_started", "proxy_start_failed"])
+
+        // Recreated preferences simulate AppCleaner without touching the protected marker.
+        let suite = "internal-telemetry-test-" + UUID().uuidString
+        let freshDefaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { freshDefaults.removePersistentDomain(forName: suite) }
+        let relaunched = TelemetryService(
+            defaults: freshDefaults,
+            baseDirectory: base,
+            postHogDeliveryEnabled: true,
+            protectedInternalMarkerURL: marker,
+            postHogAPIKeyProvider: { "test-posthog-key" },
+            postHogRequestHook: { requests.append($0) }
+        )
+        XCTAssertNotEqual(telemetry.installID, relaunched.installID)
+        relaunched.trackCoreHealthAppOpen(appVersion: "1.16.2", buildNumber: "145")
+        relaunched.track(name: "onboarding_started", telemetryOptIn: true)
+        XCTAssertTrue(requests.isEmpty)
+
+        // Malformed markers must not silently disable public telemetry.
+        try "is_micah=false\n".write(to: marker, atomically: true, encoding: .utf8)
+        captureBoth()
+        XCTAssertEqual(requests.count, 3)
     }
 
     func testPreflightFailureTelemetryPayloadIncludesActionableContextOnly() {
@@ -3092,15 +3219,15 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertLessThanOrEqual(presented, 1, "More than one launch sheet presented", line: line)
     }
 
-    func testHarnessOnboardingShowsOnceOnFirstOpen() {
+    func testHarnessOnboardingDoesNotInterruptFirstOpen() {
         defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
         defaults.set(bundleVersion, forKey: "proxypilot.analyticsPromptShownVersion")
         let vm = AppViewModel(defaults: defaults)
 
         vm.maybeShowHarnessOnboarding()
 
-        XCTAssertTrue(vm.showHarnessOnboarding)
-        XCTAssertEqual(defaults.string(forKey: harnessPresentedKey), bundleVersion)
+        XCTAssertFalse(vm.showHarnessOnboarding)
+        XCTAssertNil(defaults.string(forKey: harnessPresentedKey))
         assertAtMostOneSheetPresented(vm)
     }
 
@@ -3125,7 +3252,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(vm.showHarnessOnboarding)
     }
 
-    func testHarnessOnboardingSkipKeepsBadgeVisible() {
+    func testHarnessOnboardingSkipDoesNotPromoteTerminalFeatures() {
         defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
         let vm = AppViewModel(defaults: defaults)
         vm.maybeShowHarnessOnboarding()
@@ -3133,7 +3260,7 @@ final class AppViewModelTests: XCTestCase {
         vm.finishHarnessOnboarding(completed: false)
 
         XCTAssertFalse(vm.showHarnessOnboarding)
-        XCTAssertTrue(vm.harnessOnboardingBadgeVisible)
+        XCTAssertFalse(vm.harnessOnboardingBadgeVisible)
         XCTAssertNil(defaults.string(forKey: harnessCompletedKey))
     }
 
@@ -3157,12 +3284,12 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(relaunched.harnessOnboardingBadgeVisible)
     }
 
-    func testHarnessBadgeVisibleUntilCompletedAcrossRelaunch() {
+    func testHarnessBadgeHiddenEvenWithoutCompletingOptionalTour() {
         defaults.set(bundleVersion, forKey: harnessPresentedKey)
 
         let relaunched = AppViewModel(defaults: defaults)
 
-        XCTAssertTrue(relaunched.harnessOnboardingBadgeVisible)
+        XCTAssertFalse(relaunched.harnessOnboardingBadgeVisible)
     }
 
     /// Manual re-entry is always available, even after the tour was completed.
@@ -3214,7 +3341,7 @@ final class AppViewModelTests: XCTestCase {
         vm.dismissAnalyticsPrompt(optIn: true)
 
         XCTAssertFalse(vm.showAnalyticsPrompt)
-        XCTAssertTrue(vm.showHarnessOnboarding)
+        XCTAssertFalse(vm.showHarnessOnboarding)
         assertAtMostOneSheetPresented(vm)
     }
 
@@ -3246,7 +3373,7 @@ final class AppViewModelTests: XCTestCase {
         dismissKeychainPrimerThroughSheetBinding(vm)
 
         XCTAssertFalse(vm.showKeychainAccessPrimer)
-        XCTAssertTrue(vm.showHarnessOnboarding)
+        XCTAssertFalse(vm.showHarnessOnboarding)
         assertAtMostOneSheetPresented(vm)
     }
 
@@ -3262,7 +3389,7 @@ final class AppViewModelTests: XCTestCase {
 
         vm.dismissKeychainAccessPrimer()
 
-        XCTAssertTrue(vm.showHarnessOnboarding)
+        XCTAssertFalse(vm.showHarnessOnboarding)
         assertAtMostOneSheetPresented(vm)
     }
 
@@ -3289,7 +3416,7 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertNil(defaults.string(forKey: harnessPresentedKey))
         XCTAssertNil(defaults.string(forKey: harnessCompletedKey))
-        XCTAssertTrue(vm.harnessOnboardingBadgeVisible)
+        XCTAssertFalse(vm.harnessOnboardingBadgeVisible)
         XCTAssertFalse(vm.showHarnessOnboarding)
     }
 }

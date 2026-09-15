@@ -535,7 +535,7 @@ final class AppViewModel: ObservableObject {
 
     var canStartProxy: Bool { proxyRuntimeStatus == .stopped }
     var canStopProxy: Bool { Self.canStopProxy(for: proxyRuntimeStatus, isStoppingCLIProxy: isStoppingCLIProxy) }
-    var canRestartProxy: Bool { proxyRuntimeStatus == .runningInApp }
+    var canRestartProxy: Bool { Self.canStopProxy(for: proxyRuntimeStatus, isStoppingCLIProxy: isStoppingCLIProxy) }
 
     static func canStopProxy(for status: ProxyRuntimeStatus, isStoppingCLIProxy: Bool = false) -> Bool {
         guard !isStoppingCLIProxy else { return false }
@@ -549,7 +549,7 @@ final class AppViewModel: ObservableObject {
         case .runningInApp:
             return String(localized: "Running")
         case .runningExternal:
-            return String(localized: "Running (via CLI)")
+            return String(localized: "Running in background")
         case .portOccupied(let statusCode):
             return String(localized: "Port occupied by another service") + " (HTTP \(statusCode))"
         }
@@ -591,14 +591,6 @@ final class AppViewModel: ObservableObject {
             )
         }
 
-        if repoGPSLeasePresent, runtimeStatus == .runningExternal {
-            return ToolbarProxyStatus(
-                kind: .repoGPS,
-                compactText: "RepoGPS",
-                fullText: String(localized: "RepoGPS route ready")
-            )
-        }
-
         switch runtimeStatus {
         case .stopped:
             return ToolbarProxyStatus(
@@ -609,14 +601,14 @@ final class AppViewModel: ObservableObject {
         case .runningInApp:
             return ToolbarProxyStatus(
                 kind: .gui,
-                compactText: "GUI",
-                fullText: String(localized: "Running (GUI)")
+                compactText: "Running",
+                fullText: String(localized: "Proxy running in app")
             )
         case .runningExternal:
             return ToolbarProxyStatus(
                 kind: .cli,
-                compactText: "CLI",
-                fullText: String(localized: "Running (CLI)")
+                compactText: "Running",
+                fullText: String(localized: "Proxy running in background")
             )
         case .portOccupied(let statusCode):
             let text = String(localized: "Port occupied by another service") + " (HTTP \(statusCode))"
@@ -1029,7 +1021,7 @@ final class AppViewModel: ObservableObject {
         autoRestartEnabled = true
         hasEvaluatedKeychainPrimerThisLaunch = false
         showHarnessOnboarding = false
-        harnessOnboardingBadgeVisible = true
+        harnessOnboardingBadgeVisible = false
 
         providerKeyDrafts = [:]
         providerKeyEditing = [:]
@@ -1113,6 +1105,7 @@ final class AppViewModel: ObservableObject {
         }
 
         do {
+            lastCLIExecutablePath = executableURL.path
             let execution = try await runCLIAuthStatus(executableURL: executableURL, provider: provider)
             providerCLIAuthStatuses[provider] = Self.providerCLIAuthStatus(from: execution, provider: provider)
         } catch {
@@ -1692,6 +1685,10 @@ final class AppViewModel: ObservableObject {
     @Published var isUpdatingCLITool: Bool = false
     @Published var isStoppingCLIProxy: Bool = false
     @Published var cliUpdateStatusText: String = ""
+    @Published var companionUpdateStatusText: String = ""
+    @Published var protectedCLIUpdates: [URL] = []
+    private var isReconcilingCompanions = false
+    @Published private(set) var lastCLIExecutablePath: String = ""
     @Published var cliUpdateStatusIsError: Bool = false
     @Published var providerCLIAuthStatuses: [UpstreamProvider: ProviderCLIAuthStatus] = [:]
 
@@ -1770,7 +1767,7 @@ final class AppViewModel: ObservableObject {
     /// running session looks unchanged.
     var xcodeAgentRouteScopeNote: String {
         if showsAgentModeChoice && selectedAgentMode == .proxyPilotAgent {
-            return String(localized: "The proxy applies the selected model to new requests. An agent session already running in Xcode keeps the model hint it launched with — start a new agent session to pick up a change.")
+            return String(localized: "Once the proxy is running the new model, your next request uses it in the same Xcode conversation. Xcode may keep displaying the original model hint; check the observed model in Home or Session History.")
         }
         return String(localized: "Xcode picks up the selected model on its next request, once the proxy is running it.")
     }
@@ -1905,7 +1902,7 @@ final class AppViewModel: ObservableObject {
         case .app:
             return String(localized: "The ProxyPilot-owned proxy is serving this route, from the Xcode selection.") + " " + source
         case .cli:
-            return String(localized: "A CLI daemon owns the proxy and is serving this route from route.json. This is the RepoGPS route, not the Xcode one.") + " " + source
+            return String(localized: "The proxy is running in the background. It may serve Xcode, RepoGPS, or another client; background operation alone does not identify the client.") + " " + source
         }
     }
 
@@ -1942,7 +1939,7 @@ final class AppViewModel: ObservableObject {
         // CLI traffic claiming to be live. `xcodeAgentRoutingSummaryText` has had
         // this case since the Routing section shipped; this one did not.
         if proxyRuntimeStatus == .runningExternal {
-            return String(localized: "Selected Xcode Agent model. The running proxy is CLI-owned and is not serving this route — the session metrics above are its traffic, not Xcode's.")
+            return String(localized: "Selected Xcode Agent model. The proxy is running in the background and may serve Xcode. Verify the applied model before treating this selection as live.")
         }
         return "Selected Xcode Agent model. Start or restart ProxyPilot before treating it as live."
     }
@@ -1963,7 +1960,7 @@ final class AppViewModel: ObservableObject {
             return active.isEmpty ? "Running, no applied model recorded" : active
         }
         if proxyRuntimeStatus == .runningExternal {
-            return "Inactive — external CLI owns the proxy"
+            return "Not verified — proxy is running in background"
         }
         return "Not applied until proxy start"
     }
@@ -2740,7 +2737,7 @@ final class AppViewModel: ObservableObject {
         requireLocalAuth = defaults.bool(forKey: Self.requireLocalAuthDefaultsKey)
 
         showOnboardingWizard = !defaults.bool(forKey: Self.didCompleteOnboardingDefaultsKey)
-        harnessOnboardingBadgeVisible = defaults.string(forKey: Self.harnessOnboardingCompletedVersionKey) == nil
+        harnessOnboardingBadgeVisible = false
 
         if let data = defaults.data(forKey: Self.preflightSnapshotDefaultsKey),
            let decoded = try? JSONDecoder().decode([PreflightCheckResult].self, from: data) {
@@ -2847,7 +2844,10 @@ final class AppViewModel: ObservableObject {
         providerManager.isInitialized = true
         runPreflightChecks(trackEvent: false)
         if Self.shouldRunLaunchBackgroundWork() {
-            repoGPS.startMonitoring()
+            Task {
+                await reconcileInstalledCompanions()
+                repoGPS.startMonitoring()
+            }
             Task { await detectXcodeInstallations() }
             if upstreamProvider == .openRouter {
                 Task { await providerManager.loadVerifiedModels() }
@@ -2980,15 +2980,12 @@ final class AppViewModel: ObservableObject {
 
     // MARK: - Coding Harness Tour
 
-    /// Auto-presents the RepoGPS tour once, on the first open of a version that ships it.
-    /// Deliberately last in the launch sheet chain: the analytics decision comes first, so
-    /// the tour itself can be attributed for anyone who opted in.
+    /// Retained launch-chain entry point: optional Terminal onboarding never
+    /// interrupts Xcode setup. Manual entry remains available in RepoGPS.
     func maybeShowHarnessOnboarding() {
-        guard defaults.string(forKey: Self.harnessOnboardingPresentedVersionKey) == nil else { return }
-        guard !showOnboardingWizard, !showKeychainAccessPrimer, !showAnalyticsPrompt else { return }
-
-        defaults.set(Self.appVersion, forKey: Self.harnessOnboardingPresentedVersionKey)
-        presentHarnessOnboarding(surface: "first_open_after_update")
+        // Terminal features are opt-in. Keep the tour available from RepoGPS,
+        // without interrupting Xcode setup or promoting it on every launch.
+        harnessOnboardingBadgeVisible = false
     }
 
     /// Manual re-entry from the sidebar pill or the Coding Harnesses tab. Ignores both
@@ -3356,7 +3353,24 @@ final class AppViewModel: ObservableObject {
     }
 
     func restartProxy() async {
+        // Xcode's managed launcher can start a background proxy. Stop it through
+        // its existing verified CLI path before applying the app's selection.
+        // A failed stop must never start a competing listener or erase its error.
+        let wasBackground = proxyRuntimeStatus == .runningExternal
+        if wasBackground {
+            await stopExternalCLIProxy()
+            guard proxyRuntimeStatus == .stopped else { return }
+            // Older stop helpers can report immediately after SIGKILL, before
+            // the kernel has finished releasing the listening socket.
+            try? await Task.sleep(for: .milliseconds(250))
+        }
         await proxyLifecycle.restartProxy()
+        if wasBackground, activeIssue?.code == .portInUse {
+            // Only retry this specific handoff race once. Failed listeners are
+            // cleaned up by the lifecycle manager; other errors remain visible.
+            try? await Task.sleep(for: .milliseconds(500))
+            await proxyLifecycle.restartProxy()
+        }
     }
 
     func stopProxy() async {
@@ -3642,7 +3656,7 @@ final class AppViewModel: ObservableObject {
 
         reconcileXcodeAgentModelSelection()
 
-        await proxyLifecycle.restartProxy()
+        await restartProxy()
 
         refreshStatus()
     }
@@ -3851,6 +3865,42 @@ final class AppViewModel: ObservableObject {
             URLQueryItem(name: "body", value: feedbackDraftBody(version: version, build: build))
         ]
         return components.url
+    }
+
+    func reconcileInstalledCompanions() async {
+        guard !isReconcilingCompanions else { return }
+        isReconcilingCompanions = true
+        defer { isReconcilingCompanions = false }
+        let source = RepoGPSService.bundledProxyPilotCLI(in: .main)
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+        let sharedCLIInstalled = FileManager.default.isExecutableFile(atPath: home.appendingPathComponent(".proxypilot/bin/proxypilot").path)
+        let result = await Task.detached(priority: .utility) {
+            CompanionUpdateService.reconcile(source: source, destinations: CompanionUpdateService.candidates(home: home), sourceVersion: version)
+        }.value
+        protectedCLIUpdates = result.protectedDestinations
+        var messages = result.needsAttention
+        if sharedCLIInstalled, !(await repoGPS.installProxyPilotCLI(reportReceipt: false)) {
+            messages.append(repoGPS.lastError ?? "Shared CLI update failed.")
+        }
+        await repoGPS.refresh(allowAutomaticUpdate: true)
+        if repoGPS.distribution.installed && repoGPS.distribution.ownership != "managed" {
+            messages.append("RepoGPS is an external installation. Use RepoGPS’s adoption controls to enable managed updates; the external build is preserved.")
+        }
+        if let error = repoGPS.lastError { messages.append(error) }
+        companionUpdateStatusText = messages.isEmpty
+            ? (result.updated.isEmpty ? "" : "Installed companion tools are up to date.")
+            : messages.joined(separator: "\n")
+    }
+
+    func authorizeCompanionUpdates() async {
+        if let error = CompanionUpdateService.authorizeProtectedUpdates(
+            source: RepoGPSService.bundledProxyPilotCLI(in: .main), destinations: protectedCLIUpdates
+        ) {
+            companionUpdateStatusText = error
+        } else {
+            await reconcileInstalledCompanions()
+        }
     }
 
     func updateCLITool() async {

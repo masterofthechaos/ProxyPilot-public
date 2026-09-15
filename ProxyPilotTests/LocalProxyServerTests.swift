@@ -1716,6 +1716,148 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertTrue(record.wasStreaming)
     }
 
+    func testMoonshotBufferedPassthroughRecordsNativeAnthropicUsage() async throws {
+        let upstream = LocalHTTPStubServer(body: """
+        {"id":"msg_deepseek_test","type":"message","role":"assistant","model":"kimi-k3","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":32,"service_tier":"standard"}}
+        """)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "test",
+            upstreamProvider: .moonshot,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: "sk-test",
+            allowedModels: ["kimi-k3"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "kimi-k3",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
+        request.httpBody = jsonBody([
+            "model": "claude-opus-4-7",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (responseBody, response) = try await URLSession.shared.data(for: request)
+        XCTAssertTrue(String(decoding: responseBody, as: UTF8.self).contains("kimi-k3"))
+        let captured = try XCTUnwrap(upstream.requests().first)
+        XCTAssertEqual(captured.headerValue("authorization"), "Bearer sk-test")
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(captured.body.utf8)) as? [String: Any])
+        XCTAssertEqual(sent["model"] as? String, "kimi-k3")
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let didRecord = await waitForReportCard(server, requestCount: 1)
+        XCTAssertTrue(didRecord)
+
+        let record = try await MainActor.run {
+            try XCTUnwrap(server.reportCard.requests.last)
+        }
+        XCTAssertEqual(record.model, "kimi-k3")
+        XCTAssertEqual(record.promptTokens, 10)
+        XCTAssertEqual(record.completionTokens, 32)
+        XCTAssertEqual(record.promptCacheHitTokens, 0)
+        XCTAssertEqual(record.promptCacheMissTokens, 10)
+        XCTAssertEqual(record.path, "/v1/messages")
+        XCTAssertFalse(record.wasStreaming)
+    }
+
+    func testMoonshotStreamingPassthroughRecordsNativeAnthropicUsage() async throws {
+        let upstream = LocalHTTPStubServer(
+            body: """
+            event: message_start
+            data: {"type":"message_start","message":{"id":"msg_deepseek_stream","type":"message","role":"assistant","model":"kimi-k3","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"cache_creation_input_tokens":0,"cache_read_input_tokens":2,"output_tokens":1}}}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+            event: content_block_stop
+            data: {"type":"content_block_stop","index":0}
+
+            event: message_delta
+            data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+
+            """,
+            contentType: "text/event-stream"
+        )
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "test",
+            upstreamProvider: .moonshot,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: "sk-test",
+            allowedModels: ["kimi-k3"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "kimi-k3",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
+        request.httpBody = jsonBody([
+            "model": "claude-opus-4-7",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (responseBody, response) = try await URLSession.shared.data(for: request)
+        XCTAssertTrue(String(decoding: responseBody, as: UTF8.self).contains("kimi-k3"))
+        let captured = try XCTUnwrap(upstream.requests().first)
+        XCTAssertEqual(captured.headerValue("authorization"), "Bearer sk-test")
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(captured.body.utf8)) as? [String: Any])
+        XCTAssertEqual(sent["model"] as? String, "kimi-k3")
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let didRecord = await waitForReportCard(server, requestCount: 1)
+        XCTAssertTrue(didRecord)
+
+        let record = try await MainActor.run {
+            try XCTUnwrap(server.reportCard.requests.last)
+        }
+        XCTAssertEqual(record.model, "kimi-k3")
+        XCTAssertEqual(record.promptTokens, 10)
+        XCTAssertEqual(record.completionTokens, 4)
+        XCTAssertEqual(record.promptCacheHitTokens, 2)
+        XCTAssertEqual(record.promptCacheMissTokens, 8)
+        XCTAssertEqual(record.path, "/v1/messages")
+        XCTAssertTrue(record.wasStreaming)
+    }
+
     func testSuccessfulEmptyAnthropicPassthroughStreamCompletesTrackingAndRecordsRequest() async throws {
         let upstream = LocalHTTPStubServer(body: "", contentType: "text/event-stream")
         let upstreamPort = try await upstream.start()

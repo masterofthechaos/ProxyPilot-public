@@ -92,6 +92,9 @@ final class ProxyLifecycleManager: ObservableObject {
             recoveryState = .monitoring
             telemetryTracker?("proxy_start_succeeded", ["mode": "builtin"])
         } catch {
+            // A failed NWListener still exists even when isRunning is false.
+            // Release it so the next Start can recover without relaunching.
+            if !localProxyServer.state.isRunning { try? localProxyServer.stop() }
             expectedProxyRunning = false
             recoveryState = .idle
             let issue = issueFor(
@@ -118,6 +121,9 @@ final class ProxyLifecycleManager: ObservableObject {
             expectedProxyRunning = true
             recoveryState = .monitoring
         } catch {
+            // A failed NWListener still exists even when isRunning is false.
+            // Release it so the next Start can recover without relaunching.
+            if !localProxyServer.state.isRunning { try? localProxyServer.stop() }
             expectedProxyRunning = false
             let issue = issueFor(
                 error,
@@ -288,6 +294,18 @@ final class ProxyLifecycleManager: ObservableObject {
         for _ in 0..<10 {
             if localProxyServer.state.isRunning { return }
             try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+
+        // A successful HTTP probe cannot prove our listener owns this port.
+        // In particular, never report a failed bind as success just because a
+        // different process answers the readiness request.
+        if localProxyServer.state.lastStatus.lowercased().contains("address already in use") {
+            throw IssueError(issue: AppIssue(
+                code: .portInUse,
+                title: String(localized: "Proxy Port Already In Use"),
+                message: String(localized: "Another listener still holds the proxy port. Wait for it to stop, then try Start again."),
+                actions: [.retryStart, .runPreflight]
+            ))
         }
 
         do {

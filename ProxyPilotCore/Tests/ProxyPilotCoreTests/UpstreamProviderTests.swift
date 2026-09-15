@@ -4,6 +4,38 @@ import Testing
 
 @Suite("UpstreamProvider")
 struct UpstreamProviderTests {
+    @Test func moonshotCredentialsAndNativeModelGate() {
+        let provider = UpstreamProvider.moonshot
+        #expect(provider.requiresAPIKey)
+        #expect(provider.secretKey == "MOONSHOT_API_KEY")
+        #expect(provider.defaultAPIBaseURL == "https://api.moonshot.ai/v1")
+        #expect(provider.anthropicPassthroughBaseURL(from: provider.defaultAPIBaseURL) == "https://api.moonshot.ai/anthropic")
+        #expect(ProxyConfiguration(upstreamProvider: provider, preferredAnthropicUpstreamModel: "kimi-k3").isAnthropicPassthroughActive)
+        #expect(!ProxyConfiguration(upstreamProvider: provider, miniMaxRoutingMode: .anthropicPassthrough, preferredAnthropicUpstreamModel: "kimi-k2.6").isAnthropicPassthroughActive)
+    }
+
+    @Test func moonshotPreservesNativeThinkingAndTools() throws {
+        let messages: [[String: Any]] = [["role": "assistant", "content": [
+            ["type": "thinking", "thinking": "reason", "signature": "sig"],
+            ["type": "tool_use", "id": "call_1", "name": "read", "input": ["path": "a"]]
+        ]]]
+        var request: [String: Any] = ["model": "kimi-k3", "messages": messages, "max_tokens": 100,
+            "temperature": 0.2, "thinking": ["type": "adaptive"], "output_config": ["effort": "high"]]
+        AnthropicTranslator.sanitizeAnthropicPassthroughRequest(&request, for: .moonshot)
+        #expect(request["temperature"] == nil)
+        #expect(request["thinking"] == nil)
+        #expect(request["max_tokens"] as? Int == 100)
+        #expect((request["output_config"] as? [String: String])?["effort"] == "high")
+        #expect(NSDictionary(dictionary: ["messages": request["messages"]!]).isEqual(to: ["messages": messages]))
+        var chat: [String: Any] = ["model": "kimi-k3", "max_completion_tokens": 100, "temperature": 0.3, "thinking": ["type": "disabled"], "reasoning_effort": "high"]
+        AnthropicTranslator.stripUnsupportedParameters(&chat, for: .moonshot)
+        AnthropicTranslator.applyParameterRewrites(&chat, for: .moonshot)
+        #expect(chat["max_tokens"] as? Int == 100)
+        #expect(chat["temperature"] == nil)
+        #expect(chat["thinking"] == nil)
+        #expect(chat["reasoning_effort"] as? String == "high")
+    }
+
     @Test func ollamaIsLocal() { #expect(UpstreamProvider.ollama.isLocal == true) }
     @Test func lmStudioIsLocal() { #expect(UpstreamProvider.lmStudio.isLocal == true) }
     @Test func nineRouterIsLocal() { #expect(UpstreamProvider.nineRouter.isLocal == true) }

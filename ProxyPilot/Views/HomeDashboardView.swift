@@ -23,10 +23,10 @@ struct HomeDashboardView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                if vm.repoGPS.session.lease != nil {
+                if vm.repoGPS.session.active && vm.repoGPS.session.lease != nil {
                     repoGPSCockpit
                 }
-                if visibleHomeSections.isEmpty && vm.repoGPS.session.lease == nil {
+                if visibleHomeSections.isEmpty && !vm.repoGPS.session.active {
                     hiddenHomeSectionsPlaceholder
                 } else {
                     if vm.isHomeDashboardSectionVisible(.sessionSummary) {
@@ -79,13 +79,13 @@ struct HomeDashboardView: View {
                 ViewThatFits {
                     HStack(spacing: 12) {
                         repoGPSMetric("Mode", vm.repoGPS.session.lease?.mode.capitalized ?? "Normal")
-                        repoGPSMetric("Requests", "\(vm.sessionReportCard.totalRequests)")
+                        repoGPSMetric("Activity", vm.repoGPS.session.lease?.activity.replacingOccurrences(of: "_", with: " ").capitalized ?? "Active")
                         repoGPSMetric("Pending Signals", "\(vm.repoGPS.session.pendingSignals)")
                         repoGPSMetric("Route", vm.routeControl.status.model ?? "Checking")
                     }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 12)], spacing: 12) {
                         repoGPSMetric("Mode", vm.repoGPS.session.lease?.mode.capitalized ?? "Normal")
-                        repoGPSMetric("Requests", "\(vm.sessionReportCard.totalRequests)")
+                        repoGPSMetric("Activity", vm.repoGPS.session.lease?.activity.replacingOccurrences(of: "_", with: " ").capitalized ?? "Active")
                         repoGPSMetric("Pending Signals", "\(vm.repoGPS.session.pendingSignals)")
                         repoGPSMetric("Route", vm.routeControl.status.model ?? "Checking")
                     }
@@ -252,9 +252,9 @@ struct HomeDashboardView: View {
 
     private var heroTitle: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Current Session")
+            Text("Proxy Activity")
                 .font(.title2.weight(.semibold))
-            Text(vm.isRunning ? "Proxy is running. Verify live route state below." : "Start ProxyPilot when you begin coding.")
+            Text(vm.isRunning ? "Usage across clients using this proxy. Session History shows individual sessions." : "Start ProxyPilot when you begin coding.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -366,7 +366,7 @@ struct HomeDashboardView: View {
                         .foregroundStyle(vm.agentRuntimeStatus.isReady ? .green : .secondary)
                 }
 
-                Text("ProxyPilot manages the pinned Node and agent adapter runtime, keeps Xcode pointed at a stable launcher path, and routes the agent through your current ProxyPilot provider and model.")
+                Text("Select ProxyPilot in Xcode’s agent picker, then choose your provider and model here.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -397,7 +397,7 @@ struct HomeDashboardView: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
 
-                if vm.proxyPilotAgentUsesManualRegistration {
+                if vm.proxyPilotAgentUsesManualRegistration && vm.proxyPilotAgentRegistrationStatus?.isRegistered != true {
                     Button(action: onOpenManualAgentRegistration) {
                         Label("Show manual registration steps", systemImage: "list.bullet.rectangle")
                     }
@@ -491,11 +491,11 @@ struct HomeDashboardView: View {
 
     private var proxySetupButton: some View {
         Button(action: onOpenProxy) {
-            Label("Open Proxy Setup", systemImage: "arrow.right.circle")
+            Label("Open Xcode Setup", systemImage: "arrow.right.circle")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
-        .accessibilityHint("Opens complete Xcode routing setup and verification in Proxy settings.")
+        .accessibilityHint("Opens Xcode agent setup, model selection, and connection checks.")
     }
 
     private var agentConfigInstallStatusText: some View {
@@ -984,7 +984,7 @@ struct HomeDashboardView: View {
         }
         .buttonStyle(.plain)
         .help("Open preflight checks")
-        .accessibilityHint("Opens the Proxy section and shows preflight checks.")
+        .accessibilityHint("Opens Xcode Setup and shows preflight checks.")
     }
 
     private var cacheStatusBadge: some View {
@@ -999,7 +999,7 @@ struct HomeDashboardView: View {
         }
         .buttonStyle(.plain)
         .help(vm.promptCachingProviderStatusText)
-        .accessibilityHint("Opens the Proxy section to configure provider cache signals.")
+        .accessibilityHint("Opens Xcode Setup to configure provider cache signals.")
     }
 
     private var cacheStatusColor: Color {
@@ -1027,7 +1027,7 @@ struct HomeDashboardView: View {
             }
             .buttonStyle(.plain)
             .help("Open agent model selection")
-            .accessibilityHint("Opens the Proxy section to select an agent model.")
+            .accessibilityHint("Opens Xcode Setup to select an agent model.")
         } else {
             // Always route-labelled. Unlabelled, this sits in a row of observed
             // traffic and reads as "this served your requests" — false whenever

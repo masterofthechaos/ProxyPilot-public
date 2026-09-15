@@ -1461,3 +1461,13 @@ private func assertGoogleSchemaSanitized(provider: UpstreamProvider, model: Stri
     #expect(state.lastSeenPromptCacheMissTokens == 600)
     #expect(state.lastSeenPromptCacheWriteTokens == 25)
 }
+
+@Test func moonshotTopLevelCacheUsageBufferedAndStreaming() throws {
+    let json = #"{"model":"kimi-k3","usage":{"prompt_tokens":1000,"completion_tokens":20,"cached_tokens":400}}"#
+    let buffered = try #require(AnthropicTranslator.anthropicPassthroughUsage(from: Data(json.utf8)))
+    let streamed = try #require(AnthropicTranslator.anthropicPassthroughUsage(fromStreamingLine: "data: " + json))
+    #expect(buffered.promptCacheHitTokens == 400)
+    #expect(buffered.promptCacheMissTokens == 600)
+    #expect(streamed.promptCacheHitTokens == 400)
+    #expect(streamed.promptCacheMissTokens == 600)
+}

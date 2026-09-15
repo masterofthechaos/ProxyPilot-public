@@ -247,8 +247,8 @@ final class LocalProxyServer: @unchecked Sendable {
         }
 
         var isAnthropicPassthroughActive: Bool {
-            upstreamProvider.usesAnthropicPassthroughByDefault
-                || (miniMaxRoutingMode == .anthropicPassthrough && upstreamProvider.supportsAnthropicPassthrough)
+            upstreamProvider.usesAnthropicPassthrough(for: preferredAnthropicUpstreamModel)
+                || (miniMaxRoutingMode == .anthropicPassthrough && upstreamProvider.isMiniMax)
         }
     }
 
@@ -1002,7 +1002,7 @@ final class LocalProxyServer: @unchecked Sendable {
         )
 
         // --- Anthropic Passthrough: forward directly to the provider /anthropic endpoint ---
-        if config.isAnthropicPassthroughActive,
+        if (config.isAnthropicPassthroughActive || config.upstreamProvider.usesAnthropicPassthrough(for: upstreamModel)),
            let passthroughBase = config.upstreamProvider.anthropicPassthroughBaseURL(from: config.upstreamAPIBaseURL) {
 
             anthropicRequest["model"] = upstreamModel

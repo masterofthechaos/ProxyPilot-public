@@ -1,7 +1,19 @@
 import XCTest
+import ProxyPilotCore
 @testable import ProxyPilot
 
 final class SettingsSectionTests: XCTestCase {
+    func testEveryProviderHasASetupEntryAndCredentialMapping() {
+        XCTAssertEqual(Set(KeysProviderViewItem.defaultOrder.map(\.rawValue)), Set(UpstreamProvider.allCases.map(\.rawValue)))
+        for provider in UpstreamProvider.allCases {
+            XCTAssertNotNil(KeysProviderViewItem(provider: provider))
+            if provider.requiresAPIKey {
+                XCTAssertEqual(provider.keychainKey?.rawValue, provider.secretKey)
+                XCTAssertNotNil(provider.apiKeyPageURL)
+            }
+        }
+    }
+
     func testGlassNavigationSurfaceHonorsAvailabilityPreferenceAndAccessibility() {
         XCTAssertTrue(
             GlassNavigationSurfacePolicy.usesLiquidGlass(
@@ -42,12 +54,12 @@ final class SettingsSectionTests: XCTestCase {
 
     func testSettingsSectionsExposeNativeSidebarMetadataInOrder() {
         XCTAssertEqual(SettingsSection.allCases, [.home, .history, .harnesses, .proxy, .routing, .keys, .advanced, .customization])
-        XCTAssertEqual(SettingsSection.sidebarSections, [.home, .history, .harnesses, .proxy, .routing, .keys, .advanced, .customization])
+        XCTAssertEqual(SettingsSection.sidebarSections, [.home, .history, .proxy, .routing, .keys, .harnesses, .advanced, .customization])
         XCTAssertEqual(SettingsSection.home.title, "Home")
         XCTAssertEqual(SettingsSection.history.title, "Session History")
-        XCTAssertEqual(SettingsSection.harnesses.title, "Coding Harnesses")
-        XCTAssertEqual(SettingsSection.proxy.title, "Proxy")
-        XCTAssertEqual(SettingsSection.routing.title, "Routing")
+        XCTAssertEqual(SettingsSection.harnesses.title, "RepoGPS")
+        XCTAssertEqual(SettingsSection.proxy.title, "Xcode Setup")
+        XCTAssertEqual(SettingsSection.routing.title, "Connections")
         XCTAssertEqual(SettingsSection.keys.title, "Keys & Providers")
         XCTAssertEqual(SettingsSection.advanced.title, "Advanced")
         XCTAssertEqual(SettingsSection.customization.title, "Customization")
@@ -62,8 +74,8 @@ final class SettingsSectionTests: XCTestCase {
     }
 
     func testSettingsSectionsExposeCompactTabTitlesForCollapsedSidebar() {
-        XCTAssertEqual(SettingsSection.collapsedTabSections, [.home, .history, .harnesses, .proxy, .routing, .keys, .advanced])
-        XCTAssertEqual(SettingsSection.collapsedTabSections.map(\.compactTitle), ["Home", "History", "Harnesses", "Proxy", "Routing", "Keys & Providers", "Advanced"])
+        XCTAssertEqual(SettingsSection.collapsedTabSections, [.home, .history, .proxy, .routing, .keys, .harnesses, .advanced])
+        XCTAssertEqual(SettingsSection.collapsedTabSections.map(\.compactTitle), ["Home", "History", "Xcode Setup", "Connections", "Keys & Providers", "RepoGPS", "Advanced"])
         XCTAssertFalse(SettingsSection.collapsedTabSections.contains(.customization))
     }
 

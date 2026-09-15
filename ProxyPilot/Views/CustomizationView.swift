@@ -151,7 +151,7 @@ struct CustomizationView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("ProxyPilot hides the stopped status pill so the toolbar stays quiet. Running, CLI-owned, recovery, and problem states still appear in the toolbar.")
+            Text("ProxyPilot hides the stopped status pill so the toolbar stays quiet. Running, background, recovery, and problem states still appear in the toolbar.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

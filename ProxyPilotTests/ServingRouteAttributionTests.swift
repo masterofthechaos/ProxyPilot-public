@@ -101,7 +101,7 @@ final class ServingRouteAttributionTests: XCTestCase {
             stopped.homeAgentModelBadgeHelpText,
             "A CLI-owned proxy and a stopped proxy are different situations and must not share help text."
         )
-        XCTAssertTrue(external.homeAgentModelBadgeHelpText.contains("CLI-owned"))
+        XCTAssertTrue(external.homeAgentModelBadgeHelpText.contains("may serve Xcode"))
     }
 
     // MARK: - Honest fallbacks

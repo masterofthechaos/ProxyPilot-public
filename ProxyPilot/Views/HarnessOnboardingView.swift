@@ -3,7 +3,7 @@ import SwiftUI
 
 /// The guided introduction to the bundled RepoGPS harness, shown once on the first
 /// open after updating to a release that ships it, and reachable afterwards from the
-/// sidebar pill or the Coding Harnesses tab.
+/// sidebar pill or the RepoGPS tab.
 ///
 /// Step copy deliberately reuses `RepoGPSGettingStarted` and the Coding Harnesses
 /// wording rather than restating it, so the tour cannot drift from the tab it teaches.
@@ -19,14 +19,14 @@ struct HarnessOnboardingStep: Identifiable, Equatable {
             id: 0,
             title: "Meet RepoGPS",
             systemImage: "location.north.circle",
-            summary: "ProxyPilot now bundles a terminal coding harness.",
+            summary: "An optional coding agent for your Terminal workflow.",
             detail: "RepoGPS gives an agent Basecamp orientation, Waypoints, /retrace and /resurface, plus deterministic ALMANAC machinery in Deep Expedition mode. ProxyPilot supplies the model route and an optional cockpit; RepoGPS keeps its own work surface."
         ),
         HarnessOnboardingStep(
             id: 1,
             title: "Install it once",
             systemImage: "arrow.down.circle",
-            summary: "The bundled copy is checksum-verified and updates with ProxyPilot.",
+            summary: "ProxyPilot verifies the download and manages RepoGPS updates.",
             detail: "A managed install is atomic and rollback-capable, so a bad update is always reversible. If you already run your own RepoGPS, ProxyPilot leaves it alone until you explicitly adopt it."
         ),
         HarnessOnboardingStep(
@@ -41,7 +41,7 @@ struct HarnessOnboardingStep: Identifiable, Equatable {
             title: "Watch it fly",
             systemImage: "gauge.with.dots.needle.33percent",
             summary: "Home becomes a live cockpit while a session is running.",
-            detail: "During a live session Home shows repository, activity, mode, route, and signal state, and the toolbar carries a RepoGPS badge. You can reopen this tour any time from the Coding Harnesses tab."
+            detail: "During a live session Home shows repository, activity, mode, route, and signal state, and the toolbar carries a RepoGPS badge. You can reopen this tour any time from the RepoGPS tab."
         )
     ]
 }
@@ -49,7 +49,7 @@ struct HarnessOnboardingStep: Identifiable, Equatable {
 struct HarnessOnboardingView: View {
     @EnvironmentObject private var vm: AppViewModel
 
-    /// Opens the Coding Harnesses tab behind the sheet once the tour closes.
+    /// Opens the RepoGPS tab behind the sheet once the tour closes.
     let onOpenHarnesses: () -> Void
 
     @State private var stepIndex = 0
@@ -147,7 +147,7 @@ struct HarnessOnboardingView: View {
 
                 HStack(spacing: 10) {
                     if service.distribution.ownership == "external" {
-                        Text("An independently managed RepoGPS installation was found. Adopt it from the Coding Harnesses tab when you are ready.")
+                        Text("An independently managed RepoGPS installation was found. Adopt it from the RepoGPS tab when you are ready.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -231,7 +231,7 @@ struct HarnessOnboardingView: View {
                 }
             }
 
-            Button(isLastStep ? "Open Coding Harnesses" : "Continue") {
+            Button(isLastStep ? "Open RepoGPS" : "Continue") {
                 if isLastStep {
                     vm.finishHarnessOnboarding(completed: true)
                     onOpenHarnesses()

@@ -106,7 +106,10 @@ struct ContentView: View {
             get: { vm.showOnboardingWizard },
             set: { vm.showOnboardingWizard = $0 }
         )) {
-            OnboardingWizardView()
+            OnboardingWizardView(onGetStarted: {
+                if vm.showsAgentModeChoice { vm.selectedAgentMode = .proxyPilotAgent }
+                selectedSection = .proxy
+            })
                 .environmentObject(vm)
         }
         .sheet(isPresented: Binding(
@@ -379,7 +382,7 @@ struct ContentView: View {
         case .proxy:
             proxyTab
         case .routing:
-            RoutingView()
+            RoutingView(onOpenXcodeSetup: { selectedSection = .proxy })
                 .environmentObject(vm)
         case .keys:
             keysTab
@@ -509,6 +512,7 @@ struct ContentView: View {
             .help("Check for ProxyPilot updates")
 
             Menu {
+                Button("Xcode Setup Guide") { vm.showOnboardingWizard = true }
                 Button("README") { vm.openReadme() }
                 Button("Website") { vm.openWebsite() }
                 Button("Report Bug on GitHub") { vm.openGitHubBugReport() }
@@ -582,6 +586,19 @@ struct ContentView: View {
     private var proxyTab: some View {
         ScrollViewReader { proxy in
             Form {
+            Section("Set up Xcode") {
+                Text("Choose a provider and model, then install ProxyPilot Agent for Xcode 27. Older Xcode versions can use Claude Agent compatibility setup below.")
+                HStack {
+                    Button("1. Provider & API Key") { selectedSection = .keys }
+                    Button("2. Choose Model") { focusProxySection(.models) }
+                    Button("3. Set Up Agent") {
+                        if vm.showsAgentModeChoice { vm.selectedAgentMode = .proxyPilotAgent }
+                        focusProxySection(.agentRegistration)
+                    }
+                }
+                Text("After setup, select ProxyPilot in Xcode's agent picker. Wait for a response to finish before applying a model change; continue in the same conversation once the new model is running.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Proxy") {
                 HStack(spacing: 8) {
                     TextField("Proxy URL", text: Binding(
@@ -826,8 +843,9 @@ struct ContentView: View {
                     Button("Fetch Live Models") { Task { await vm.fetchUpstreamModels() } }
                         .accessibilityLabel("Fetch models from upstream provider")
                         .proxyFocusGlow(isActive: highlightedProxySection == .models, color: vm.proxyPilotAccentColor)
-                    Button("Sync To Proxy + Restart") { Task { await vm.syncProxyModelsFromSelection() } }
+                    Button("Apply Models & Restart") { Task { await vm.syncProxyModelsFromSelection() } }
                         .disabled(!vm.canSyncProxyModels)
+                    .help("Applies your selection to the proxy used by Xcode. Wait for responses to finish: restarting interrupts all clients sharing this proxy.")
                     Button("Save as Defaults") { vm.saveSelectedModelsAsDefaults() }
                         .disabled(!vm.canSaveSelectedModelsAsDefaults)
                     Spacer()
@@ -1033,11 +1051,11 @@ struct ContentView: View {
                             Spacer()
                         }
 
-                        Text("ProxyPilot manages the pinned Node and agent adapter runtime, keeps Xcode pointed at a stable launcher path, and routes the agent through your current ProxyPilot provider and model.")
+                        Text("Install once, then select ProxyPilot in Xcode’s agent picker. ProxyPilot handles the connection to your chosen provider and model.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        if vm.proxyPilotAgentUsesManualRegistration {
+                        if vm.proxyPilotAgentUsesManualRegistration && vm.proxyPilotAgentRegistrationStatus?.isRegistered != true {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Manual Registration Required")
                                     .font(.subheadline.weight(.semibold))
@@ -1053,7 +1071,6 @@ struct ContentView: View {
                                     .clipShape(RoundedRectangle(cornerRadius: 6))
                             }
                             .padding(.vertical, 2)
-                            .id(ProxySectionFocus.agentRegistration)
                             .proxyFocusGlow(
                                 isActive: highlightedProxySection == .agentRegistration,
                                 color: vm.proxyPilotAccentColor
@@ -1103,6 +1120,7 @@ struct ContentView: View {
                         agentRoutingVerificationBlock
                     }
                 }
+                .id(ProxySectionFocus.agentRegistration)
             }
 
             if !vm.showsAgentModeChoice || vm.selectedAgentMode == .claudeAgent {
@@ -1220,6 +1238,7 @@ struct ContentView: View {
                     agentRoutingVerificationBlock
                 }
                 }
+                .id(ProxySectionFocus.agentRegistration)
             }
 
             Section("Checklist") {
@@ -1312,7 +1331,8 @@ struct ContentView: View {
 
             Section("Links") {
                 HStack(spacing: 8) {
-                    Button("README") { vm.openReadme() }
+                    Button("Xcode Setup Guide") { vm.showOnboardingWizard = true }
+                Button("README") { vm.openReadme() }
                     Button("Website") { vm.openWebsite() }
                     Button("GitHub") { vm.openPublicRepository() }
                     Spacer()
@@ -1935,6 +1955,25 @@ struct ContentView: View {
             }
             .environmentObject(vm)
 
+            Section("Companion Updates") {
+                Text("GUI updates also refresh installed CLI copies and managed RepoGPS. Uninstalled tools stay uninstalled. Protected or package-managed installations may need their installer.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !vm.companionUpdateStatusText.isEmpty {
+                    Text(vm.companionUpdateStatusText).font(.caption).textSelection(.enabled)
+                    Button("Retry Companion Updates") { Task { await vm.reconcileInstalledCompanions() } }
+                }
+                if !vm.protectedCLIUpdates.isEmpty {
+                    Button("Authorize CLI Updates…") { Task { await vm.authorizeCompanionUpdates() } }
+                    Text("macOS will request administrator authorization to update the existing protected CLI installation.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if !vm.lastCLIExecutablePath.isEmpty {
+                    Text("CLI used for key verification: " + vm.lastCLIExecutablePath)
+                        .font(.caption).textSelection(.enabled)
+                }
+            }
+
             Section("Danger Zone") {
                 Text("This will remove Xcode Agent config, delete all stored keys, reset proxy URLs and settings, and return ProxyPilot to first-run state.")
                     .font(.caption)
@@ -2438,15 +2477,25 @@ private struct AnalyticsOptInView: View {
 
 private struct OnboardingWizardView: View {
     @EnvironmentObject private var vm: AppViewModel
+    let onGetStarted: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Welcome to ProxyPilot")
                 .font(.title2.bold())
 
-            Text("ProxyPilot routes upstream LLM providers through Xcode Intelligence and Agent Mode. Set your API key, start the proxy, and install the Xcode Agent config from the Proxy tab.")
+            Text("Use your preferred cloud or local model in Xcode. Set up ProxyPilot Agent once, then use ProxyPilot to choose the model for your conversation.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Label("1. Choose a provider. Add its API key, or use a local model.", systemImage: "key")
+                Label("2. Choose a model and set up the Xcode agent.", systemImage: "hammer")
+                Label("3. Open a conversation in Xcode. Review usage on Home.", systemImage: "chart.bar")
+            }
+            .font(.callout)
+            Text("Terminal features are optional. RepoGPS is available in the sidebar whenever you want it.")
+                .font(.caption).foregroundStyle(.secondary)
 
             Toggle("Share anonymous diagnostics telemetry (optional)", isOn: Binding(
                 get: { vm.telemetryOptIn },
@@ -2463,14 +2512,15 @@ private struct OnboardingWizardView: View {
 
                 Spacer()
 
-                Button("Get Started") {
+                Button("Set Up Xcode") {
                     vm.finishOnboarding(force: true)
+                    onGetStarted()
                 }
                 .buttonStyle(.borderedProminent)
             }
         }
         .padding(20)
-        .frame(width: 480, height: 240)
+        .frame(width: 540, height: 390)
     }
 }
 

@@ -11,6 +11,7 @@ enum KeychainService {
         case chutesAPIKey = "CHUTES_API_KEY"
         case groqAPIKey = "GROQ_API_KEY"
         case googleAPIKey = "GOOGLE_API_KEY"
+        case moonshotAPIKey = "MOONSHOT_API_KEY"
         case deepSeekAPIKey = "DEEPSEEK_API_KEY"
         case mistralAPIKey = "MISTRAL_API_KEY"
         case minimaxAPIKey = "MINIMAX_API_KEY"

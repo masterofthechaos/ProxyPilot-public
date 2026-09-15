@@ -1462,13 +1462,15 @@ struct NIOProxyServerTests {
         try await stub.stop()
     }
 
-    @Test func anthropicMessagesPassthroughsDeepSeekToAnthropicEndpoint() async throws {
+    @Test(arguments: [UpstreamProvider.deepSeek, .moonshot])
+    func anthropicMessagesPassthroughsNativeProviderToAnthropicEndpoint(provider: UpstreamProvider) async throws {
+        let model = provider == .moonshot ? "kimi-k3" : "deepseek-v4-pro"
         let anthropicResponse: [String: Any] = [
             "id": "msg_deepseek_test",
             "type": "message",
             "role": "assistant",
-            "model": "deepseek-v4-pro",
-            "content": [["type": "text", "text": "ok"]],
+            "model": model,
+            "content": [["type": "thinking", "thinking": "reason", "signature": "sig"], ["type": "tool_use", "id": "call_1", "name": "read", "input": ["path": "a"]]],
             "stop_reason": "end_turn",
             "usage": ["input_tokens": 10, "output_tokens": 2]
         ]
@@ -1480,12 +1482,12 @@ struct NIOProxyServerTests {
 
         let config = ProxyConfiguration(
             port: 0,
-            upstreamProvider: .deepSeek,
+            upstreamProvider: provider,
             upstreamAPIBaseURL: "http://127.0.0.1:\(stubPort)/v1",
             upstreamAPIKey: "sk-test",
             masterKey: "local-test-capability",
             requiresAuth: false,
-            preferredAnthropicUpstreamModel: "deepseek-v4-pro"
+            preferredAnthropicUpstreamModel: model
         )
         let server = NIOProxyServer()
         let port = try await server.start(config: config)
@@ -1502,18 +1504,23 @@ struct NIOProxyServerTests {
             "messages": [["role": "user", "content": "hi"]]
         ])
 
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        let responseJSON = try #require(JSONSerialization.jsonObject(with: responseData) as? [String: Any])
+        let content = try #require(responseJSON["content"] as? [[String: Any]])
+        #expect(content.first?["signature"] as? String == "sig")
+        #expect(content.last?["id"] as? String == "call_1")
         let httpResponse = response as! HTTPURLResponse
         #expect(httpResponse.statusCode == 200)
 
         let capturedRequest = try #require(stub.requests().first)
         #expect(capturedRequest.method == "POST")
+        #expect(capturedRequest.headerValue("Authorization") == "Bearer sk-test")
         #expect(capturedRequest.uri == "/anthropic/v1/messages")
         #expect(capturedRequest.headerValue("Content-Type") == "application/json")
 
         let capturedBodyData = Data(capturedRequest.body.utf8)
         let capturedBody = try #require(JSONSerialization.jsonObject(with: capturedBodyData) as? [String: Any])
-        #expect(capturedBody["model"] as? String == "deepseek-v4-pro")
+        #expect(capturedBody["model"] as? String == model)
         #expect(capturedBody["max_tokens"] as? Int == 100)
         #expect(capturedBody["system"] as? String == "x-anthropic-billing-header: cc_version=2.1.118.147; cc_entrypoint=sdk-cli; cch=203d1;\nKeep this passthrough content.")
         #expect(capturedBody["messages"] != nil)

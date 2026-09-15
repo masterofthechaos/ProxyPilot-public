@@ -188,6 +188,9 @@ public enum AnthropicTranslator {
         _ request: inout [String: Any],
         for provider: UpstreamProvider
     ) {
+        if provider == .moonshot, request["model"] as? String == "kimi-k3" {
+            request.removeValue(forKey: "thinking")
+        }
         for key in provider.unsupportedOpenAIParameters {
             request.removeValue(forKey: key)
         }
@@ -631,8 +634,8 @@ public enum AnthropicTranslator {
         let promptTokensValue = intValue(from: usage?["prompt_tokens"])
         let promptTokenDetails = usage?["prompt_tokens_details"] as? [String: Any]
         let openAICompatibleCacheHitTokens = intValue(from: promptTokenDetails?["cached_tokens"])
-        let explicitCacheHitTokens = intValue(from: usage?["prompt_cache_hit_tokens"])
-        let promptCacheHitTokens = intValue(from: usage?["prompt_cache_hit_tokens"])
+        let explicitCacheHitTokens = (intValue(from: usage?["prompt_cache_hit_tokens"]) ?? intValue(from: usage?["cached_tokens"]))
+        let promptCacheHitTokens = explicitCacheHitTokens
             ?? openAICompatibleCacheHitTokens
             ?? intValue(from: usage?["cache_read_input_tokens"])
         let promptCacheWriteTokens = intValue(from: usage?["cache_creation_input_tokens"])
@@ -1208,7 +1211,7 @@ public enum AnthropicTranslator {
 
             let details = usage["prompt_tokens_details"] as? [String: Any]
             let openAICompatibleCacheHitTokens = intValue(from: details?["cached_tokens"])
-            let explicitCacheHitTokens = intValue(from: usage["prompt_cache_hit_tokens"])
+            let explicitCacheHitTokens = (intValue(from: usage["prompt_cache_hit_tokens"]) ?? intValue(from: usage["cached_tokens"]))
             let hitTokens = explicitCacheHitTokens
                 ?? openAICompatibleCacheHitTokens
                 ?? intValue(from: usage["cache_read_input_tokens"])

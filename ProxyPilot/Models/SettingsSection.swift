@@ -12,9 +12,9 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 
     var id: Self { self }
 
-    static let sidebarSections: [SettingsSection] = [.home, .history, .harnesses, .proxy, .routing, .keys, .advanced, .customization]
+    static let sidebarSections: [SettingsSection] = [.home, .history, .proxy, .routing, .keys, .harnesses, .advanced, .customization]
 
-    static let collapsedTabSections: [SettingsSection] = [.home, .history, .harnesses, .proxy, .routing, .keys, .advanced]
+    static let collapsedTabSections: [SettingsSection] = [.home, .history, .proxy, .routing, .keys, .harnesses, .advanced]
 
     static func availableSidebarSections(repoGPSRoutingEnabled: Bool) -> [SettingsSection] {
         sidebarSections.filter { repoGPSRoutingEnabled || $0 != .routing }
@@ -31,11 +31,11 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .history:
             return "Session History"
         case .harnesses:
-            return "Coding Harnesses"
+            return "RepoGPS"
         case .proxy:
-            return "Proxy"
+            return "Xcode Setup"
         case .routing:
-            return "Routing"
+            return "Connections"
         case .keys:
             return "Keys & Providers"
         case .advanced:
@@ -52,11 +52,11 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .history:
             return "History"
         case .harnesses:
-            return "Harnesses"
+            return "RepoGPS"
         case .proxy:
-            return "Proxy"
+            return "Xcode Setup"
         case .routing:
-            return "Routing"
+            return "Connections"
         case .keys:
             return "Keys & Providers"
         case .advanced:
@@ -73,13 +73,13 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .history:
             return "Past sessions"
         case .harnesses:
-            return "Install coding harnesses"
+            return "Optional Terminal coding agent"
         case .proxy:
-            return "Routing and models"
+            return "Agent, providers and models"
         case .routing:
-            return "Xcode and RepoGPS routes"
+            return "Selected and running models"
         case .keys:
-            return "Secrets and helpers"
+            return "API keys and local providers"
         case .advanced:
             return "App preferences"
         case .customization:

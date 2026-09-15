@@ -55,7 +55,7 @@ struct CodingHarnessesView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("Coding Harnesses").font(.title2.weight(.semibold))
+                    Text("RepoGPS").font(.title2.weight(.semibold))
 
                     Spacer()
 
@@ -69,7 +69,7 @@ struct CodingHarnessesView: View {
                     .help("Replay the RepoGPS introduction")
                 }
 
-                Text("Install and maintain terminal-native coding harnesses. ProxyPilot supplies routing and an optional cockpit; it does not replace their work surface.")
+                Text("Optional coding in Terminal, with providers and models supplied by ProxyPilot. You do not need RepoGPS to use ProxyPilot Agent in Xcode.")
                     .foregroundStyle(.secondary)
 
                 DashboardCard {

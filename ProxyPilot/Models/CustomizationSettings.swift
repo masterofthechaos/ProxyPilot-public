@@ -160,6 +160,7 @@ enum KeysProviderViewItem: String, CaseIterable, Identifiable {
     case groq = "groq"
     case google = "google"
     case deepSeek = "deepseek"
+    case moonshot = "moonshot"
     case mistral = "mistral"
     case miniMax = "minimax"
     case miniMaxCN = "minimax-cn"

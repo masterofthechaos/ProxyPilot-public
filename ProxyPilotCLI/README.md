@@ -401,6 +401,7 @@ The server inherits `--provider` and `--key` defaults but tools can override bot
 | xAI (Grok) | `xai` | `https://api.x.ai/v1` |
 | Chutes | `chutes` | `https://llm.chutes.ai/v1` |
 | Google (Gemini) | `google` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| Moonshot.ai (Kimi) | `moonshot` | `https://api.moonshot.ai/v1` |
 | DeepSeek | `deepseek` | `https://api.deepseek.com/v1` |
 | Mistral | `mistral` | `https://api.mistral.ai/v1` |
 | MiniMax | `minimax` | `https://api.minimax.io/v1` |
