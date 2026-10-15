@@ -6,6 +6,7 @@ import ProxyPilotCore
 
 private final class LocalHTTPStubServer: @unchecked Sendable {
     struct RequestRecord {
+        let path: String
         let headers: [String: String]
         let body: String
 
@@ -157,12 +158,83 @@ private final class LocalHTTPStubServer: @unchecked Sendable {
         }
         let body = parts.dropFirst().joined(separator: "\r\n\r\n")
         requestLock.lock()
-        capturedRequests.append(RequestRecord(headers: headers, body: body))
+        let path = raw.components(separatedBy: "\r\n").first?.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+        capturedRequests.append(RequestRecord(path: path, headers: headers, body: body))
         requestLock.unlock()
     }
 }
 
 final class LocalProxyServerTests: XCTestCase {
+    private func makeIsolatedProxyServer() -> LocalProxyServer {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("proxypilot-listener-tests-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return LocalProxyServer(sessionReportURL: directory.appendingPathComponent("session-report.jsonl"))
+    }
+
+    @MainActor
+    func testUpstreamFailureEmitsClassifiedTelemetryForBufferedAndStreamingChat() async throws {
+        for streaming in [false, true] {
+            let upstream = LocalHTTPStubServer(statusCode: 429, body: #"{"error":{"message":"private provider detail"}}"#)
+            let upstreamPort = try await upstream.start()
+            defer { upstream.stop() }
+            let port = try unusedLoopbackPort()
+            let server = makeIsolatedProxyServer()
+            var payload: [String: String]?
+            let emitted = expectation(description: "failure telemetry")
+            server.telemetryTracker = { name, value in
+                if name == "proxy_request_failed" {
+                    payload = value
+                    emitted.fulfill()
+                }
+            }
+            let config = LocalProxyServer.Config(
+                host: "127.0.0.1", port: port, masterKey: "",
+                upstreamProvider: .ollama,
+                upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+                upstreamAPIKey: nil, allowedModels: ["test-model"], requiresAuth: false,
+                anthropicTranslatorMode: .hardened, miniMaxRoutingMode: .standard,
+                preferredAnthropicUpstreamModel: "test-model", googleThoughtSignatureStore: nil
+            )
+            try server.start(config: config)
+            defer { try? server.stop() }
+            for _ in 0..<30 {
+                if server.state.isRunning { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = jsonBody(["model": "test-model", "stream": streaming, "messages": [["role": "user", "content": "hi"]]])
+            let (_, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 429)
+            await fulfillment(of: [emitted], timeout: 4)
+            XCTAssertEqual(payload?["status_class"], "4xx")
+            XCTAssertEqual(payload?["error_class"], "upstream_http_error")
+            XCTAssertEqual(payload?["retryable"], "true")
+            XCTAssertEqual(payload?["provider_identifier"], "ollama")
+            XCTAssertFalse((payload?.description ?? "").contains("private provider detail"))
+        }
+    }
+
+    func testFailureTelemetryDistinguishesHTTPAndTransportFailuresWithoutRawErrors() {
+        let timeout = LocalProxyServer.failureTelemetry(error: URLError(.timedOut))
+        XCTAssertEqual(timeout.errorClass, "timeout")
+        XCTAssertEqual(timeout.statusClass, "transport")
+        XCTAssertEqual(timeout.retryable, "true")
+        let connection = LocalProxyServer.failureTelemetry(error: URLError(.cannotConnectToHost))
+        XCTAssertEqual(connection.errorClass, "connection_failed")
+        let cancelled = LocalProxyServer.failureTelemetry(error: URLError(.cancelled))
+        XCTAssertEqual(cancelled.retryable, "false")
+        let unauthorized = LocalProxyServer.failureTelemetry(statusCode: 401)
+        XCTAssertEqual(unauthorized.statusClass, "4xx")
+        XCTAssertEqual(unauthorized.retryable, "false")
+        XCTAssertEqual(LocalProxyServer.failureTelemetry(statusCode: 429).retryable, "true")
+        XCTAssertEqual(LocalProxyServer.failureTelemetry(statusCode: 503).statusClass, "5xx")
+        let raw = NSError(domain: "private-host-and-key", code: 1, userInfo: [NSLocalizedDescriptionKey: "secret"])
+        XCTAssertEqual(LocalProxyServer.failureTelemetry(error: raw).errorClass, "request_failed")
+    }
+
 
     @MainActor
     func testLocalProxyStateTracksPendingAndFailedRequestsSeparately() {
@@ -236,7 +308,7 @@ final class LocalProxyServerTests: XCTestCase {
 
     @MainActor
     func testBeginTrackedRequestCompletesBeforeImmediateResolution() async {
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let requestID = UUID()
 
         await server.beginTrackedRequest(
@@ -1059,7 +1131,7 @@ final class LocalProxyServerTests: XCTestCase {
             throw XCTSkip("No non-loopback IPv4 address available for LAN exposure regression test.")
         }
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1237,7 +1309,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1283,7 +1355,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1320,7 +1392,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1376,7 +1448,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1426,7 +1498,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1478,7 +1550,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1535,7 +1607,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1592,7 +1664,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1668,7 +1740,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1724,7 +1796,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1805,7 +1877,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1858,13 +1930,157 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertTrue(record.wasStreaming)
     }
 
+    func testMetaBufferedPassthroughRecordsNativeAnthropicUsage() async throws {
+        let upstream = LocalHTTPStubServer(body: """
+        {"id":"msg_deepseek_test","type":"message","role":"assistant","model":"muse-spark-1.3","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":32,"service_tier":"standard"}}
+        """)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = makeIsolatedProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "test",
+            upstreamProvider: .meta,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: "sk-test",
+            allowedModels: ["muse-spark-1.3"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "muse-spark-1.3",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
+        request.httpBody = jsonBody([
+            "model": "claude-opus-4-7",
+            "max_tokens": 64,
+            "stream": false,
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (responseBody, response) = try await URLSession.shared.data(for: request)
+        XCTAssertTrue(String(decoding: responseBody, as: UTF8.self).contains("muse-spark-1.3"))
+        let captured = try XCTUnwrap(upstream.requests().first)
+        XCTAssertEqual(captured.path, "/v1/messages")
+        XCTAssertEqual(captured.headerValue("authorization"), "Bearer sk-test")
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(captured.body.utf8)) as? [String: Any])
+        XCTAssertEqual(sent["model"] as? String, "muse-spark-1.3")
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let didRecord = await waitForReportCard(server, requestCount: 1)
+        XCTAssertTrue(didRecord)
+
+        let record = try await MainActor.run {
+            try XCTUnwrap(server.reportCard.requests.last)
+        }
+        XCTAssertEqual(record.model, "muse-spark-1.3")
+        XCTAssertEqual(record.promptTokens, 10)
+        XCTAssertEqual(record.completionTokens, 32)
+        XCTAssertEqual(record.promptCacheHitTokens, 0)
+        XCTAssertEqual(record.promptCacheMissTokens, 10)
+        XCTAssertEqual(record.path, "/v1/messages")
+        XCTAssertFalse(record.wasStreaming)
+    }
+
+    func testMetaStreamingPassthroughRecordsNativeAnthropicUsage() async throws {
+        let upstream = LocalHTTPStubServer(
+            body: """
+            event: message_start
+            data: {"type":"message_start","message":{"id":"msg_deepseek_stream","type":"message","role":"assistant","model":"muse-spark-1.3","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"cache_creation_input_tokens":0,"cache_read_input_tokens":2,"output_tokens":1}}}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+            event: content_block_stop
+            data: {"type":"content_block_stop","index":0}
+
+            event: message_delta
+            data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+
+            """,
+            contentType: "text/event-stream"
+        )
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = makeIsolatedProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "test",
+            upstreamProvider: .meta,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: "sk-test",
+            allowedModels: ["muse-spark-1.3"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "muse-spark-1.3",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
+        request.httpBody = jsonBody([
+            "model": "claude-opus-4-7",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (responseBody, response) = try await URLSession.shared.data(for: request)
+        XCTAssertTrue(String(decoding: responseBody, as: UTF8.self).contains("muse-spark-1.3"))
+        let captured = try XCTUnwrap(upstream.requests().first)
+        XCTAssertEqual(captured.path, "/v1/messages")
+        XCTAssertEqual(captured.headerValue("authorization"), "Bearer sk-test")
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(captured.body.utf8)) as? [String: Any])
+        XCTAssertEqual(sent["model"] as? String, "muse-spark-1.3")
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let didRecord = await waitForReportCard(server, requestCount: 1)
+        XCTAssertTrue(didRecord)
+
+        let record = try await MainActor.run {
+            try XCTUnwrap(server.reportCard.requests.last)
+        }
+        XCTAssertEqual(record.model, "muse-spark-1.3")
+        XCTAssertEqual(record.promptTokens, 10)
+        XCTAssertEqual(record.completionTokens, 4)
+        XCTAssertEqual(record.promptCacheHitTokens, 2)
+        XCTAssertEqual(record.promptCacheMissTokens, 8)
+        XCTAssertEqual(record.path, "/v1/messages")
+        XCTAssertTrue(record.wasStreaming)
+    }
+
     func testSuccessfulEmptyAnthropicPassthroughStreamCompletesTrackingAndRecordsRequest() async throws {
         let upstream = LocalHTTPStubServer(body: "", contentType: "text/event-stream")
         let upstreamPort = try await upstream.start()
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -1923,7 +2139,7 @@ final class LocalProxyServerTests: XCTestCase {
         defer { upstream.stop() }
 
         let port = try unusedLoopbackPort()
-        let server = LocalProxyServer()
+        let server = makeIsolatedProxyServer()
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: port,
@@ -2001,4 +2217,84 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertEqual(LocalProxyServerHelpers.formatByteCount(121_242), "118.4 KB")
         XCTAssertEqual(LocalProxyServerHelpers.formatByteCount(3 * 1024 * 1024), "3.0 MB")
     }
+    private func assertMetaHTTPContract(nativeMessages: Bool, streaming: Bool) async throws {
+        let path = nativeMessages ? "/v1/messages" : "/v1/chat/completions"
+        let model = "muse-spark-1.3"
+        let nativeHistory: [[String: Any]] = [
+            ["role": "user", "content": "Read a and report its content."],
+            ["role": "assistant", "content": [["type": "redacted_thinking", "data": "opaque"], ["type": "tool_use", "id": "call_1", "name": "read", "input": ["path": "a"]]]],
+            ["role": "user", "content": [["type": "tool_result", "tool_use_id": "call_1", "content": "hello"]]]
+        ]
+        let chatHistory: [[String: Any]] = [
+            ["role": "user", "content": "Read a and report its content."],
+            ["role": "assistant", "content": NSNull(), "tool_calls": [["id": "call_1", "type": "function", "function": ["name": "read", "arguments": "{\"path\":\"a\"}"]]]],
+            ["role": "tool", "tool_call_id": "call_1", "content": "hello"]
+        ]
+        let messages = nativeMessages ? nativeHistory : chatHistory
+        let nativeResponse = #"{"id":"msg_meta","type":"message","role":"assistant","model":"muse-spark-1.3","content":[{"type":"redacted_thinking","data":"opaque"},{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#
+        let chatResponse = #"{"id":"chatcmpl-meta","model":"muse-spark-1.3","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#
+        let nativeSSE = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_meta\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"muse-spark-1.3\",\"content\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        let chatSSE = "data: {\"id\":\"chatcmpl-meta\",\"model\":\"muse-spark-1.3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-meta\",\"model\":\"muse-spark-1.3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n"
+        let responseBody = streaming ? (nativeMessages ? nativeSSE : chatSSE) : (nativeMessages ? nativeResponse : chatResponse)
+        let stub = LocalHTTPStubServer(body: responseBody, contentType: streaming ? "text/event-stream" : "application/json")
+        let upstreamPort = try await stub.start()
+        defer { stub.stop() }
+        let server = makeIsolatedProxyServer()
+        let port = try unusedLoopbackPort()
+        let config = LocalProxyServer.Config(host: "127.0.0.1", port: port, masterKey: "test", upstreamProvider: .meta,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!, upstreamAPIKey: "meta-test-key",
+            allowedModels: [model], requiresAuth: false, anthropicTranslatorMode: .hardened, miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: model, googleThoughtSignatureStore: nil)
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var payload: [String: Any] = ["model": model, "max_tokens": 4096, "messages": messages, "stream": streaming]
+        if nativeMessages {
+            payload["thinking"] = ["type": "adaptive"]
+            payload["output_config"] = ["effort": "high"]
+            payload["top_k"] = 10
+        } else {
+            payload["reasoning_effort"] = "high"
+            payload["stop"] = ["unsupported"]
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        XCTAssertTrue((response as? HTTPURLResponse)?.statusCode == 200)
+        if streaming {
+            // The GUI transport appends a final newline before closing. Keep
+            // every internal event boundary and payload byte in the comparison.
+            XCTAssertEqual(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .newlines), responseBody.trimmingCharacters(in: .newlines))
+        } else {
+            let actual = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(responseBody.utf8)) as? [String: Any])
+            XCTAssertTrue(NSDictionary(dictionary: actual).isEqual(to: expected))
+        }
+        let captured = try XCTUnwrap(stub.requests().first)
+        XCTAssertTrue(captured.path == path)
+        XCTAssertTrue(captured.headerValue("Authorization") == "Bearer meta-test-key")
+        XCTAssertTrue(captured.headerValue("Accept") == (streaming ? "text/event-stream" : "application/json"))
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(captured.body.utf8)) as? [String: Any])
+        XCTAssertTrue(NSDictionary(dictionary: ["messages": sent["messages"]!]).isEqual(to: ["messages": messages]))
+        XCTAssertTrue(sent["top_k"] == nil)
+        XCTAssertTrue(sent["stop"] == nil)
+        if nativeMessages {
+            XCTAssertTrue((sent["thinking"] as? [String: String])?["type"] == "adaptive")
+            XCTAssertTrue((sent["output_config"] as? [String: String])?["effort"] == "high")
+        } else {
+            XCTAssertTrue(sent["reasoning_effort"] as? String == "high")
+        }
+    }
+
+    func testMetaHTTPContractAcrossProtocolsAndStreaming() async throws {
+        for nativeMessages in [false, true] {
+            for streaming in [false, true] {
+                try await assertMetaHTTPContract(nativeMessages: nativeMessages, streaming: streaming)
+            }
+        }
+    }
+
 }

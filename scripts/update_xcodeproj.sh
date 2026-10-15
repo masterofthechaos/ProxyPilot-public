@@ -19,5 +19,8 @@ s = re.sub(r'version: "[^"]+"', 'version: "' + version + '"', s, count=1)
 p.write_text(s)
 PYVERSION
 
-xcodegen generate
+# XcodeGen locates settings presets relative to its executable path. Invoking
+# Homebrew's symlink can omit those presets while still returning success.
+XCODEGEN_EXECUTABLE="$(python3 -c 'import os, shutil; print(os.path.realpath(shutil.which("xcodegen")))')"
+"$XCODEGEN_EXECUTABLE" generate
 

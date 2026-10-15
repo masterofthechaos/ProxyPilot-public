@@ -81,6 +81,7 @@ final class AppViewModel: ObservableObject {
     static let visibleKeysProvidersDefaultsKey = "proxypilot.customization.visibleKeysProviders"
     static let didMigrateQwenVisibleProviderDefaultsKey = "proxypilot.customization.didMigrateQwenVisibleProvider"
     static let didMigrateNineRouterVisibleProviderDefaultsKey = "proxypilot.customization.didMigrateNineRouterVisibleProvider"
+    static let didMigrateMetaVisibleProviderDefaultsKey = "proxypilot.customization.didMigrateMetaVisibleProvider"
     // autoRestartEnabled defaults key: kept here for resetToFreshInstall cleanup
     private static let autoRestartEnabledDefaultsKey = "proxypilot.autoRestartEnabled"
     private static let requireLocalAuthDefaultsKey = "proxypilot.requireLocalAuth"
@@ -726,6 +727,7 @@ final class AppViewModel: ObservableObject {
         storedOrderRawValues: [String]?
     ) -> Set<KeysProviderViewItem> {
         guard let stored = defaults.stringArray(forKey: visibleKeysProvidersDefaultsKey) else {
+            defaults.set(true, forKey: didMigrateMetaVisibleProviderDefaultsKey)
             return Set(KeysProviderViewItem.defaultOrder)
         }
         var decoded = Set(stored.compactMap(KeysProviderViewItem.init(rawValue:)))
@@ -744,6 +746,16 @@ final class AppViewModel: ObservableObject {
         if !didMigrateNineRouter && storedOrderRawValues?.contains(KeysProviderViewItem.nineRouter.rawValue) != true {
             decoded.insert(.nineRouter)
             defaults.set(true, forKey: didMigrateNineRouterVisibleProviderDefaultsKey)
+        }
+        if !defaults.bool(forKey: didMigrateMetaVisibleProviderDefaultsKey) {
+            decoded.insert(.meta)
+            // Persist the visible set before its marker, so an interrupted
+            // upgrade cannot permanently hide the newly supported provider.
+            defaults.set(
+                KeysProviderViewItem.defaultOrder.filter { decoded.contains($0) }.map(\.rawValue),
+                forKey: visibleKeysProvidersDefaultsKey
+            )
+            defaults.set(true, forKey: didMigrateMetaVisibleProviderDefaultsKey)
         }
         return decoded
     }
@@ -942,6 +954,7 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.visibleKeysProvidersDefaultsKey)
         defaults.removeObject(forKey: Self.didMigrateQwenVisibleProviderDefaultsKey)
         defaults.removeObject(forKey: Self.didMigrateNineRouterVisibleProviderDefaultsKey)
+        defaults.removeObject(forKey: Self.didMigrateMetaVisibleProviderDefaultsKey)
         defaults.removeObject(forKey: Self.autoRestartEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.requireLocalAuthDefaultsKey)
         defaults.removeObject(forKey: Self.runInBackgroundDefaultsKey)
@@ -1016,6 +1029,7 @@ final class AppViewModel: ObservableObject {
         defaultSettingsSection = .home
         keysProviderOrder = KeysProviderViewItem.defaultOrder
         visibleKeysProviders = Set(KeysProviderViewItem.defaultOrder)
+        defaults.set(true, forKey: Self.didMigrateMetaVisibleProviderDefaultsKey)
         showKeychainAccessPrimer = false
         suppressKeychainAccessPrimer = false
         autoRestartEnabled = true
@@ -1853,7 +1867,9 @@ final class AppViewModel: ObservableObject {
             guard let model = active.isEmpty ? (selected.isEmpty ? nil : selected) : active else { return nil }
             return ServingRoute(
                 owner: .app,
-                providerTitle: upstreamProviderDisplayTitle,
+                providerTitle: localProxyState.activeProviderIdentifier.isEmpty
+                    ? upstreamProviderDisplayTitle
+                    : Self.routeProviderTitle(localProxyState.activeProviderIdentifier),
                 model: model,
                 isModelObserved: !active.isEmpty
             )
@@ -1866,7 +1882,7 @@ final class AppViewModel: ObservableObject {
             guard let model = observed ?? routeModel.flatMap({ $0.isEmpty ? nil : $0 }) else { return nil }
             return ServingRoute(
                 owner: .cli,
-                providerTitle: Self.routeProviderTitle(routeControl.status.provider),
+                providerTitle: Self.routeProviderTitle(latestSessionProviderIdentifier ?? routeControl.status.provider),
                 model: model,
                 isModelObserved: observed != nil
             )
@@ -2167,6 +2183,10 @@ final class AppViewModel: ObservableObject {
 
     private var sessionCostSource: SessionCostSource? {
         guard sessionPricedRequestCount > 0 else { return nil }
+        let providers = Set(sessionReportCard.requests.filter { estimatedCostUSD(for: $0) != nil }.compactMap(\.providerIdentifier))
+        if !providers.isEmpty {
+            return providers == [UpstreamProvider.openRouter.rawValue] ? .openRouterEstimate : .calculated
+        }
         return upstreamProvider == .openRouter ? .openRouterEstimate : .calculated
     }
 
@@ -2190,6 +2210,15 @@ final class AppViewModel: ObservableObject {
         case nil:
             return String(localized: "Cost")
         }
+    }
+
+    var latestSessionProviderIdentifier: String? {
+        sessionReportCard.requests.max(by: { $0.timestamp < $1.timestamp })?.providerIdentifier
+    }
+
+    var sessionMenuProviderTitle: String {
+        if let provider = latestSessionProviderIdentifier { return Self.routeProviderTitle(provider) }
+        return servingRoute?.providerTitle ?? String(localized: "Unknown provider")
     }
 
     var sessionMenuCostText: String? {
@@ -2286,6 +2315,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func estimatedCostUSD(for record: SessionReportCard.RequestRecord) -> Double? {
+        if let provider = record.providerIdentifier,
+           [UpstreamProvider.ollama.rawValue, UpstreamProvider.lmStudio.rawValue].contains(provider) { return nil }
         guard let model = upstreamModel(for: record.model) else { return nil }
         return model.estimatedCostUSD(
             promptTokens: record.promptTokens,
@@ -2861,11 +2892,20 @@ final class AppViewModel: ObservableObject {
     func applicationWillTerminate() async {
         telemetryService.endSession()
         stopLogUpdates()
-        await pruneInputOutputLogsForQuit()
+        await Self.pruneInputOutputLogsForQuit()
     }
 
-    private func pruneInputOutputLogsForQuit() async {
-        guard let recorder = try? InputOutputLoggingRecorder.productionIfKeyExists(source: "gui") else {
+    static func pruneInputOutputLogsForQuit(
+        makeRecorder: @escaping @Sendable () throws -> InputOutputLoggingRecorder? = {
+            try InputOutputLoggingRecorder.productionIfKeyExists(source: "gui")
+        }
+    ) async {
+        // Keychain lookup can block; keep termination cleanup awaited without
+        // blocking AppKit's main thread while the security service responds.
+        let recorder = await Task.detached(priority: .utility) {
+            try? makeRecorder()
+        }.value
+        guard let recorder else {
             return
         }
         try? await recorder.pruneExpired(includeUntilQuit: true)

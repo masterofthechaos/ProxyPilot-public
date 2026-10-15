@@ -1027,7 +1027,7 @@ struct HomeDashboardView: View {
             }
             .buttonStyle(.plain)
             .help("Open agent model selection")
-            .accessibilityHint("Opens Xcode Setup to select an agent model.")
+            .accessibilityHint("Opens Models to select an agent model.")
         } else {
             // Always route-labelled. Unlabelled, this sits in a row of observed
             // traffic and reads as "this served your requests" — false whenever

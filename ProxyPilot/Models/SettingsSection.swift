@@ -5,6 +5,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     case history
     case harnesses
     case proxy
+    case models
     case routing
     case keys
     case advanced
@@ -12,9 +13,9 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 
     var id: Self { self }
 
-    static let sidebarSections: [SettingsSection] = [.home, .history, .proxy, .routing, .keys, .harnesses, .advanced, .customization]
+    static let sidebarSections: [SettingsSection] = [.home, .history, .proxy, .models, .routing, .keys, .harnesses, .advanced, .customization]
 
-    static let collapsedTabSections: [SettingsSection] = [.home, .history, .proxy, .routing, .keys, .harnesses, .advanced]
+    static let collapsedTabSections: [SettingsSection] = [.home, .history, .proxy, .models, .routing, .keys, .harnesses, .advanced]
 
     static func availableSidebarSections(repoGPSRoutingEnabled: Bool) -> [SettingsSection] {
         sidebarSections.filter { repoGPSRoutingEnabled || $0 != .routing }
@@ -34,6 +35,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
             return "RepoGPS"
         case .proxy:
             return "Xcode Setup"
+        case .models:
+            return "Models"
         case .routing:
             return "Connections"
         case .keys:
@@ -55,6 +58,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
             return "RepoGPS"
         case .proxy:
             return "Xcode Setup"
+        case .models:
+            return "Models"
         case .routing:
             return "Connections"
         case .keys:
@@ -75,7 +80,9 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .harnesses:
             return "Optional Terminal coding agent"
         case .proxy:
-            return "Agent, providers and models"
+            return "Agent registration and setup"
+        case .models:
+            return "Live catalogs and saved models"
         case .routing:
             return "Selected and running models"
         case .keys:
@@ -97,6 +104,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
             return "terminal"
         case .proxy:
             return "network"
+        case .models:
+            return "square.stack.3d.up"
         case .routing:
             return "arrow.triangle.branch"
         case .keys:

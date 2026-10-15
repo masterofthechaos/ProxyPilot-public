@@ -96,7 +96,7 @@ public enum ModelDiscovery {
         }
 
         do {
-            return try parseModelIDs(from: normalized.data)
+            return try parseModelIDs(from: normalized.data).filter(provider.supportsChatModel)
         } catch Error.invalidJSON {
             if let fallback = provider.fallbackModelIDs {
                 return fallback

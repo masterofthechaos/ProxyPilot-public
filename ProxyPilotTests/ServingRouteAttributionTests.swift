@@ -13,6 +13,27 @@ import ProxyPilotCore
 /// the Xcode selection, which had served none of it.
 @MainActor
 final class ServingRouteAttributionTests: XCTestCase {
+    func testOllamaTrafficKeepsItsProviderWhenConfiguredRouteStillSaysOpenRouter() {
+        let vm = makeReportedState()
+        vm.sessionReportCard.record(ProxyPilotCore.RequestRecord(
+            model: "qwen2.5-coder:0.5b", promptTokens: 33, completionTokens: 10,
+            durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: false,
+            providerIdentifier: "ollama"
+        ))
+        XCTAssertEqual(vm.latestSessionProviderIdentifier, "ollama")
+        XCTAssertEqual(vm.sessionMenuProviderTitle, "Ollama")
+        XCTAssertEqual(vm.servingRoute?.providerTitle, "Ollama")
+        XCTAssertNil(vm.estimatedCostUSD(for: vm.sessionReportCard.requests[0]))
+    }
+
+    func testAppOwnedRouteKeepsStartTimeProviderAfterSelectionChanges() {
+        let vm = makeViewModel()
+        vm.applyProxyRuntimeStatus(.runningInApp)
+        vm.localProxyState.activeXcodeAgentModel = "qwen2.5-coder:0.5b"
+        vm.localProxyState.activeProviderIdentifier = "ollama"
+        vm.upstreamProvider = .openRouter
+        XCTAssertEqual(vm.servingRoute?.providerTitle, "Ollama")
+    }
 
     private func makeViewModel() -> AppViewModel {
         let defaults = UserDefaults(suiteName: "ServingRouteAttributionTests-\(UUID().uuidString)")!

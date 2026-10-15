@@ -2,7 +2,7 @@ import AppKit
 import ProxyPilotCore
 import SwiftUI
 
-/// Bounds for the Proxy page's "Fetch Live Models" list. `maxHeight` keeps a provider
+/// Bounds for the Models page's "Fetch Live Models" list. `maxHeight` keeps a provider
 /// with hundreds of non-collapsible models (OpenRouter in particular) scrolling inside
 /// its own box instead of pushing the Xcode/Agent sections off screen.
 enum ModelSelectionListLayout {
@@ -379,10 +379,12 @@ struct ContentView: View {
         case .harnesses:
             CodingHarnessesView(onOpenHome: { selectedSection = .home })
                 .environmentObject(vm)
+        case .models:
+            modelsTab
         case .proxy:
             proxyTab
         case .routing:
-            RoutingView(onOpenXcodeSetup: { selectedSection = .proxy })
+            RoutingView(onOpenModels: { selectedSection = .models })
                 .environmentObject(vm)
         case .keys:
             keysTab
@@ -550,6 +552,10 @@ struct ContentView: View {
     }
 
     private func focusProxySection(_ focus: ProxySectionFocus) {
+        if focus == .models {
+            selectedSection = .models
+            return
+        }
         selectedSection = .proxy
         proxySectionFocus = focus
         highlightedProxySection = focus
@@ -581,177 +587,15 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Proxy Tab
-
-    private var proxyTab: some View {
-        ScrollViewReader { proxy in
-            Form {
-            Section("Set up Xcode") {
-                Text("Choose a provider and model, then install ProxyPilot Agent for Xcode 27. Older Xcode versions can use Claude Agent compatibility setup below.")
-                HStack {
-                    Button("1. Provider & API Key") { selectedSection = .keys }
-                    Button("2. Choose Model") { focusProxySection(.models) }
-                    Button("3. Set Up Agent") {
-                        if vm.showsAgentModeChoice { vm.selectedAgentMode = .proxyPilotAgent }
-                        focusProxySection(.agentRegistration)
-                    }
-                }
-                Text("After setup, select ProxyPilot in Xcode's agent picker. Wait for a response to finish before applying a model change; continue in the same conversation once the new model is running.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section("Proxy") {
-                HStack(spacing: 8) {
-                    TextField("Proxy URL", text: Binding(
-                        get: { vm.proxyURLString },
-                        set: { vm.proxyURLString = $0 }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                    .help("Use \(AppViewModel.defaultProxyURLString) for built-in mode.")
-
-                    Button {
-                        vm.resetProxyURLToDefault()
-                    } label: {
-                        Image(systemName: "arrow.counterclockwise.circle")
-                    }
-                    .buttonStyle(.plain)
-                    .controlSize(.small)
-                    .disabled(vm.proxyURLString == AppViewModel.defaultProxyURLString)
-                    .help("Reset proxy URL to default")
-                    .accessibilityLabel("Reset proxy URL")
-                    .accessibilityHint("Sets proxy URL to \(AppViewModel.defaultProxyURLString)")
-                }
-
-                HStack(spacing: 12) {
-                    Button("Start") { Task { await vm.startProxy() } }
-                        .disabled(!vm.canStartProxy)
-                        .accessibilityLabel("Start local proxy server")
-                        .accessibilityHint("Starts ProxyPilot local proxy for Xcode.")
-
-                    Button("Stop") { Task { await vm.stopProxy() } }
-                        .disabled(!vm.canStopProxy)
-                        .accessibilityLabel("Stop local proxy server")
-                        .accessibilityHint("Stops the local proxy server.")
-
-                    Button("Restart") { Task { await vm.restartProxy() } }
-                        .disabled(!vm.canRestartProxy)
-                        .accessibilityLabel("Restart local proxy server")
-                        .accessibilityHint("Restarts the local proxy server.")
-
-                    Spacer()
-
-                    Button("Refresh") { vm.refreshStatus() }
-                        .accessibilityLabel("Refresh proxy status")
-                        .help(AppViewModel.refreshProxyStatusHelpText)
-                }
-
-                LabeledContent("Status") {
-                    Text(vm.statusText)
-                        .foregroundStyle(vm.isRunning ? .green : .secondary)
-                }
-                .accessibilityLabel("Proxy status \(vm.statusText)")
-
-                switch vm.recoveryState {
-                case .recovering(let attempt, let delaySeconds):
-                    Text(verbatim: String(localized: "Auto-recovery attempt") + " \(attempt) " + String(localized: "queued in") + " \(delaySeconds)s.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                case .degraded(let reason):
-                    Text(reason)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                default:
-                    EmptyView()
-                }
-
-                Text("Built-in proxy serves `GET /v1/models`, forwards `POST /v1/chat/completions`, and translates `POST /v1/messages`.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(verbatim: String(localized: "Anthropic translator mode:") + " " + vm.anthropicTranslatorModeText)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                DisclosureGroup("Terms") {
-                    Text(vm.contextualTerminologyHelpText)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-                .font(.caption)
-            }
-
-            Button { selectedSection = .advanced } label: {
-                Text("Local auth, startup behavior, and more in **Advanced**.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-
-            Section("Provider Cache Signals") {
-                Picker("Mode", selection: Binding(
-                    get: { vm.promptCachingMode },
-                    set: { vm.promptCachingMode = $0 }
-                )) {
-                    Text(PromptCachingMode.computeCacheHints.displayTitle).tag(PromptCachingMode.computeCacheHints)
-                    Text(PromptCachingMode.observeOnly.displayTitle).tag(PromptCachingMode.observeOnly)
-                    Text(PromptCachingMode.off.displayTitle).tag(PromptCachingMode.off)
-                }
-                .pickerStyle(.segmented)
-                .proxyFocusGlow(isActive: highlightedProxySection == .cacheSignals, color: vm.proxyPilotAccentColor)
-
-                LabeledContent("Provider") {
-                    Text(vm.upstreamProviderDisplayTitle)
-                }
-
-                LabeledContent("Signal") {
-                    Text(vm.promptCachingMode.displayTitle)
-                        .foregroundStyle(promptCachingModeColor)
-                }
-
-                Text(vm.promptCachingProviderStatusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .id(ProxySectionFocus.cacheSignals)
-
-            // Hidden until the shipped ACCA ruleset provides MVP functionality —
-            // an empty ruleset makes the toggle a no-op, and no-op controls
-            // must not reach users. See ContextCompactionFeatureGate.
-            if ContextCompactionFeatureGate.isAvailable {
-                ContextCompactionSettingsView()
-            }
-
-            Section("Preflight") {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        preflightExpanded.toggle()
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: preflightExpanded ? "chevron.down" : "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Text(preflightExpanded ? "Hide preflight checks" : "Show preflight checks")
-                        Spacer()
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-
-                if preflightExpanded {
-                    if let lastRun = vm.preflightLastRun {
-                        Text(verbatim: String(localized: "Last checked:") + " " + lastRun.formatted(date: .abbreviated, time: .shortened))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    ForEach(vm.preflightResults) { result in
-                        preflightRow(result)
-                    }
+    private var modelsTab: some View {
+        Form {
+            Section {
+                Text("Browse live provider catalogs, choose available models, and save defaults for Xcode and RepoGPS. Choose each client's running model in Connections.")
+                    .font(.callout).foregroundStyle(.secondary)
+                if vm.repoGPSRoutingFeatureEnabled {
+                    Button("Open Connections") { selectedSection = .routing }
                 }
             }
-            .onAppear {
-                vm.runPreflightChecks()
-            }
-
             Section("Models (Upstream Provider)") {
                 Picker("Upstream Preset", selection: Binding(
                     get: { vm.selectedUpstreamSelection },
@@ -967,6 +811,187 @@ struct ContentView: View {
                 }
             }
             .id(ProxySectionFocus.models)
+
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: - Proxy Tab
+
+    private var proxyTab: some View {
+        ScrollViewReader { proxy in
+            Form {
+            Section("Set up Xcode") {
+                Text("Choose a provider and model, then install ProxyPilot Agent for Xcode 27. Older Xcode versions can use Claude Agent compatibility setup below.")
+                HStack {
+                    Button("1. Provider & API Key") { selectedSection = .keys }
+                    Button("2. Choose Model") { focusProxySection(.models) }
+                    Button("3. Set Up Agent") {
+                        if vm.showsAgentModeChoice { vm.selectedAgentMode = .proxyPilotAgent }
+                        focusProxySection(.agentRegistration)
+                    }
+                }
+                Text("After setup, select ProxyPilot in Xcode's agent picker. Wait for a response to finish before applying a model change; continue in the same conversation once the new model is running.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Proxy") {
+                HStack(spacing: 8) {
+                    TextField("Proxy URL", text: Binding(
+                        get: { vm.proxyURLString },
+                        set: { vm.proxyURLString = $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .help("Use \(AppViewModel.defaultProxyURLString) for built-in mode.")
+
+                    Button {
+                        vm.resetProxyURLToDefault()
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .controlSize(.small)
+                    .disabled(vm.proxyURLString == AppViewModel.defaultProxyURLString)
+                    .help("Reset proxy URL to default")
+                    .accessibilityLabel("Reset proxy URL")
+                    .accessibilityHint("Sets proxy URL to \(AppViewModel.defaultProxyURLString)")
+                }
+
+                HStack(spacing: 12) {
+                    Button("Start") { Task { await vm.startProxy() } }
+                        .disabled(!vm.canStartProxy)
+                        .accessibilityLabel("Start local proxy server")
+                        .accessibilityHint("Starts ProxyPilot local proxy for Xcode.")
+
+                    Button("Stop") { Task { await vm.stopProxy() } }
+                        .disabled(!vm.canStopProxy)
+                        .accessibilityLabel("Stop local proxy server")
+                        .accessibilityHint("Stops the local proxy server.")
+
+                    Button("Restart") { Task { await vm.restartProxy() } }
+                        .disabled(!vm.canRestartProxy)
+                        .accessibilityLabel("Restart local proxy server")
+                        .accessibilityHint("Restarts the local proxy server.")
+
+                    Spacer()
+
+                    Button("Refresh") { vm.refreshStatus() }
+                        .accessibilityLabel("Refresh proxy status")
+                        .help(AppViewModel.refreshProxyStatusHelpText)
+                }
+
+                LabeledContent("Status") {
+                    Text(vm.statusText)
+                        .foregroundStyle(vm.isRunning ? .green : .secondary)
+                }
+                .accessibilityLabel("Proxy status \(vm.statusText)")
+
+                switch vm.recoveryState {
+                case .recovering(let attempt, let delaySeconds):
+                    Text(verbatim: String(localized: "Auto-recovery attempt") + " \(attempt) " + String(localized: "queued in") + " \(delaySeconds)s.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .degraded(let reason):
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                default:
+                    EmptyView()
+                }
+
+                Text("Built-in proxy serves `GET /v1/models`, forwards `POST /v1/chat/completions`, and translates `POST /v1/messages`.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(verbatim: String(localized: "Anthropic translator mode:") + " " + vm.anthropicTranslatorModeText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                DisclosureGroup("Terms") {
+                    Text(vm.contextualTerminologyHelpText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                .font(.caption)
+            }
+
+            Button { selectedSection = .advanced } label: {
+                Text("Local auth, startup behavior, and more in **Advanced**.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+
+            Section("Provider Cache Signals") {
+                Picker("Mode", selection: Binding(
+                    get: { vm.promptCachingMode },
+                    set: { vm.promptCachingMode = $0 }
+                )) {
+                    Text(PromptCachingMode.computeCacheHints.displayTitle).tag(PromptCachingMode.computeCacheHints)
+                    Text(PromptCachingMode.observeOnly.displayTitle).tag(PromptCachingMode.observeOnly)
+                    Text(PromptCachingMode.off.displayTitle).tag(PromptCachingMode.off)
+                }
+                .pickerStyle(.segmented)
+                .proxyFocusGlow(isActive: highlightedProxySection == .cacheSignals, color: vm.proxyPilotAccentColor)
+
+                LabeledContent("Provider") {
+                    Text(vm.upstreamProviderDisplayTitle)
+                }
+
+                LabeledContent("Signal") {
+                    Text(vm.promptCachingMode.displayTitle)
+                        .foregroundStyle(promptCachingModeColor)
+                }
+
+                Text(vm.promptCachingProviderStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .id(ProxySectionFocus.cacheSignals)
+
+            // Hidden until the shipped ACCA ruleset provides MVP functionality —
+            // an empty ruleset makes the toggle a no-op, and no-op controls
+            // must not reach users. See ContextCompactionFeatureGate.
+            if ContextCompactionFeatureGate.isAvailable {
+                ContextCompactionSettingsView()
+            }
+
+            Section("Preflight") {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        preflightExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: preflightExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(preflightExpanded ? "Hide preflight checks" : "Show preflight checks")
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if preflightExpanded {
+                    if let lastRun = vm.preflightLastRun {
+                        Text(verbatim: String(localized: "Last checked:") + " " + lastRun.formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    ForEach(vm.preflightResults) { result in
+                        preflightRow(result)
+                    }
+                }
+            }
+            .onAppear {
+                vm.runPreflightChecks()
+            }
+
+            Section("Models") {
+                Button("Open Models") { selectedSection = .models }
+                Text("Browse live provider catalogs and manage models for Xcode and RepoGPS in Models.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
 
             Section("Xcode") {
                 VStack(alignment: .leading, spacing: 10) {

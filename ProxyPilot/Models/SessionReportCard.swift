@@ -17,6 +17,7 @@ final class SessionReportCard: ObservableObject {
         let durationSeconds: TimeInterval
         let path: String
         let wasStreaming: Bool
+        var providerIdentifier: String?
 
         var totalTokens: Int { promptTokens + completionTokens }
 
@@ -39,7 +40,8 @@ final class SessionReportCard: ObservableObject {
             promptCacheWriteTokens: Int? = nil,
             durationSeconds: TimeInterval,
             path: String,
-            wasStreaming: Bool
+            wasStreaming: Bool,
+            providerIdentifier: String? = nil
         ) {
             self.id = id
             self.timestamp = timestamp
@@ -52,6 +54,7 @@ final class SessionReportCard: ObservableObject {
             self.durationSeconds = durationSeconds
             self.path = path
             self.wasStreaming = wasStreaming
+            self.providerIdentifier = providerIdentifier
         }
     }
 
@@ -209,7 +212,8 @@ final class SessionReportCard: ObservableObject {
             promptCacheWriteTokens: entry.promptCacheWriteTokens,
             durationSeconds: entry.durationSeconds,
             path: entry.path,
-            wasStreaming: entry.wasStreaming
+            wasStreaming: entry.wasStreaming,
+            providerIdentifier: entry.providerIdentifier
         ))
     }
 
@@ -232,7 +236,8 @@ final class SessionReportCard: ObservableObject {
                 promptCacheWriteTokens: entry.promptCacheWriteTokens,
                 durationSeconds: entry.durationSeconds,
                 path: entry.path,
-                wasStreaming: entry.wasStreaming
+                wasStreaming: entry.wasStreaming,
+                providerIdentifier: entry.providerIdentifier
             )
         }
         requests = Array((requests + mapped).suffix(Self.maxRetainedRequests))

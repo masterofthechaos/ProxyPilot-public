@@ -3,6 +3,13 @@ import XCTest
 
 @MainActor
 final class ProxyServiceTests: XCTestCase {
+    func testMetaCatalogIncludesOnlyChatFamiliesWithoutInventingMetadata() throws {
+        let response = try decodeModelsPayload(#"{"data":[{"id":"muse-image-1.0"},{"id":"muse-spark-1.3"},{"id":"muse-wonder-1.0"},{"id":"muse-voice-transcribe-1.0"},{"id":"sam-3.1"}]}"#)
+        let models = ProxyService.upstreamModels(from: response, provider: .meta)
+        XCTAssertEqual(models.map(\.id), ["muse-spark-1.3", "muse-wonder-1.0"])
+        XCTAssertTrue(models.allSatisfy { $0.promptPricePer1M == nil && $0.completionPricePer1M == nil && $0.contextLength == nil })
+    }
+
     func testReadLogTailFromSpecificFileReturnsSuffix() throws {
         let service = ProxyService(homeDirectory: FileManager.default.temporaryDirectory)
         let logURL = FileManager.default.temporaryDirectory

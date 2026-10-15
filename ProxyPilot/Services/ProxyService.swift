@@ -154,7 +154,7 @@ final class ProxyService {
         from response: OpenAIModelsResponse,
         provider: UpstreamProvider
     ) -> [UpstreamModel] {
-        response.data.map { model in
+        response.data.filter { provider.supportsChatModel($0.id) }.map { model in
             let pricing = model.pricing
             let perMillion: (String?) -> Double? = { raw in
                 raw.flatMap(Double.init).map { $0 * 1_000_000 }

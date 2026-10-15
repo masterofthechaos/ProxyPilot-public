@@ -204,7 +204,7 @@ struct MenuBarView: View {
                     // with the GUI's Xcode provider produced a sentence whose
                     // two halves described different routes — correct only
                     // while both happened to point at the same provider.
-                    upstreamProviderTitle: vm.servingRoute?.providerTitle ?? vm.upstreamProviderDisplayTitle,
+                    upstreamProviderTitle: vm.sessionMenuProviderTitle,
                     estimatedCostText: vm.sessionMenuCostText
                 )
             } else {

@@ -79,6 +79,24 @@ enum CLIProxyRuntime {
         return "Check if port \(port) is already in use. If the port is free, inspect the error detail above for local network or sandbox restrictions."
     }
 
+    static func processOutput(executable: URL, arguments: [String]) -> Data? {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        // Drain while the child runs: waiting first deadlocks once its pipe fills.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus == 0 ? data : nil
+    }
+
     static func discoverStartProcesses(on port: UInt16) -> [DiscoveredProxyProcess] {
         let pgrepPath: String
         if FileManager.default.isExecutableFile(atPath: "/usr/bin/pgrep") {
@@ -87,23 +105,8 @@ enum CLIProxyRuntime {
             pgrepPath = "/bin/pgrep"
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: pgrepPath)
-        process.arguments = ["-alf", "proxypilot"]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return []
-        }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else {
+        guard let data = processOutput(executable: URL(fileURLWithPath: pgrepPath), arguments: ["-alf", "proxypilot"]),
+              let output = String(data: data, encoding: .utf8) else {
             return []
         }
 

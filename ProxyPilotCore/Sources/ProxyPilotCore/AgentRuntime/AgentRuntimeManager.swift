@@ -294,7 +294,7 @@ public struct AgentRuntimeManager: Sendable {
         guard fileManager.isExecutableFile(atPath: npm.path) else {
             throw AgentRuntimeManagerError.installedRuntimeInvalid("npm is missing from the Node archive.")
         }
-        let npmEnvironment = Self.hardenedNPMEnvironment(nodeRoot: staging, home: parent)
+        let npmEnvironment = try Self.hardenedNPMEnvironment(nodeRoot: staging, home: parent)
         let packedAdapterDirectory = staging.appendingPathComponent("proxypilot-adapter-pack", isDirectory: true)
         try fileManager.createDirectory(at: packedAdapterDirectory, withIntermediateDirectories: true)
         let packResult = try Self.runProcess(
@@ -431,17 +431,26 @@ public struct AgentRuntimeManager: Sendable {
         return tarball
     }
 
-    private static func hardenedNPMEnvironment(nodeRoot: URL, home: URL) -> [String: String] {
-        [
+    static func hardenedNPMEnvironment(nodeRoot: URL, home: URL) throws -> [String: String] {
+        // npm rejects loading one file as both the user and global config.
+        // Keep isolated, empty files in staging so ambient configuration cannot
+        // redirect the registry or enable install scripts.
+        let globalConfig = nodeRoot.appendingPathComponent("proxypilot-global.npmrc")
+        let userConfig = nodeRoot.appendingPathComponent("proxypilot-user.npmrc")
+        for config in [globalConfig, userConfig] {
+            try Data().write(to: config, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: config.path)
+        }
+        return [
             "PATH": "\(nodeRoot.appendingPathComponent("bin").path):/usr/bin:/bin",
             "HOME": home.path,
             "NPM_CONFIG_AUDIT": "false",
             "NPM_CONFIG_FUND": "false",
             "NPM_CONFIG_CACHE": home.appendingPathComponent(".npm-cache", isDirectory: true).path,
-            "NPM_CONFIG_GLOBALCONFIG": "/dev/null",
+            "NPM_CONFIG_GLOBALCONFIG": globalConfig.path,
             "NPM_CONFIG_IGNORE_SCRIPTS": "true",
             "NPM_CONFIG_REGISTRY": "https://registry.npmjs.org/",
-            "NPM_CONFIG_USERCONFIG": "/dev/null",
+            "NPM_CONFIG_USERCONFIG": userConfig.path,
         ]
     }
 

@@ -14,7 +14,7 @@ import ProxyPilotCore
 /// must not change the model RepoGPS uses, and vice versa.
 struct RoutingView: View {
     @EnvironmentObject private var vm: AppViewModel
-    var onOpenXcodeSetup: () -> Void = {}
+    var onOpenModels: () -> Void = {}
 
     /// Shared with Home and the menu bar via `AppViewModel`. Previously a
     /// view-local `@StateObject`, which left Home unable to see the CLI route
@@ -59,7 +59,7 @@ struct RoutingView: View {
             }
             .pickerStyle(.menu)
 
-            Button("Open Xcode Setup", action: onOpenXcodeSetup)
+            Button("Open Models", action: onOpenModels)
 
             // Deliberately `vm.statusText` rather than a synthesized
             // "Serving on port N". `vm.isRunning` is true whenever *a* proxy
@@ -76,7 +76,7 @@ struct RoutingView: View {
         } header: {
             Text("Xcode")
         } footer: {
-            Text("This is your Xcode selection. Use Xcode Setup to choose a provider, discover models, and apply changes. A background proxy may also serve other clients.")
+            Text("This is your Xcode selection. Use Models to choose a provider, discover models, and apply changes. A background proxy may also serve other clients.")
                 .font(.caption)
         }
     }
@@ -157,6 +157,7 @@ struct RoutingView: View {
             }
         } header: {
             Text("RepoGPS")
+            Button("Browse Models", action: onOpenModels)
         } footer: {
             Text(
                 "Applying changes restarts the background proxy and interrupts requests using it, "

@@ -33,6 +33,7 @@ final class LocalProxyState: ObservableObject {
     @Published var lastModelSeen: String = ""
     @Published var lastUpstreamModelUsed: String = ""
     @Published var activeXcodeAgentModel: String = ""
+    @Published var activeProviderIdentifier: String = ""
     @Published var lastXcodeAgentRequestModel: String = ""
     @Published var lastXcodeAgentRequestStatus: Int?
     @Published var lastXcodeAgentRequestAt: Date?
@@ -254,6 +255,11 @@ final class LocalProxyServer: @unchecked Sendable {
 
     let state = LocalProxyState()
     let reportCard = SessionReportCard()
+    private let sessionReportURL: URL?
+
+    init(sessionReportURL: URL? = nil) {
+        self.sessionReportURL = sessionReportURL
+    }
 
     static let maxHeaderBytes = 64 * 1024
     static let maxBodyBytes = 10 * 1024 * 1024
@@ -282,6 +288,7 @@ final class LocalProxyServer: @unchecked Sendable {
             state.lastModelSeen = ""
             state.lastUpstreamModelUsed = ""
             state.activeXcodeAgentModel = config.preferredAnthropicUpstreamModel
+            state.activeProviderIdentifier = config.analyticsProviderIdentifier
             state.lastXcodeAgentRequestModel = ""
             state.lastXcodeAgentRequestStatus = nil
             state.lastXcodeAgentRequestAt = nil
@@ -687,7 +694,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: #"{"error":{"message":"Missing upstream API key","type":"invalid_request_error"}}"#,
                     contentType: "application/json"
                 )
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: 400, errorClass: "missing_upstream_key")
                 return
             }
         }
@@ -706,7 +713,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: #"{"error":{"message":"Model not allowed","type":"invalid_request_error"}}"#,
                     contentType: "application/json"
                 )
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: 400, errorClass: "model_not_allowed")
                 return
             }
         }
@@ -774,7 +781,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 )
                 await recordSessionReport(record, config: config, trackingID: trackingID)
             } else {
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: normalized.statusCode)
             }
         } catch {
             respond(
@@ -783,7 +790,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 body: #"{"error":{"message":"Upstream request failed","type":"server_error"}}"#,
                 contentType: "application/json"
             )
-            await failTrackedRequest(id: trackingID)
+            await failTrackedRequest(id: trackingID, error: error)
         }
     }
 
@@ -800,7 +807,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: #"{"error":{"message":"Missing upstream API key","type":"invalid_request_error"}}"#,
                     contentType: "application/json"
                 )
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: 400, errorClass: "missing_upstream_key")
                 return
             }
         }
@@ -819,7 +826,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: #"{"error":{"message":"Model not allowed","type":"invalid_request_error"}}"#,
                     contentType: "application/json"
                 )
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: 400, errorClass: "model_not_allowed")
                 return
             }
         }
@@ -850,7 +857,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 var errorBody = ""
                 for try await line in bytes.lines { errorBody += line }
                 respond(connection: connection, status: httpStatus, body: errorBody, contentType: "application/json")
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: httpStatus)
                 return
             }
 
@@ -960,7 +967,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 body: #"{"error":{"message":"Upstream streaming failed","type":"server_error"}}"#,
                 contentType: "application/json"
             )
-            await failTrackedRequest(id: trackingID)
+            await failTrackedRequest(id: trackingID, error: error)
         }
     }
 
@@ -977,7 +984,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: AnthropicTranslator.errorJSON(message: "Missing upstream API key"),
                     contentType: "application/json"
                 )
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: 400, errorClass: "missing_upstream_key")
                 return
             }
         }
@@ -989,7 +996,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 body: AnthropicTranslator.errorJSON(message: "Invalid JSON body"),
                 contentType: "application/json"
             )
-            await failTrackedRequest(id: trackingID)
+            await failTrackedRequest(id: trackingID, statusCode: 400, errorClass: "invalid_json")
             return
         }
         logIncomingAnthropicRequest(anthropicRequest, requestID: requestID, mode: config.anthropicTranslatorMode)
@@ -1199,7 +1206,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     ),
                     contentType: "application/json"
                 )
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: httpStatus)
                 return
             }
 
@@ -1211,7 +1218,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     contentType: "application/json"
                 )
                 recordXcodeAgentRequest(model: reportModel, status: 502)
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: 502, errorClass: "invalid_upstream_response")
                 return
             }
             logUpstreamResponse(openAIResponse, requestID: requestID, mode: mode, streaming: false)
@@ -1259,7 +1266,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     contentType: "application/json"
                 )
                 recordXcodeAgentRequest(model: reportModel, status: 500)
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: 500, errorClass: "response_encoding_failed")
             }
         } catch {
             respond(
@@ -1269,7 +1276,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
-            await failTrackedRequest(id: trackingID)
+            await failTrackedRequest(id: trackingID, error: error)
         }
     }
 
@@ -1305,7 +1312,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     ),
                     contentType: "application/json"
                 )
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: httpStatus)
                 return
             }
 
@@ -1441,7 +1448,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
-            await failTrackedRequest(id: trackingID)
+            await failTrackedRequest(id: trackingID, error: error)
         }
     }
 
@@ -1478,7 +1485,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     ),
                     contentType: "application/json"
                 )
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: httpStatus)
                 return
             }
 
@@ -1558,7 +1565,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
-            await failTrackedRequest(id: trackingID)
+            await failTrackedRequest(id: trackingID, error: error)
         }
     }
 
@@ -1605,7 +1612,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 )
                 await recordSessionReport(record, config: config, trackingID: trackingID)
             } else {
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: validated.statusCode)
             }
             await recordInputOutputLog(
                 inputBody: inputBody,
@@ -1629,7 +1636,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
-            await failTrackedRequest(id: trackingID)
+            await failTrackedRequest(id: trackingID, error: error)
         }
     }
 
@@ -1661,7 +1668,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 let text = String(decoding: errorData, as: UTF8.self)
                 respond(connection: connection, status: statusCode, body: text, contentType: "application/json")
                 recordXcodeAgentRequest(model: reportModel, status: statusCode)
-                await failTrackedRequest(id: trackingID)
+                await failTrackedRequest(id: trackingID, statusCode: statusCode)
                 return
             }
 
@@ -1734,7 +1741,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
-            await failTrackedRequest(id: trackingID)
+            await failTrackedRequest(id: trackingID, error: error)
         }
     }
 
@@ -1767,7 +1774,8 @@ final class LocalProxyServer: @unchecked Sendable {
         }
     }
 
-    private func failTrackedRequest(id: UUID) async {
+    private func failTrackedRequest(id: UUID, statusCode: Int? = nil, errorClass: String? = nil, error: Error? = nil) async {
+        let failure = Self.failureTelemetry(statusCode: statusCode, errorClass: errorClass, error: error)
         let clientSurface = RequestAttributionContext.current?.client ?? "gui"
         await MainActor.run { [weak self] in
             guard let self else { return }
@@ -1777,15 +1785,38 @@ final class LocalProxyServer: @unchecked Sendable {
                 "proxy_request_failed",
                 [
                     "stage": "proxy_request",
-                    "error_class": "request_failed",
-                    "status_class": "unknown",
+                    "error_class": failure.errorClass,
+                    "status_class": failure.statusClass,
                     "path_category": metadata?.pathCategory ?? "other",
                     "provider_identifier": metadata?.providerIdentifier ?? "unknown",
                     "client_surface": clientSurface,
-                    "retryable": "unknown"
+                    "retryable": failure.retryable
                 ]
             )
         }
+    }
+
+    static func failureTelemetry(statusCode: Int? = nil, errorClass: String? = nil, error: Error? = nil) -> (errorClass: String, statusClass: String, retryable: String) {
+        if let error {
+            let urlError = error as NSError
+            if urlError.domain == NSURLErrorDomain {
+                switch urlError.code {
+                case NSURLErrorTimedOut:
+                    return ("timeout", "transport", "true")
+                case NSURLErrorCancelled:
+                    return ("cancelled", "transport", "false")
+                case NSURLErrorCannotConnectToHost, NSURLErrorCannotFindHost, NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet:
+                    return ("connection_failed", "transport", "true")
+                default:
+                    return ("transport_error", "transport", "unknown")
+                }
+            }
+            return ("request_failed", "unknown", "unknown")
+        }
+        guard let statusCode else { return (errorClass ?? "request_failed", "unknown", "unknown") }
+        let statusClass = (100..<600).contains(statusCode) ? "\(statusCode / 100)xx" : "unknown"
+        let retryable = statusCode == 429 || (500..<600).contains(statusCode)
+        return (errorClass ?? "upstream_http_error", statusClass, retryable ? "true" : "false")
     }
 
     private func recordInputOutputLog(
@@ -1819,7 +1850,8 @@ final class LocalProxyServer: @unchecked Sendable {
         config: Config,
         trackingID: UUID
     ) async {
-        let record = recordWithAllowedCacheTelemetry(record, promptCaching: config.promptCaching)
+        var record = recordWithAllowedCacheTelemetry(record, promptCaching: config.promptCaching)
+        record.providerIdentifier = config.analyticsProviderIdentifier
         let attribution = RequestAttributionContext.current
         let currentSessionID = attribution?.sessionID ?? config.sessionID
         let shouldRecord = await MainActor.run { [weak self] in
@@ -1853,7 +1885,8 @@ final class LocalProxyServer: @unchecked Sendable {
                 source: attribution?.client ?? "gui",
                 sessionID: currentSessionID,
                 record: coreRecord
-            )
+            ),
+            to: sessionReportURL ?? SessionReportStore.defaultURL
         )
     }
 

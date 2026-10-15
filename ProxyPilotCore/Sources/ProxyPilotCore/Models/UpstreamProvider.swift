@@ -11,6 +11,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     case google     = "google"
     case deepSeek   = "deepseek"
     case moonshot   = "moonshot"
+    case meta       = "meta"
     case mistral    = "mistral"
     case miniMax    = "minimax"
     case miniMaxCN  = "minimax-cn"
@@ -32,6 +33,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .google:     return "Google (Gemini)"
         case .deepSeek:   return "DeepSeek"
         case .moonshot:   return "Moonshot.ai (Kimi)"
+        case .meta:       return "Meta (Muse)"
         case .mistral:    return "Mistral"
         case .miniMax:    return "MiniMax"
         case .miniMaxCN:  return "MiniMax CN"
@@ -53,6 +55,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .google:     return "https://generativelanguage.googleapis.com/v1beta/openai"
         case .deepSeek:   return "https://api.deepseek.com/v1"
         case .moonshot:   return "https://api.moonshot.ai/v1"
+        case .meta:       return "https://api.meta.ai/v1"
         case .mistral:    return "https://api.mistral.ai/v1"
         case .miniMax:    return "https://api.minimax.io/v1"
         case .miniMaxCN:  return "https://api.minimaxi.com/v1"
@@ -63,12 +66,19 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    public func supportsChatModel(_ id: String) -> Bool {
+        guard self == .meta else { return true }
+        return id.hasPrefix("muse-spark-") || id.hasPrefix("muse-wonder-")
+    }
+
     public var modelsPath: String { "/models" }
 
     public var chatCompletionsPath: String { "/chat/completions" }
 
     public var unsupportedOpenAIParameters: [String] {
         switch self {
+        case .meta:
+            return ["stop", "verbosity", "logit_bias", "prediction", "web_search_options", "modalities", "audio"]
         case .moonshot:
             return ["temperature", "top_p", "n", "presence_penalty", "frequency_penalty"]
         case .google:
@@ -261,6 +271,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .google:     return SecretKey.googleAPIKey
         case .deepSeek:   return SecretKey.deepSeekAPIKey
         case .moonshot:   return SecretKey.moonshotAPIKey
+        case .meta:       return SecretKey.metaAPIKey
         case .mistral:    return SecretKey.mistralAPIKey
         case .miniMax:    return SecretKey.minimaxAPIKey
         case .miniMaxCN:  return SecretKey.minimaxCNAPIKey
@@ -279,13 +290,13 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// Whether this provider has an official Anthropic-compatible endpoint that
     /// can receive `/v1/messages` requests directly.
     public var supportsAnthropicPassthrough: Bool {
-        isMiniMax || self == .deepSeek || self == .moonshot
+        isMiniMax || self == .deepSeek || self == .moonshot || self == .meta
     }
 
     /// Whether `/v1/messages` should use the provider's Anthropic-compatible
     /// endpoint without requiring a user-facing routing-mode toggle.
     public var usesAnthropicPassthroughByDefault: Bool {
-        self == .deepSeek
+        self == .deepSeek || self == .meta
     }
 
     /// Moonshot currently documents native Messages for K3 only.
@@ -302,6 +313,9 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         while base.hasSuffix("/") { base.removeLast() }
 
         guard supportsAnthropicPassthrough else { return nil }
+        if self == .meta {
+            return base.hasSuffix("/v1") ? String(base.dropLast(3)) : base
+        }
         if base.hasSuffix("/anthropic") {
             return base
         }
@@ -316,6 +330,8 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// provider `/anthropic` endpoints.
     public var unsupportedAnthropicParameters: [String] {
         switch self {
+        case .meta:
+            return ["stop_sequences", "top_k", "container", "inference_geo", "mcp_servers", "context_management"]
         case .moonshot:
             return ["temperature", "top_p", "top_k", "thinking", "service_tier", "mcp_servers", "container", "context_management"]
         case .miniMax, .miniMaxCN:

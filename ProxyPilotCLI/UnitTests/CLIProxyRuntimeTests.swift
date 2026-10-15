@@ -3,6 +3,18 @@ import Foundation
 @testable import proxypilot
 
 struct CLIProxyRuntimeTests {
+    @Test func processOutputDrainsMoreThanPipeCapacity() throws {
+        let fixture = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let expected = Data(repeating: 0x61, count: 1_048_576)
+        try expected.write(to: fixture)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        #expect(CLIProxyRuntime.processOutput(executable: URL(fileURLWithPath: "/bin/cat"), arguments: [fixture.path]) == expected)
+    }
+
+    @Test func processOutputReportsLaunchFailure() {
+        #expect(CLIProxyRuntime.processOutput(executable: URL(fileURLWithPath: "/nonexistent/proxypilot-process"), arguments: []) == nil)
+    }
+
     @Test func startCommandWithLongPortFlagMatchesRequestedPort() {
         #expect(CLIProxyRuntime.commandIncludesPort("proxypilot start --port 4024 --provider ollama", port: 4024))
     }

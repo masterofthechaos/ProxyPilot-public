@@ -4,6 +4,40 @@ import Testing
 
 @Suite("UpstreamProvider")
 struct UpstreamProviderTests {
+    @Test func metaNativeEndpointsCredentialsAndCatalog() {
+        let provider = UpstreamProvider.meta
+        #expect(provider.secretKey == "MODEL_API_KEY")
+        #expect(provider.defaultAPIBaseURL == "https://api.meta.ai/v1")
+        #expect(provider.anthropicPassthroughBaseURL(from: provider.defaultAPIBaseURL + "/") == "https://api.meta.ai")
+        #expect(provider.usesAnthropicPassthrough(for: "muse-spark-1.3"))
+        #expect(provider.usesAnthropicPassthrough(for: "muse-wonder-1.0"))
+        #expect(provider.supportsChatModel("muse-spark-1.3-contributor"))
+        #expect(!provider.supportsChatModel("muse-image-1.0"))
+        #expect(!provider.supportsChatModel("muse-voice-transcribe-1.0"))
+        #expect(!provider.supportsChatModel("sam-3.1"))
+        #expect(provider.fallbackModelIDs == nil)
+    }
+
+    @Test func metaPreservesNativeReasoningAndToolContinuation() throws {
+        let messages: [[String: Any]] = [
+            ["role": "assistant", "content": [
+                ["type": "redacted_thinking", "data": "opaque-reasoning"],
+                ["type": "tool_use", "id": "call_1", "name": "read", "input": ["path": "a"]]
+            ]],
+            ["role": "user", "content": [["type": "tool_result", "tool_use_id": "call_1", "content": "hello"]]]
+        ]
+        var request: [String: Any] = ["model": "muse-spark-1.3", "messages": messages,
+            "max_tokens": 4096, "thinking": ["type": "adaptive"], "output_config": ["effort": "high"],
+            "stop_sequences": ["stop"], "top_k": 10, "container": "unsupported"]
+        AnthropicTranslator.sanitizeAnthropicPassthroughRequest(&request, for: .meta)
+        #expect(request["stop_sequences"] == nil)
+        #expect(request["top_k"] == nil)
+        #expect(request["container"] == nil)
+        #expect((request["thinking"] as? [String: String])?["type"] == "adaptive")
+        #expect((request["output_config"] as? [String: String])?["effort"] == "high")
+        #expect(NSDictionary(dictionary: ["messages": request["messages"]!]).isEqual(to: ["messages": messages]))
+    }
+
     @Test func moonshotCredentialsAndNativeModelGate() {
         let provider = UpstreamProvider.moonshot
         #expect(provider.requiresAPIKey)

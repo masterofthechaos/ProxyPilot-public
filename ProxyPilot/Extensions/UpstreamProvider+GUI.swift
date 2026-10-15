@@ -13,6 +13,7 @@ extension UpstreamProvider {
         case .chutes: return URL(string: "https://chutes.ai/app/api-keys")
         case .groq: return URL(string: "https://console.groq.com/keys")
         case .google: return URL(string: "https://aistudio.google.com/apikey")
+        case .meta: return URL(string: "https://dev.meta.ai/")
         case .moonshot: return URL(string: "https://platform.kimi.ai/console/api-keys")
         case .deepSeek: return URL(string: "https://platform.deepseek.com/api_keys")
         case .mistral: return URL(string: "https://console.mistral.ai/api-keys")
@@ -33,6 +34,9 @@ extension UpstreamProvider {
     }
 
     func apiKeyRegionHint(apiBaseURL: URL?) -> String? {
+        if self == .meta {
+            return "Meta Model API uses a separate pay-as-you-go API key. Muse Code subscriptions do not cover these requests. Contributor model IDs permit Meta to use content for training."
+        }
         guard self == .qwen else { return nil }
         if apiBaseURL?.host?.lowercased() == "dashscope.aliyuncs.com" {
             return "China (Beijing) DashScope endpoint selected. Use a China-region Model Studio API key."
@@ -50,6 +54,7 @@ extension UpstreamProvider {
         case .groq: return .groqAPIKey
         case .google: return .googleAPIKey
         case .deepSeek: return .deepSeekAPIKey
+        case .meta: return .metaAPIKey
         case .moonshot: return .moonshotAPIKey
         case .mistral: return .mistralAPIKey
         case .miniMax: return .minimaxAPIKey

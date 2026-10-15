@@ -24,6 +24,10 @@ SMOKE_CONFIG_HOME="$(mktemp -d)"
 SMOKE_MODULE_CACHE="$(mktemp -d)"
 export XDG_CONFIG_HOME="$SMOKE_CONFIG_HOME"
 export PROXYPILOT_SECRETS_DIR="$SMOKE_CONFIG_HOME/secrets"
+# The report store otherwise uses the real Application Support directory on
+# macOS even when XDG_CONFIG_HOME is isolated. Keep synthetic requests private
+# to this smoke run so they cannot appear in the owner's activity dashboard.
+export PROXYPILOT_SESSION_REPORT_PATH="$SMOKE_CONFIG_HOME/session-report.jsonl"
 PID_FILE="$XDG_CONFIG_HOME/proxypilot/proxypilot.pid"
 
 # ---------------------------------------------------------------------------

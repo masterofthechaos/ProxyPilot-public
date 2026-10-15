@@ -3,6 +3,14 @@ import ProxyPilotCore
 @testable import ProxyPilot
 
 final class SettingsSectionTests: XCTestCase {
+    func testMetaKeyOnboardingExplainsSeparateAPIBilling() throws {
+        XCTAssertEqual(UpstreamProvider.meta.keychainKey?.rawValue, "MODEL_API_KEY")
+        let hint = try XCTUnwrap(UpstreamProvider.meta.apiKeyRegionHint(apiBaseURL: nil))
+        XCTAssertTrue(hint.contains("pay-as-you-go"))
+        XCTAssertTrue(hint.contains("subscriptions do not cover"))
+        XCTAssertTrue(hint.contains("Contributor"))
+    }
+
     func testEveryProviderHasASetupEntryAndCredentialMapping() {
         XCTAssertEqual(Set(KeysProviderViewItem.defaultOrder.map(\.rawValue)), Set(UpstreamProvider.allCases.map(\.rawValue)))
         for provider in UpstreamProvider.allCases {
@@ -53,8 +61,8 @@ final class SettingsSectionTests: XCTestCase {
     }
 
     func testSettingsSectionsExposeNativeSidebarMetadataInOrder() {
-        XCTAssertEqual(SettingsSection.allCases, [.home, .history, .harnesses, .proxy, .routing, .keys, .advanced, .customization])
-        XCTAssertEqual(SettingsSection.sidebarSections, [.home, .history, .proxy, .routing, .keys, .harnesses, .advanced, .customization])
+        XCTAssertEqual(SettingsSection.allCases, [.home, .history, .harnesses, .proxy, .models, .routing, .keys, .advanced, .customization])
+        XCTAssertEqual(SettingsSection.sidebarSections, [.home, .history, .proxy, .models, .routing, .keys, .harnesses, .advanced, .customization])
         XCTAssertEqual(SettingsSection.home.title, "Home")
         XCTAssertEqual(SettingsSection.history.title, "Session History")
         XCTAssertEqual(SettingsSection.harnesses.title, "RepoGPS")
@@ -74,8 +82,8 @@ final class SettingsSectionTests: XCTestCase {
     }
 
     func testSettingsSectionsExposeCompactTabTitlesForCollapsedSidebar() {
-        XCTAssertEqual(SettingsSection.collapsedTabSections, [.home, .history, .proxy, .routing, .keys, .harnesses, .advanced])
-        XCTAssertEqual(SettingsSection.collapsedTabSections.map(\.compactTitle), ["Home", "History", "Xcode Setup", "Connections", "Keys & Providers", "RepoGPS", "Advanced"])
+        XCTAssertEqual(SettingsSection.collapsedTabSections, [.home, .history, .proxy, .models, .routing, .keys, .harnesses, .advanced])
+        XCTAssertEqual(SettingsSection.collapsedTabSections.map(\.compactTitle), ["Home", "History", "Xcode Setup", "Models", "Connections", "Keys & Providers", "RepoGPS", "Advanced"])
         XCTAssertFalse(SettingsSection.collapsedTabSections.contains(.customization))
     }
 

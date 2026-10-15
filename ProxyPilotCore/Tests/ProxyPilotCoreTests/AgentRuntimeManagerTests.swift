@@ -1,5 +1,5 @@
 import Foundation
-import ProxyPilotCore
+@testable import ProxyPilotCore
 import Testing
 
 private func makeRuntimeFixture() throws -> (
@@ -25,6 +25,39 @@ private func makeRuntimeFixture() throws -> (
     )
     try Data("adapter-fixture".utf8).write(to: layout.adapterEntryPoint)
     return (root, layout, AgentRuntimeManager(layout: layout, architecture: "arm64"))
+}
+
+@Test func npmConfigurationUsesDistinctIsolatedEmptyFiles() throws {
+    let fixture = try makeRuntimeFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let environment = try AgentRuntimeManager.hardenedNPMEnvironment(
+        nodeRoot: fixture.layout.root, home: fixture.root
+    )
+    let global = try #require(environment["NPM_CONFIG_GLOBALCONFIG"])
+    let user = try #require(environment["NPM_CONFIG_USERCONFIG"])
+    #expect(global != user)
+    for path in [global, user] {
+        #expect(path.hasPrefix(fixture.layout.root.path + "/"))
+        #expect(try Data(contentsOf: URL(fileURLWithPath: path)).isEmpty)
+        let permissions = try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber
+        #expect(permissions?.intValue == 0o600)
+    }
+    #expect(environment["NPM_CONFIG_IGNORE_SCRIPTS"] == "true")
+    #expect(environment["NPM_CONFIG_REGISTRY"] == "https://registry.npmjs.org/")
+    #expect(environment["NODE_OPTIONS"] == nil)
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["PROXYPILOT_TEST_LIVE_RUNTIME_INSTALL"] == "1"))
+func pinnedRuntimeInstallsInIsolatedDirectory() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("proxypilot-live-install-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let layout = ManagedAgentRuntimeLayout(root: root.appendingPathComponent("runtime"), claudeConfigDirectory: root.appendingPathComponent("config"))
+    let manager = AgentRuntimeManager(layout: layout)
+    let manifest = try await manager.install()
+    #expect(manifest.nodeVersion == AgentRuntimeRelease.pinned.nodeVersion)
+    #expect(manifest.adapterIntegrity == AgentRuntimeRelease.pinned.adapterIntegrity)
+    #expect(manager.status().isReady)
+    #expect(FileManager.default.isExecutableFile(atPath: manager.harnessExecutableURL.path))
 }
 
 @Test func runtimeStatusReportsNotInstalled() {

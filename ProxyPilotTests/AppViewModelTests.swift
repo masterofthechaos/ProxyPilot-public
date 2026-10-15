@@ -6,6 +6,64 @@ import ProxyPilotCore
 
 @MainActor
 final class AppViewModelTests: XCTestCase {
+    func testMetaBecomesVisibleOnceForCustomizedLegacyProviderLists() {
+        defaults.set(["openrouter"], forKey: AppViewModel.visibleKeysProvidersDefaultsKey)
+        defaults.set(true, forKey: AppViewModel.didMigrateQwenVisibleProviderDefaultsKey)
+        defaults.set(true, forKey: AppViewModel.didMigrateNineRouterVisibleProviderDefaultsKey)
+        // Even an earlier candidate may already have normalized the order.
+        let order = KeysProviderViewItem.defaultOrder.map(\.rawValue)
+        let visible = AppViewModel.decodedVisibleKeysProviders(from: defaults, storedOrderRawValues: order)
+        XCTAssertEqual(visible, [.openRouter, .meta])
+        XCTAssertTrue(defaults.bool(forKey: AppViewModel.didMigrateMetaVisibleProviderDefaultsKey))
+        XCTAssertEqual(Set(defaults.stringArray(forKey: AppViewModel.visibleKeysProvidersDefaultsKey) ?? []), ["openrouter", "meta"])
+
+        defaults.set(["openrouter"], forKey: AppViewModel.visibleKeysProvidersDefaultsKey)
+        let hiddenAfterUpgrade = AppViewModel.decodedVisibleKeysProviders(from: defaults, storedOrderRawValues: order)
+        XCTAssertEqual(hiddenAfterUpgrade, [.openRouter])
+    }
+
+    func testFreshInstallCanHideMetaWithoutMigrationRestoringIt() {
+        let order = KeysProviderViewItem.defaultOrder.map(\.rawValue)
+        let fresh = AppViewModel.decodedVisibleKeysProviders(from: defaults, storedOrderRawValues: nil)
+        XCTAssertTrue(fresh.contains(.meta))
+        XCTAssertTrue(defaults.bool(forKey: AppViewModel.didMigrateMetaVisibleProviderDefaultsKey))
+        defaults.set(["openai"], forKey: AppViewModel.visibleKeysProvidersDefaultsKey)
+        let customized = AppViewModel.decodedVisibleKeysProviders(from: defaults, storedOrderRawValues: order)
+        XCTAssertFalse(customized.contains(.meta))
+    }
+
+    func testQuitCleanupKeepsMainActorResponsiveDuringBlockingKeyLookup() async {
+        let started = expectation(description: "lookup started")
+        let releasedBeforeTimeout = expectation(description: "main actor released lookup")
+        let release = DispatchSemaphore(value: 0)
+        let cleanup = Task { @MainActor in
+            await AppViewModel.pruneInputOutputLogsForQuit {
+                started.fulfill()
+                if release.wait(timeout: .now() + 2) == .success {
+                    releasedBeforeTimeout.fulfill()
+                }
+                return nil
+            }
+        }
+        await fulfillment(of: [started], timeout: 1)
+        // This continuation requires the main actor. A synchronous Keychain
+        // lookup on it would time out before this signal could be delivered.
+        release.signal()
+        await cleanup.value
+        await fulfillment(of: [releasedBeforeTimeout], timeout: 1)
+    }
+
+    func testQuitCleanupAwaitsRemovalOfUntilQuitRecords() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = InputOutputLogStore(url: directory.appendingPathComponent("records.enc"), encryptionKey: Data(repeating: 0x41, count: 32))
+        try await store.append(InputOutputLogRecord(timestamp: Date(), source: "gui", path: "/v1/messages", model: "test", provider: "test", wasStreaming: false, statusCode: 200, retentionExpiresAt: nil, deleteOnQuit: true, input: .utf8("synthetic"), output: nil))
+        let recorder = InputOutputLoggingRecorder(source: "gui", logStore: store)
+        await AppViewModel.pruneInputOutputLogsForQuit { recorder }
+        let remaining = try await store.readRecords()
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
     private var defaults: UserDefaults!
     private var suiteName: String!
 
@@ -668,6 +726,12 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.defaultSettingsSection, .home)
         XCTAssertEqual(vm.keysProviderOrder, KeysProviderViewItem.defaultOrder)
         XCTAssertEqual(vm.visibleKeysProviders, Set(KeysProviderViewItem.defaultOrder))
+        XCTAssertTrue(defaults.bool(forKey: AppViewModel.didMigrateMetaVisibleProviderDefaultsKey))
+        vm.setKeysProvider(.meta, isVisible: false)
+        let afterResetCustomization = AppViewModel.decodedVisibleKeysProviders(
+            from: defaults, storedOrderRawValues: vm.keysProviderOrder.map(\.rawValue)
+        )
+        XCTAssertFalse(afterResetCustomization.contains(.meta))
     }
 
     /// The real upgrade path: preferences written by a build that predates
@@ -776,7 +840,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.keysProviderOrder.first, .openAI)
         XCTAssertFalse(vm.keysProviderOrder.map(\.rawValue).contains("github-copilot"))
         XCTAssertEqual(vm.keysProviderOrder.count, KeysProviderViewItem.defaultOrder.count)
-        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .qwen, .nineRouter])
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .qwen, .nineRouter, .meta])
     }
 
     func testKeysProviderCustomizationMigratesQwenIntoLegacyVisibleProvidersOnce() {
@@ -858,7 +922,7 @@ final class AppViewModelTests: XCTestCase {
         let vm = AppViewModel(defaults: defaults)
 
         XCTAssertTrue(vm.keysProviderOrder.contains(.qwen))
-        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .qwen, .nineRouter])
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .qwen, .nineRouter, .meta])
         XCTAssertTrue(defaults.bool(forKey: AppViewModel.didMigrateQwenVisibleProviderDefaultsKey))
     }
 
@@ -884,7 +948,7 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertTrue(vm.keysProviderOrder.contains(.qwen))
         XCTAssertFalse(vm.visibleKeysProviders.contains(.qwen))
-        XCTAssertEqual(vm.visibleKeysProviders, [.openAI])
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .meta])
     }
 
     func testKeysProviderCustomizationRespectsQwenHiddenAfterVisibilityOnlyMigration() {
@@ -901,7 +965,7 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertTrue(vm.keysProviderOrder.contains(.qwen))
         XCTAssertFalse(vm.visibleKeysProviders.contains(.qwen))
-        XCTAssertEqual(vm.visibleKeysProviders, [.openAI])
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .meta])
     }
 
 

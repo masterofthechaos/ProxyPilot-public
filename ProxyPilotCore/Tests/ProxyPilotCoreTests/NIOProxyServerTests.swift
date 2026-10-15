@@ -1462,9 +1462,9 @@ struct NIOProxyServerTests {
         try await stub.stop()
     }
 
-    @Test(arguments: [UpstreamProvider.deepSeek, .moonshot])
+    @Test(arguments: [UpstreamProvider.deepSeek, .moonshot, .meta])
     func anthropicMessagesPassthroughsNativeProviderToAnthropicEndpoint(provider: UpstreamProvider) async throws {
-        let model = provider == .moonshot ? "kimi-k3" : "deepseek-v4-pro"
+        let model = provider == .meta ? "muse-spark-1.3" : (provider == .moonshot ? "kimi-k3" : "deepseek-v4-pro")
         let anthropicResponse: [String: Any] = [
             "id": "msg_deepseek_test",
             "type": "message",
@@ -1515,7 +1515,7 @@ struct NIOProxyServerTests {
         let capturedRequest = try #require(stub.requests().first)
         #expect(capturedRequest.method == "POST")
         #expect(capturedRequest.headerValue("Authorization") == "Bearer sk-test")
-        #expect(capturedRequest.uri == "/anthropic/v1/messages")
+        #expect(capturedRequest.uri == (provider == .meta ? "/v1/messages" : "/anthropic/v1/messages"))
         #expect(capturedRequest.headerValue("Content-Type") == "application/json")
 
         let capturedBodyData = Data(capturedRequest.body.utf8)
@@ -1528,4 +1528,64 @@ struct NIOProxyServerTests {
         try await server.stop()
         try await stub.stop()
     }
+    @Test(arguments: [false, true], [false, true])
+    func metaHTTPContract(nativeMessages: Bool, streaming: Bool) async throws {
+        let path = nativeMessages ? "/v1/messages" : "/v1/chat/completions"
+        let model = "muse-spark-1.3"
+        let nativeHistory: [[String: Any]] = [
+            ["role": "user", "content": "Read a and report its content."],
+            ["role": "assistant", "content": [["type": "redacted_thinking", "data": "opaque"], ["type": "tool_use", "id": "call_1", "name": "read", "input": ["path": "a"]]]],
+            ["role": "user", "content": [["type": "tool_result", "tool_use_id": "call_1", "content": "hello"]]]
+        ]
+        let chatHistory: [[String: Any]] = [
+            ["role": "user", "content": "Read a and report its content."],
+            ["role": "assistant", "content": NSNull(), "tool_calls": [["id": "call_1", "type": "function", "function": ["name": "read", "arguments": "{\"path\":\"a\"}"]]]],
+            ["role": "tool", "tool_call_id": "call_1", "content": "hello"]
+        ]
+        let messages = nativeMessages ? nativeHistory : chatHistory
+        let nativeResponse = #"{"id":"msg_meta","type":"message","role":"assistant","model":"muse-spark-1.3","content":[{"type":"redacted_thinking","data":"opaque"},{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#
+        let chatResponse = #"{"id":"chatcmpl-meta","model":"muse-spark-1.3","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#
+        let nativeSSE = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_meta\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"muse-spark-1.3\",\"content\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        let chatSSE = "data: {\"id\":\"chatcmpl-meta\",\"model\":\"muse-spark-1.3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-meta\",\"model\":\"muse-spark-1.3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n"
+        let responseBody = streaming ? (nativeMessages ? nativeSSE : chatSSE) : (nativeMessages ? nativeResponse : chatResponse)
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(statusCode: 200, body: responseBody, requireJSONRequest: true, contentType: streaming ? "text/event-stream" : "application/json")
+        let server = NIOProxyServer()
+        let port = try await server.start(config: ProxyConfiguration(port: 0, upstreamProvider: .meta,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)/v1", upstreamAPIKey: "meta-test-key", masterKey: "test", requiresAuth: false, preferredAnthropicUpstreamModel: model))
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var payload: [String: Any] = ["model": model, "max_tokens": 4096, "messages": messages, "stream": streaming]
+        if nativeMessages {
+            payload["thinking"] = ["type": "adaptive"]
+            payload["output_config"] = ["effort": "high"]
+            payload["top_k"] = 10
+        } else {
+            payload["reasoning_effort"] = "high"
+            payload["stop"] = ["unsupported"]
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(String(decoding: data, as: UTF8.self) == responseBody)
+        let captured = try #require(stub.requests().first)
+        #expect(captured.uri == path)
+        #expect(captured.headerValue("Authorization") == "Bearer meta-test-key")
+        #expect(captured.headerValue("Accept") == (streaming ? "text/event-stream" : "application/json"))
+        let sent = try #require(JSONSerialization.jsonObject(with: Data(captured.body.utf8)) as? [String: Any])
+        #expect(NSDictionary(dictionary: ["messages": sent["messages"]!]).isEqual(to: ["messages": messages]))
+        #expect(sent["top_k"] == nil)
+        #expect(sent["stop"] == nil)
+        if nativeMessages {
+            #expect((sent["thinking"] as? [String: String])?["type"] == "adaptive")
+            #expect((sent["output_config"] as? [String: String])?["effort"] == "high")
+        } else {
+            #expect(sent["reasoning_effort"] as? String == "high")
+        }
+        try await server.stop()
+        try await stub.stop()
+    }
+
 }
