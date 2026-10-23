@@ -908,6 +908,7 @@ struct NIOProxyServerTests {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("repogps", forHTTPHeaderField: "X-ProxyPilot-Client")
         request.setValue("00000000-0000-0000-0000-000000000123", forHTTPHeaderField: "X-ProxyPilot-Session-ID")
+        request.setValue("navigator", forHTTPHeaderField: "X-ProxyPilot-Role")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": "requested-model",
             "messages": [["role": "user", "content": "hi"]]
@@ -920,6 +921,7 @@ struct NIOProxyServerTests {
         #expect(events.count == 1)
         #expect(events[0].source == "repogps")
         #expect(events[0].sessionID == "00000000-0000-0000-0000-000000000123")
+        #expect(events[0].role == "navigator")
         #expect(events[0].record.model == "glm-5")
         #expect(events[0].record.promptTokens == 12)
         #expect(events[0].record.completionTokens == 7)

@@ -74,7 +74,7 @@ enum UpstreamClient {
         }
         #else
         return AsyncThrowingStream { continuation in
-            Task {
+            let producer = Task {
                 do {
                     let request = try buildRequest(
                         path: path,
@@ -105,14 +105,18 @@ enum UpstreamClient {
 
                     // Yield lines as they arrive (SSE is newline-delimited)
                     for try await line in bytes.lines {
+                        try Task.checkCancellation()
                         let lineData = Data((line + "\n").utf8)
-                        continuation.yield(lineData)
+                        if case .terminated = continuation.yield(lineData) { break }
                     }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
+            // AsyncThrowingStream consumer cancellation does not automatically
+            // cancel the unstructured producer or its URLSession request.
+            continuation.onTermination = { _ in producer.cancel() }
         }
         #endif
     }

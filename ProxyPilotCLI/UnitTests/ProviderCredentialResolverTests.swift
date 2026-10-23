@@ -3,6 +3,18 @@ import Testing
 @testable import proxypilot
 
 struct ProviderCredentialResolverTests {
+    @Test func dnsLoopbackLookalikeCannotBypassOfficialEndpointPolicy() {
+        let secrets = MemorySecretsProvider(values: [SecretKey.openAIAPIKey: "fixture-only"])
+        let resolution = ProviderCredentialResolver.resolve(
+            rawProvider: "openai", explicitKey: nil,
+            upstreamURL: "https://127.attacker.example/v1", secrets: secrets, environment: [:]
+        )
+        guard case .invalidUpstreamURL = resolution else {
+            Issue.record("A DNS lookalike must not be accepted as localhost")
+            return
+        }
+    }
+
     @Test func bareProviderWithOnlyZAIKeyResolvesToZAI() throws {
         let secrets = MemorySecretsProvider(values: [SecretKey.zaiAPIKey: "zai-key"])
 

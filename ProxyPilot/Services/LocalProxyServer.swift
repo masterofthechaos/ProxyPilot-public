@@ -274,6 +274,68 @@ final class LocalProxyServer: @unchecked Sendable {
     private let connectionCountLock = NSLock()
     private var activeConnectionCount: Int = 0
     private var releasedConnectionIDs: Set<String> = []
+    // Protected by connectionCountLock; detached request tasks outlive callbacks.
+    private var requestTasks: [ObjectIdentifier: (connection: NWConnection, task: Task<Void, Never>)] = [:]
+
+    private func startRequestTask(on connection: NWConnection, trackingID: UUID, operation: @escaping @Sendable () async -> Void) {
+        let key = ObjectIdentifier(connection)
+        connectionCountLock.lock()
+        let task = Task.detached { [self] in
+            defer { removeRequestTask(on: connection) }
+            guard !Task.isCancelled else { return }
+            await operation()
+            if Task.isCancelled {
+                await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
+            }
+        }
+        requestTasks[key] = (connection, task)
+        connectionCountLock.unlock()
+        monitorRequestDisconnect(on: connection)
+    }
+
+    private func removeRequestTask(on connection: NWConnection) {
+        connectionCountLock.lock()
+        requestTasks.removeValue(forKey: ObjectIdentifier(connection))
+        connectionCountLock.unlock()
+    }
+
+    private func cancelRequest(on connection: NWConnection) {
+        connectionCountLock.lock()
+        let request = requestTasks.removeValue(forKey: ObjectIdentifier(connection))
+        connectionCountLock.unlock()
+        request?.task.cancel()
+        connection.cancel()
+    }
+
+    private func monitorRequestDisconnect(on connection: NWConnection) {
+        // This GUI server serves one request per connection. After the complete
+        // body is consumed, a read observes EOF even while URLSession is waiting.
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] data, _, complete, error in
+            if complete || error != nil || !(data?.isEmpty ?? true) {
+                self?.cancelRequest(on: connection)
+            } else {
+                self?.monitorRequestDisconnect(on: connection)
+            }
+        }
+    }
+
+    private func finishConnection(_ connection: NWConnection) {
+        // Locally closing a delivered response must not cancel its remaining
+        // accounting/logging work when the EOF monitor wakes up.
+        removeRequestTask(on: connection)
+        connection.cancel()
+    }
+
+    private func cancelAllRequests() {
+        connectionCountLock.lock()
+        let requests = Array(requestTasks.values)
+        requestTasks.removeAll()
+        connectionCountLock.unlock()
+        for request in requests {
+            request.task.cancel()
+            request.connection.cancel()
+        }
+    }
 
     private typealias AnthropicStreamingState = AnthropicTranslator.StreamingState
 
@@ -327,9 +389,10 @@ final class LocalProxyServer: @unchecked Sendable {
                 }
 
                 let connectionID = UUID().uuidString
-                connection.stateUpdateHandler = { [weak self] state in
+                connection.stateUpdateHandler = { [weak self, weak connection] state in
                     switch state {
                     case .cancelled, .failed:
+                        if let connection { self?.cancelRequest(on: connection) }
                         self?.releaseConnectionSlotIfNeeded(connectionID: connectionID)
                     default:
                         break
@@ -382,10 +445,9 @@ final class LocalProxyServer: @unchecked Sendable {
         guard let listener else { throw ServerError.notRunning }
         listener.cancel()
         self.listener = nil
-        // listener.cancel() only stops accepting new connections; any
-        // NWConnections already accepted keep running and may still fire
-        // their own release later (harmless — releaseConnectionSlotIfNeeded's
-        // max(0, ...) clamps it, and start() resets again). Reset the slot
+        cancelAllRequests()
+        // Accepted request tasks/connections are canceled above. Their state
+        // callbacks may still release slots later. Reset the slot
         // accounting at both lifecycle boundaries so releasedConnectionIDs
         // cannot accumulate unboundedly across restarts on this
         // app-lifetime-retained instance.
@@ -600,7 +662,7 @@ final class LocalProxyServer: @unchecked Sendable {
             let modelName = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["model"] as? String
 
             if path == "/v1/messages" {
-                Task.detached { [weak self] in
+                startRequestTask(on: connection, trackingID: trackingID) { [weak self] in
                     guard let self else { return }
                     await RequestAttributionContext.$current.withValue(attribution) {
                         await self.beginTrackedRequest(
@@ -616,7 +678,7 @@ final class LocalProxyServer: @unchecked Sendable {
             }
 
             let isStreaming = isStreamingRequest(body: body)
-            Task.detached { [weak self] in
+            startRequestTask(on: connection, trackingID: trackingID) { [weak self] in
                 guard let self else { return }
                 await RequestAttributionContext.$current.withValue(attribution) {
                     await self.beginTrackedRequest(
@@ -738,6 +800,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
+            try Task.checkCancellation()
             let upstreamStatus = (response as? HTTPURLResponse)?.statusCode ?? 502
             let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
                 statusCode: upstreamStatus,
@@ -784,6 +847,10 @@ final class LocalProxyServer: @unchecked Sendable {
                 await failTrackedRequest(id: trackingID, statusCode: normalized.statusCode)
             }
         } catch {
+            if Task.isCancelled {
+                await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
+                return
+            }
             respond(
                 connection: connection,
                 status: 502,
@@ -851,6 +918,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            try Task.checkCancellation()
             let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 502
 
             if httpStatus != 200 {
@@ -883,6 +951,7 @@ final class LocalProxyServer: @unchecked Sendable {
             var streamingNormalizationContext = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
 
             for try await line in bytes.lines {
+                try Task.checkCancellation()
                 let normalizedLine = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
                     line,
                     provider: config.upstreamProvider,
@@ -929,7 +998,7 @@ final class LocalProxyServer: @unchecked Sendable {
                         startedAt: requestStartTime,
                         config: config
                     )
-                    connection.cancel()
+                    finishConnection(connection)
                     return
                 }
             }
@@ -959,8 +1028,12 @@ final class LocalProxyServer: @unchecked Sendable {
                 startedAt: requestStartTime,
                 config: config
             )
-            connection.cancel()
+            finishConnection(connection)
         } catch {
+            if Task.isCancelled {
+                await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
+                return
+            }
             respond(
                 connection: connection,
                 status: 502,
@@ -1189,6 +1262,7 @@ final class LocalProxyServer: @unchecked Sendable {
         let requestStartTime = Date()
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
+            try Task.checkCancellation()
             let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 502
 
             if httpStatus != 200 {
@@ -1269,6 +1343,10 @@ final class LocalProxyServer: @unchecked Sendable {
                 await failTrackedRequest(id: trackingID, statusCode: 500, errorClass: "response_encoding_failed")
             }
         } catch {
+            if Task.isCancelled {
+                await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
+                return
+            }
             respond(
                 connection: connection,
                 status: 502,
@@ -1294,6 +1372,7 @@ final class LocalProxyServer: @unchecked Sendable {
         let requestStartTime = Date()
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            try Task.checkCancellation()
             let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 502
 
             if httpStatus != 200 {
@@ -1329,6 +1408,7 @@ final class LocalProxyServer: @unchecked Sendable {
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             for try await line in bytes.lines {
+                try Task.checkCancellation()
                 guard line.hasPrefix("data: ") else { continue }
                 let payload = String(line.dropFirst(6))
 
@@ -1362,7 +1442,7 @@ final class LocalProxyServer: @unchecked Sendable {
                         config: config
                     )
                     recordXcodeAgentRequest(model: reportModel, status: 200)
-                    connection.cancel()
+                    finishConnection(connection)
                     return
                 }
 
@@ -1439,8 +1519,12 @@ final class LocalProxyServer: @unchecked Sendable {
                 config: config
             )
             recordXcodeAgentRequest(model: reportModel, status: 200)
-            connection.cancel()
+            finishConnection(connection)
         } catch {
+            if Task.isCancelled {
+                await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
+                return
+            }
             respond(
                 connection: connection,
                 status: 502,
@@ -1467,6 +1551,7 @@ final class LocalProxyServer: @unchecked Sendable {
         let requestStartTime = Date()
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            try Task.checkCancellation()
             let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 502
 
             if httpStatus != 200 {
@@ -1498,6 +1583,7 @@ final class LocalProxyServer: @unchecked Sendable {
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             for try await line in bytes.lines {
+                try Task.checkCancellation()
                 guard line.hasPrefix("data: ") else { continue }
                 let payload = String(line.dropFirst(6))
 
@@ -1556,8 +1642,12 @@ final class LocalProxyServer: @unchecked Sendable {
                 config: config
             )
             recordXcodeAgentRequest(model: reportModel, status: 200)
-            connection.cancel()
+            finishConnection(connection)
         } catch {
+            if Task.isCancelled {
+                await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
+                return
+            }
             respond(
                 connection: connection,
                 status: 502,
@@ -1585,6 +1675,7 @@ final class LocalProxyServer: @unchecked Sendable {
         let requestStartTime = Date()
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
+            try Task.checkCancellation()
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 502
 
             let validated = AnthropicTranslator.validateAnthropicPassthroughResponse(
@@ -1628,6 +1719,10 @@ final class LocalProxyServer: @unchecked Sendable {
 
             appendLog("passthrough buffered response: status=\(validated.statusCode) model=\(redact(responseModel))")
         } catch {
+            if Task.isCancelled {
+                await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
+                return
+            }
             appendLog("passthrough error: \(error.localizedDescription)")
             respond(
                 connection: connection,
@@ -1660,6 +1755,7 @@ final class LocalProxyServer: @unchecked Sendable {
         var lastSeenPromptCacheWriteTokens: Int?
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            try Task.checkCancellation()
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 502
 
             if statusCode >= 400 {
@@ -1685,6 +1781,7 @@ final class LocalProxyServer: @unchecked Sendable {
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             for try await line in bytes.lines {
+                try Task.checkCancellation()
                 let validatedLine = AnthropicTranslator.validateAnthropicPassthroughStreamingLine(
                     line,
                     provider: provider
@@ -1705,7 +1802,8 @@ final class LocalProxyServer: @unchecked Sendable {
 
             // Send final newline and close.
             await sendData(Data("\n".utf8), on: connection)
-            connection.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
+            // Keep the connection owned until successful accounting completes.
+            // Sending EOF here lets a normal client close cancel that accounting.
             let record = SessionReportCard.RequestRecord(
                 timestamp: requestStartTime,
                 model: lastSeenModel,
@@ -1732,7 +1830,12 @@ final class LocalProxyServer: @unchecked Sendable {
                 config: config
             )
             recordXcodeAgentRequest(model: lastSeenModel, status: 200)
+            finishConnection(connection)
         } catch {
+            if Task.isCancelled {
+                await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
+                return
+            }
             appendLog("passthrough streaming error: \(error.localizedDescription)")
             respond(
                 connection: connection,
@@ -1749,7 +1852,8 @@ final class LocalProxyServer: @unchecked Sendable {
 
     private func sendData(_ data: Data, on connection: NWConnection) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            connection.send(content: data, completion: .contentProcessed { _ in
+            connection.send(content: data, completion: .contentProcessed { [weak self] error in
+                if error != nil { self?.cancelRequest(on: connection) }
                 continuation.resume()
             })
         }
@@ -1775,7 +1879,9 @@ final class LocalProxyServer: @unchecked Sendable {
     }
 
     private func failTrackedRequest(id: UUID, statusCode: Int? = nil, errorClass: String? = nil, error: Error? = nil) async {
-        let failure = Self.failureTelemetry(statusCode: statusCode, errorClass: errorClass, error: error)
+        let failure = Task.isCancelled
+            ? Self.failureTelemetry(error: URLError(.cancelled))
+            : Self.failureTelemetry(statusCode: statusCode, errorClass: errorClass, error: error)
         let clientSurface = RequestAttributionContext.current?.client ?? "gui"
         await MainActor.run { [weak self] in
             guard let self else { return }
@@ -1830,7 +1936,7 @@ final class LocalProxyServer: @unchecked Sendable {
         startedAt: Date,
         config: Config
     ) async {
-        guard let logger = config.inputOutputLogger else { return }
+        guard !Task.isCancelled, let logger = config.inputOutputLogger else { return }
 
         try? await logger.record(
             path: path,
@@ -1850,12 +1956,13 @@ final class LocalProxyServer: @unchecked Sendable {
         config: Config,
         trackingID: UUID
     ) async {
+        guard !Task.isCancelled else { return }
         var record = recordWithAllowedCacheTelemetry(record, promptCaching: config.promptCaching)
         record.providerIdentifier = config.analyticsProviderIdentifier
         let attribution = RequestAttributionContext.current
         let currentSessionID = attribution?.sessionID ?? config.sessionID
         let shouldRecord = await MainActor.run { [weak self] in
-            guard let self else { return false }
+            guard let self, !Task.isCancelled else { return false }
             guard self.state.completeRequest(id: trackingID) else { return false }
             self.reportCard.record(record)
             return true
@@ -1884,6 +1991,7 @@ final class LocalProxyServer: @unchecked Sendable {
             SessionReportEvent(
                 source: attribution?.client ?? "gui",
                 sessionID: currentSessionID,
+                role: attribution?.role,
                 record: coreRecord
             ),
             to: sessionReportURL ?? SessionReportStore.defaultURL
@@ -1942,6 +2050,7 @@ final class LocalProxyServer: @unchecked Sendable {
     }
 
     private func recordXcodeAgentRequest(model: String, status: Int) {
+        guard !Task.isCancelled else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.state.lastXcodeAgentRequestModel = model
@@ -1994,8 +2103,8 @@ final class LocalProxyServer: @unchecked Sendable {
             "\r\n"
         var out = Data(response.utf8)
         out.append(bodyData)
-        connection.send(content: out, completion: .contentProcessed { _ in
-            connection.cancel()
+        connection.send(content: out, completion: .contentProcessed { [weak self] _ in
+            self?.finishConnection(connection)
         })
     }
 

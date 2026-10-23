@@ -1387,7 +1387,7 @@ final class AppViewModel: ObservableObject {
 
     var promptCachingHomeStatusTitle: String {
         if sessionReportCard.totalPromptCacheHitTokens > 0 {
-            return "Cache working"
+            return "Cache hits observed"
         }
         if sessionReportCard.cacheAccountingAvailable {
             return "Cache reported"

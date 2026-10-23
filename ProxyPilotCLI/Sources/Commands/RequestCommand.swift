@@ -1,5 +1,8 @@
 import ArgumentParser
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import ProxyPilotCore
 
 /// Runs one bounded, attributed request without changing the shared lead route.
@@ -90,6 +93,9 @@ struct RequestCommand: AsyncParsableCommand {
 
         var payload = object
         payload.removeValue(forKey: "schema_version")
+        // The explicit command cap owns the limit. OpenAI's model rewrite must
+        // not prefer a competing limit inherited from untrusted stdin.
+        payload.removeValue(forKey: "max_completion_tokens")
         payload["model"] = model
         payload["max_tokens"] = maxOutputTokens
         payload["stream"] = false

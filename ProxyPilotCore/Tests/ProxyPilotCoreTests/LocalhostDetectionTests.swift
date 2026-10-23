@@ -11,4 +11,15 @@ struct LocalhostDetectionTests {
     @Test func remoteURLIsNotLocal() { #expect(isLocalhostURL("https://api.openai.com/v1") == false) }
     @Test func emptyStringIsNotLocal() { #expect(isLocalhostURL("") == false) }
     @Test func localhostSubdomainIsNotLocal() { #expect(isLocalhostURL("http://localhost.evil.com:4000") == false) }
+    @Test(arguments: ["127.attacker.example", "127.999.999.999", "127.0.0", "127.0.0.1.example", "127..0.1", "127.00.0.1", "127.0.0.-1", "[::1]]]", "127.0.0.256"])
+    func rejectsLoopbackLookalikes(host: String) {
+        #expect(!isLocalhostHost(host))
+    }
+    @Test(arguments: ["127.0.0.1", "127.255.255.255", "127.42.0.9", "LOCALHOST", "[::1]", "0:0:0:0:0:0:0:1"])
+    func acceptsStrictLoopbackLiterals(host: String) {
+        #expect(isLocalhostHost(host))
+    }
+    @Test func dnsPrefixURLIsNotLocal() {
+        #expect(!isLocalhostURL("http://127.attacker.example/v1"))
+    }
 }

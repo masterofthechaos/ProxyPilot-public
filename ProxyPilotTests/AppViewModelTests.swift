@@ -2940,6 +2940,18 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.sessionRequestsCSV(), "")
     }
 
+    func testTinyCacheHitReportsObservationWithoutEffectivenessClaim() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.sessionReportCard.record(.init(
+            timestamp: Date(timeIntervalSince1970: 0), model: "fixture",
+            promptTokens: 1_000_000, completionTokens: 1,
+            promptCacheHitTokens: 1, promptCacheMissTokens: 999_999,
+            durationSeconds: 0, path: "/v1/chat/completions", wasStreaming: false
+        ))
+        XCTAssertEqual(vm.promptCachingHomeStatusTitle, "Cache hits observed")
+        XCTAssertEqual(vm.sessionReportCard.cacheHitRate, 0.000001)
+    }
+
     func testSessionCacheTelemetryRemainsVisibleWhenCachingIsOff() {
         let vm = AppViewModel(defaults: defaults)
         vm.promptCachingMode = .off

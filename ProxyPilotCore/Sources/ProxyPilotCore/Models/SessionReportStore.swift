@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 public struct SessionReportEvent: Sendable, Codable, Equatable {
     public let id: UUID
@@ -59,34 +64,51 @@ public enum SessionReportStore {
         data.append(0x0A)
         guard data.count <= maximumEventBytes else { return }
 
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(
-                atPath: url.path,
-                contents: nil,
-                attributes: [.posixPermissions: 0o600]
-            )
-        } else if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize),
-                  size + data.count > maximumFileBytes {
-            let archive = freshArchiveURL(for: url)
-            try FileManager.default.moveItem(at: url, to: archive)
-            FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        try withJournalLock(at: url) {
+            if let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber,
+               size.intValue + data.count > maximumFileBytes {
+                try FileManager.default.moveItem(at: url, to: freshArchiveURL(for: url))
+            }
+            let descriptor = open(url.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o600)
+            guard descriptor >= 0 else { throw journalError() }
+            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+            defer { try? handle.close() }
+            guard fchmod(descriptor, 0o600) == 0 else { throw journalError() }
+            try handle.write(contentsOf: data)
         }
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
 
-        let handle = try FileHandle(forWritingTo: url)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: data)
+    /// The sidecar inode survives rotation and reset. Every process opens its
+    /// own descriptor, so flock serializes both independent processes and
+    /// independent writers in one process. Never unlink the lock after use.
+    private static func withJournalLock<T>(at url: URL, _ body: () throws -> T) throws -> T {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let descriptor = open(url.appendingPathExtension("lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw journalError() }
+        defer { close(descriptor) }
+        guard fchmod(descriptor, 0o600) == 0 else { throw journalError() }
+        while flock(descriptor, LOCK_EX) != 0 {
+            if errno != EINTR { throw journalError() }
+        }
+        defer { flock(descriptor, LOCK_UN) }
+        return try body()
+    }
+
+    private static func journalError() -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 
     public static func readEvents(from url: URL = defaultURL) throws -> [SessionReportEvent] {
-        let urls = archiveURLs(for: url) + [url].filter { FileManager.default.fileExists(atPath: $0.path) }
-        var events: [SessionReportEvent] = []
-        var seen = Set<UUID>()
-        for source in urls {
-            for event in try readOne(source) where seen.insert(event.id).inserted { events.append(event) }
+        guard FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path) else { return [] }
+        return try withJournalLock(at: url) {
+            let urls = archiveURLs(for: url) + [url].filter { FileManager.default.fileExists(atPath: $0.path) }
+            var events: [SessionReportEvent] = []
+            var seen = Set<UUID>()
+            for source in urls {
+                for event in try readOne(source) where seen.insert(event.id).inserted { events.append(event) }
+            }
+            return events
         }
-        return events
     }
 
     private static func readOne(_ url: URL) throws -> [SessionReportEvent] {
@@ -137,8 +159,11 @@ public enum SessionReportStore {
     }
 
     public static func reset(at url: URL = defaultURL) throws {
-        for target in archiveURLs(for: url) + [url] where FileManager.default.fileExists(atPath: target.path) {
-            try FileManager.default.removeItem(at: target)
+        guard FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path) else { return }
+        try withJournalLock(at: url) {
+            for target in archiveURLs(for: url) + [url] where FileManager.default.fileExists(atPath: target.path) {
+                try FileManager.default.removeItem(at: target)
+            }
         }
     }
 }

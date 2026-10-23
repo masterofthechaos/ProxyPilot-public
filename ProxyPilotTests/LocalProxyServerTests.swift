@@ -31,13 +31,18 @@ private final class LocalHTTPStubServer: @unchecked Sendable {
     private let body: String
     private let contentType: String
     private let statusCode: Int
+    private let onHeldRequest: (@Sendable () -> Void)?
+    private let onHeldDisconnect: (@Sendable () -> Void)?
     private let queue = DispatchQueue(label: "proxypilot.local-http-stub")
     private var listener: NWListener?
     private let requestLock = NSLock()
     private var capturedRequests: [RequestRecord] = []
 
-    init(statusCode: Int = 200, body: String, contentType: String = "application/json") {
+    init(statusCode: Int = 200, body: String, contentType: String = "application/json",
+         onHeldRequest: (@Sendable () -> Void)? = nil, onHeldDisconnect: (@Sendable () -> Void)? = nil) {
         self.statusCode = statusCode
+        self.onHeldRequest = onHeldRequest
+        self.onHeldDisconnect = onHeldDisconnect
         self.body = body
         self.contentType = contentType
     }
@@ -90,6 +95,19 @@ private final class LocalHTTPStubServer: @unchecked Sendable {
     }
 
     private func respond(on connection: NWConnection) {
+        if let onHeldRequest {
+            if !body.isEmpty {
+                let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+                    + String(body.utf8.count, radix: 16) + "\r\n" + body + "\r\n"
+                connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in })
+            }
+            onHeldRequest()
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] _, _, _, _ in
+                self?.onHeldDisconnect?()
+                connection.cancel()
+            }
+            return
+        }
         let reason = statusCode == 200 ? "OK" : "Error"
         let response = """
         HTTP/1.1 \(statusCode) \(reason)\r
@@ -170,6 +188,140 @@ final class LocalProxyServerTests: XCTestCase {
             .appendingPathComponent("proxypilot-listener-tests-\(UUID().uuidString)", isDirectory: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
         return LocalProxyServer(sessionReportURL: directory.appendingPathComponent("session-report.jsonl"))
+    }
+
+    @MainActor
+    func testBothRoutesPreserveLeadAndNavigatorInDurableJournal() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let report = root.appendingPathComponent("report.jsonl")
+        let upstream = LocalHTTPStubServer(body: #"{"id":"fixture","model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2}}"#)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+        let server = LocalProxyServer(sessionReportURL: report)
+        let port = try unusedLoopbackPort()
+        try server.start(config: .init(
+            host: "127.0.0.1", port: port, masterKey: "", upstreamProvider: .ollama,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: nil, allowedModels: ["test-model"], requiresAuth: false,
+            anthropicTranslatorMode: .hardened, miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "test-model", googleThoughtSignatureStore: nil
+        ))
+        defer { try? server.stop() }
+        for path in ["/v1/chat/completions", "/v1/messages"] {
+            for role in ["lead", "navigator"] {
+                let session = UUID().uuidString.lowercased()
+                var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue("repogps", forHTTPHeaderField: "X-ProxyPilot-Client")
+                request.setValue(session, forHTTPHeaderField: "X-ProxyPilot-Session-ID")
+                request.setValue(role, forHTTPHeaderField: "X-ProxyPilot-Role")
+                request.httpBody = jsonBody(["model": "test-model", "max_tokens": 128, "messages": [["role": "user", "content": "fixture"]]])
+                let (_, response) = try await URLSession.shared.data(for: request)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+                // A successful HTTP response precedes asynchronous durable recording.
+                // Wait for this session's event, not a previous request's last row.
+                var recorded: SessionReportEvent?
+                for _ in 0..<200 {
+                    recorded = try SessionReportStore.readEvents(from: report).first { $0.sessionID == session }
+                    if recorded != nil { break }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                let event = try XCTUnwrap(recorded)
+                XCTAssertEqual(event.source, "repogps")
+                XCTAssertEqual(event.sessionID, session)
+                XCTAssertEqual(event.role, role)
+            }
+        }
+    }
+
+    @MainActor
+    func testAbandonedGUIRequestCancelsUpstreamInsteadOfTimingOut() async throws {
+        for (provider, path, mode) in cancellationRoutes {
+            for streaming in [false, true] {
+                try await assertGUIRequestCancellation(provider: provider, path: path, mode: mode, streaming: streaming)
+            }
+        }
+    }
+
+    @MainActor
+    func testGUIStreamingDisconnectAfterFirstChunkCancelsUpstream() async throws {
+        for (provider, path, mode) in cancellationRoutes {
+            try await assertGUIRequestCancellation(provider: provider, path: path, mode: mode, streaming: true, afterFirstChunk: true)
+        }
+    }
+
+    @MainActor
+    func testGUIStopCancelsPendingBufferedAndStreamingUpstream() async throws {
+        for streaming in [false, true] {
+            try await assertGUIRequestCancellation(provider: .ollama, path: "/v1/messages", mode: .hardened, streaming: streaming, stopServer: true)
+        }
+    }
+
+    private var cancellationRoutes: [(UpstreamProvider, String, ProxyPilot.AnthropicTranslatorMode)] {
+        [(.ollama, "/v1/chat/completions", .hardened), (.ollama, "/v1/messages", .hardened),
+         (.ollama, "/v1/messages", .legacyFallback), (.deepSeek, "/v1/messages", .hardened)]
+    }
+
+    @MainActor
+    private func assertGUIRequestCancellation(provider: UpstreamProvider, path: String, mode: ProxyPilot.AnthropicTranslatorMode,
+                                              streaming: Bool, afterFirstChunk: Bool = false, stopServer: Bool = false) async throws {
+        let opened = expectation(description: "upstream received request")
+        let closed = expectation(description: "upstream canceled promptly")
+        let failed = stopServer ? nil : expectation(description: "cancellation telemetry")
+        let firstChunk = afterFirstChunk ? expectation(description: "downstream received SSE") : nil
+        let nativeSSE = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"fixture\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"
+        let chatSSE = "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fixture\"}}]}\n\n"
+        let upstream = LocalHTTPStubServer(body: afterFirstChunk ? (provider == .deepSeek ? nativeSSE : chatSSE) : "",
+            onHeldRequest: { opened.fulfill() }, onHeldDisconnect: { closed.fulfill() })
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+        let port = try unusedLoopbackPort()
+        let server = makeIsolatedProxyServer()
+        var failures: [[String: String]] = []
+        server.telemetryTracker = { name, payload in
+            if name == "proxy_request_failed" { failures.append(payload); failed?.fulfill() }
+        }
+        let config = LocalProxyServer.Config(host: "127.0.0.1", port: port, masterKey: "",
+            upstreamProvider: provider, analyticsProviderIdentifier: "custom",
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!, upstreamAPIKey: nil,
+            allowedModels: ["fixture"], requiresAuth: false, anthropicTranslatorMode: mode,
+            miniMaxRoutingMode: .standard, preferredAnthropicUpstreamModel: "fixture", googleThoughtSignatureStore: nil)
+        try server.start(config: config)
+        defer { try? server.stop() }
+        for _ in 0..<30 {
+            if server.state.isRunning { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonBody(["model": "fixture", "stream": streaming, "max_tokens": 128,
+                                    "messages": [["role": "user", "content": "fixture only"]]])
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = Task {
+            do {
+                let (bytes, _) = try await session.bytes(for: request)
+                var received = false
+                for try await line in bytes.lines {
+                    if !received, line.hasPrefix("data:") { received = true; firstChunk?.fulfill() }
+                }
+            } catch { /* The client is deliberately canceled below. */ }
+        }
+        defer { task.cancel() }
+        await fulfillment(of: [opened], timeout: 4)
+        if let firstChunk { await fulfillment(of: [firstChunk], timeout: 4) }
+        if stopServer { try server.stop() } else { task.cancel() }
+        await fulfillment(of: [closed] + (failed.map { [$0] } ?? []), timeout: 4)
+        if !stopServer {
+            XCTAssertEqual(failures.count, 1)
+            XCTAssertEqual(failures.first?["error_class"], "cancelled")
+            XCTAssertEqual(failures.first?["retryable"], "false")
+        }
+        XCTAssertEqual(server.state.pendingRequestCount, 0)
+        XCTAssertEqual(server.state.failedRequestCount, 1)
     }
 
     @MainActor
@@ -1095,8 +1247,8 @@ final class LocalProxyServerTests: XCTestCase {
     // loopback binding by setting `params.requiredLocalEndpoint = .hostPort(...)`.
     // That approach raised EINVAL at `NWListener(using:on:)` construction whenever
     // the endpoint port matched the configured port — the listener never started.
-    // Commit d66ec03 removed the broken line as collateral while restoring the
-    // local-password feature; the proxy started again but no OS-level loopback
+    // Commit bc6b7d2 removed the broken line during v1.10.1 audit remediation
+    // (d66ec03 still retained it); no OS-level loopback
     // constraint remained — only the in-process `isLoopbackClientEndpoint` guard
     // still rejected non-loopback client endpoints at the app layer.
     //

@@ -59,7 +59,6 @@ with tempfile.TemporaryDirectory(prefix="proxypilot-request-") as directory:
         timeout=20,
         check=True,
     )
-    server.shutdown()
     output = json.loads(result.stdout)
     data = output["data"]
     assert data["requested_model"] == "fixture-requested", data
@@ -72,4 +71,26 @@ with tempfile.TemporaryDirectory(prefix="proxypilot-request-") as directory:
     events = [json.loads(line) for line in (root / "session.jsonl").read_text().splitlines()]
     assert events[-1]["role"] == "navigator", events[-1]
     assert events[-1]["record"]["model"] == "fixture-returned", events[-1]
-    print("ProxyPilot independent request contract passed")
+    # Do not consult the owner's stored cloud key: the empty environment value
+    # short-circuits credential lookup and keeps this loopback fixture key-free.
+    env["OPENAI_API_KEY"] = ""
+    for model in ["gpt-5", "o1", "o3", "o4-mini"]:
+        capped = command.copy()
+        capped[capped.index("--provider") + 1] = "openai"
+        capped[capped.index("--model") + 1] = model
+        capped[capped.index("--max-output-tokens") + 1] = "128"
+        result = subprocess.run(capped, input=json.dumps({
+            "schema_version": 1, "max_tokens": 9999, "max_completion_tokens": 16384,
+            "messages": [{"role": "user", "content": "fixture only"}],
+        }), text=True, capture_output=True, env=env, timeout=20, check=True)
+        assert Provider.received["max_completion_tokens"] == 128, Provider.received
+        assert "max_tokens" not in Provider.received, Provider.received
+
+    rejected = command.copy()
+    rejected[rejected.index("--url") + 1] = "http://127.attacker.example/v1"
+    result = subprocess.run(rejected, input="", text=True, capture_output=True,
+                            env=env, timeout=20)
+    assert result.returncode != 0, result.stdout
+    assert json.loads(result.stdout)["error"]["code"] == "E036", result.stdout
+    server.shutdown()
+    print("ProxyPilot independent request contract passed: attribution, conflicting caps, DNS lookalike rejection")

@@ -30,8 +30,8 @@ public final class NIOProxyServer: Sendable {
             .serverChannelOption(.backlog, value: 256)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(HTTPHandler(config: config))
+                channel.pipeline.configureHTTPServerPipeline(withPipeliningAssistance: false).flatMap {
+                    channel.pipeline.addHandlers(HTTPConnectionLifecycleHandler(), HTTPHandler(config: config))
                 }
             }
             .childChannelOption(.socketOption(.so_reuseaddr), value: 1)

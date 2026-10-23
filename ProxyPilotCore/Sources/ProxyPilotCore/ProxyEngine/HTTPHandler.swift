@@ -24,6 +24,34 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.config = config
     }
 
+    // Accessed only on this channel's EventLoop. Keep all in-flight requests,
+    // until completion or channel teardown.
+    private var requestTasks: [UUID: Task<Void, Never>] = [:]
+
+    private func startRequestTask(on eventLoop: EventLoop, operation: @escaping @Sendable () async -> Void) {
+        let id = UUID()
+        let task = Task {
+            defer { eventLoop.execute { self.requestTasks.removeValue(forKey: id) } }
+            guard !Task.isCancelled else { return }
+            await operation()
+        }
+        requestTasks[id] = task
+    }
+
+    private func cancelRequestTasks() {
+        for task in requestTasks.values { task.cancel() }
+        requestTasks.removeAll()
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        cancelRequestTasks()
+        context.fireChannelInactive()
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        cancelRequestTasks()
+    }
+
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
 
@@ -392,7 +420,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         body: Data,
         config: ProxyConfiguration
     ) {
-        Task {
+        startRequestTask(on: eventLoop) { [self] in
             let requestStart = Date()
             let requestModel = HTTPRequestParser.extractModel(from: body)
             do {
@@ -403,6 +431,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     body: body,
                     config: config
                 )
+                try Task.checkCancellation()
 
                 let validated = AnthropicTranslator.validateAnthropicPassthroughResponse(
                     statusCode: statusCode,
@@ -445,6 +474,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     ctxBox.value.flush()
                 }
             } catch {
+                guard !Task.isCancelled else { return }
                 let message: String
                 if case let UpstreamClient.UpstreamError.httpError(statusCode, bodyData) = error {
                     message = self.upstreamErrorMessage(
@@ -471,7 +501,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         body: Data,
         config: ProxyConfiguration
     ) {
-        Task {
+        startRequestTask(on: eventLoop) { [self] in
             var streamStarted = false
             let requestStart = Date()
             var lastSeenModel = HTTPRequestParser.extractModel(from: body) ?? config.preferredAnthropicUpstreamModel
@@ -537,6 +567,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                 }
 
+                try Task.checkCancellation()
                 let didStart = streamStarted
                 if didStart {
                     await recordSessionRequest(
@@ -575,6 +606,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     ctxBox.value.flush()
                 }
             } catch {
+                guard !Task.isCancelled else { return }
                 let message: String
                 if case let UpstreamClient.UpstreamError.httpError(_, bodyData) = error {
                     message = self.upstreamErrorMessage(
@@ -608,7 +640,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         translationContext: AnthropicTranslator.TranslationContext,
         config: ProxyConfiguration
     ) {
-        Task {
+        startRequestTask(on: eventLoop) { [self] in
             let requestStart = Date()
             do {
                 let (responseData, statusCode, _) = try await UpstreamClient.forward(
@@ -618,6 +650,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     body: body,
                     config: config
                 )
+                try Task.checkCancellation()
 
                 guard (200..<300).contains(statusCode) else {
                     let message = self.upstreamErrorMessage(
@@ -679,6 +712,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     ctxBox.value.flush()
                 }
             } catch {
+                guard !Task.isCancelled else { return }
                 let message: String
                 if case let UpstreamClient.UpstreamError.httpError(statusCode, bodyData) = error {
                     message = self.upstreamErrorMessage(
@@ -707,7 +741,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         translationContext: AnthropicTranslator.TranslationContext,
         config: ProxyConfiguration
     ) {
-        Task {
+        startRequestTask(on: eventLoop) { [self] in
             var streamStarted = false
             let requestStart = Date()
             let messageID = "msg_\(UUID().uuidString.prefix(24).lowercased())"
@@ -787,6 +821,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 // Emit finish events
                 let finishEvents = AnthropicTranslator.streamingFinishEvents(state: state)
+                try Task.checkCancellation()
                 let didStart = streamStarted
 
                 if !finishEvents.isEmpty && !didStart {
@@ -848,6 +883,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                 }
             } catch {
+                guard !Task.isCancelled else { return }
                 let didStart = streamStarted
                 let message: String
                 if case let UpstreamClient.UpstreamError.httpError(statusCode, bodyData) = error {
@@ -966,7 +1002,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         requestModel: String?,
         config: ProxyConfiguration
     ) {
-        Task {
+        startRequestTask(on: eventLoop) { [self] in
             let requestStart = Date()
             do {
                 let (responseData, upstreamStatusCode, responseHeaders) = try await UpstreamClient.forward(
@@ -976,6 +1012,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     body: body,
                     config: config
                 )
+                try Task.checkCancellation()
                 let normalized = AnthropicTranslator.normalizeOpenAICompatibleResponse(
                     statusCode: upstreamStatusCode,
                     responseData: responseData,
@@ -1014,6 +1051,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     ctxBox.value.flush()
                 }
             } catch {
+                guard !Task.isCancelled else { return }
                 let message = "Upstream error: \(error.localizedDescription)"
                 eventLoop.execute {
                     self.sendErrorResponse(
@@ -1038,7 +1076,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         requestModel: String?,
         config: ProxyConfiguration
     ) {
-        Task {
+        startRequestTask(on: eventLoop) { [self] in
             var streamStarted = false
             let requestStart = Date()
             var lastSeenPromptTokens = 0
@@ -1107,6 +1145,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                 }
 
+                try Task.checkCancellation()
                 let didStart = streamStarted
                 if didStart {
                     await recordSessionRequest(
@@ -1149,6 +1188,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                 }
             } catch {
+                guard !Task.isCancelled else { return }
                 let didStart = streamStarted
                 let message = "Upstream error: \(error.localizedDescription)"
                 eventLoop.execute {
