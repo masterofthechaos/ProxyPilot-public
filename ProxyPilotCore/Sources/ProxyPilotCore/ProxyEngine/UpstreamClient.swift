@@ -61,10 +61,10 @@ enum UpstreamClient {
                 return
             }
             let bridge = LineStreamingBridge(continuation: continuation)
-            let config = URLSessionConfiguration.default
-            config.timeoutIntervalForRequest = 30
-            config.timeoutIntervalForResource = 300
-            let session = URLSession(configuration: config, delegate: bridge, delegateQueue: nil)
+            let sessionConfiguration = URLSessionConfiguration.default
+            sessionConfiguration.timeoutIntervalForRequest = config.effectiveUpstreamRequestTimeout
+            sessionConfiguration.timeoutIntervalForResource = 300
+            let session = URLSession(configuration: sessionConfiguration, delegate: bridge, delegateQueue: nil)
             let task = session.dataTask(with: request)
             continuation.onTermination = { _ in
                 task.cancel()
@@ -222,7 +222,7 @@ enum UpstreamClient {
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = method
         request.httpBody = body
-        request.timeoutInterval = 30
+        request.timeoutInterval = config.effectiveUpstreamRequestTimeout
 
         // Forward relevant headers, excluding auth headers (we set our own)
         // and any client API key headers that could leak to the upstream provider.

@@ -796,7 +796,9 @@ final class LocalProxyServer: @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         applyPromptCacheMutation(path: config.upstreamProvider.chatCompletionsPath, model: requestModel, config: config, request: &request)
         applyUpstreamAuth(config: config, request: &request)
-        request.timeoutInterval = 60
+        request.timeoutInterval = TutorRequestAdapter.upstreamTimeout(
+            envelopeHeader: tutorEnvelope, attribution: RequestAttributionContext.current,
+            provider: config.upstreamProvider) ?? 60
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -840,7 +842,12 @@ final class LocalProxyServer: @unchecked Sendable {
                     promptCacheWriteTokens: usage?.promptCacheWriteTokens,
                     durationSeconds: Date().timeIntervalSince(requestStartTime),
                     path: "/v1/chat/completions",
-                    wasStreaming: false
+                    wasStreaming: false,
+                    requestedModel: requestModel,
+                    providerReportedCostUSD: (json?["usage"] as? [String: Any])?["cost"] as? Double,
+                    serverToolCalls: TutorRequestAdapter.accepts(envelopeHeader: tutorEnvelope,
+                        attribution: RequestAttributionContext.current, provider: config.upstreamProvider)
+                        ? TutorResponseAccounting.receipts(from: normalized.data) : nil
                 )
                 await recordSessionReport(record, config: config, trackingID: trackingID)
             } else {
@@ -914,7 +921,9 @@ final class LocalProxyServer: @unchecked Sendable {
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         applyPromptCacheMutation(path: config.upstreamProvider.chatCompletionsPath, model: requestModel, config: config, request: &request)
         applyUpstreamAuth(config: config, request: &request)
-        request.timeoutInterval = 120
+        request.timeoutInterval = TutorRequestAdapter.upstreamTimeout(
+            envelopeHeader: tutorEnvelope, attribution: RequestAttributionContext.current,
+            provider: config.upstreamProvider) ?? 120
 
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -949,6 +958,10 @@ final class LocalProxyServer: @unchecked Sendable {
             var lastSeenModel = requestModel
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
             var streamingNormalizationContext = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
+            var tutorAccounting = TutorResponseAccounting()
+            let tracksTutor = TutorRequestAdapter.accepts(envelopeHeader: tutorEnvelope,
+                attribution: RequestAttributionContext.current, provider: config.upstreamProvider)
+            var lastSeenProviderCostUSD: Double?
 
             for try await line in bytes.lines {
                 try Task.checkCancellation()
@@ -958,6 +971,13 @@ final class LocalProxyServer: @unchecked Sendable {
                     context: &streamingNormalizationContext
                 )
                 let sseData = SSEFraming.terminatedData(normalizedLine)
+                if tracksTutor { tutorAccounting.observe(streamingLine: line) }
+                if line.hasPrefix("data:"),
+                   let data = line.dropFirst(5).trimmingCharacters(in: .whitespaces).data(using: .utf8),
+                   let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let cost = (root["usage"] as? [String: Any])?["cost"] as? Double {
+                    lastSeenProviderCostUSD = cost
+                }
                 outputCapture.append(sseData)
                 await sendData(sseData, on: connection)
 
@@ -984,7 +1004,10 @@ final class LocalProxyServer: @unchecked Sendable {
                         promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
                         durationSeconds: Date().timeIntervalSince(requestStartTime),
                         path: "/v1/chat/completions",
-                        wasStreaming: true
+                        wasStreaming: true,
+                        requestedModel: requestModel,
+                        providerReportedCostUSD: lastSeenProviderCostUSD,
+                        serverToolCalls: tracksTutor ? tutorAccounting.receipts : nil
                     )
                     await recordSessionReport(record, config: config, trackingID: trackingID)
                     await recordInputOutputLog(
@@ -1014,7 +1037,10 @@ final class LocalProxyServer: @unchecked Sendable {
                 promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
                 durationSeconds: Date().timeIntervalSince(requestStartTime),
                 path: "/v1/chat/completions",
-                wasStreaming: true
+                wasStreaming: true,
+                requestedModel: requestModel,
+                providerReportedCostUSD: lastSeenProviderCostUSD,
+                serverToolCalls: tracksTutor ? tutorAccounting.receipts : nil
             )
             await recordSessionReport(record, config: config, trackingID: trackingID)
             await recordInputOutputLog(
@@ -1972,6 +1998,8 @@ final class LocalProxyServer: @unchecked Sendable {
         let coreRecord = RequestRecord(
             timestamp: record.timestamp,
             model: record.model,
+            requestedModel: record.requestedModel,
+            providerReportedCostUSD: record.providerReportedCostUSD,
             promptTokens: record.promptTokens,
             completionTokens: record.completionTokens,
             promptCacheHitTokens: record.promptCacheHitTokens,
@@ -1985,7 +2013,8 @@ final class LocalProxyServer: @unchecked Sendable {
             contextCompactionEnabled: config.contextCompaction.isEnabled,
             translationMode: config.isAnthropicPassthroughActive
                 ? "anthropic_passthrough"
-                : config.anthropicTranslatorMode.rawValue
+                : config.anthropicTranslatorMode.rawValue,
+            serverToolCalls: record.serverToolCalls
         )
         try? SessionReportStore.append(
             SessionReportEvent(
@@ -2014,7 +2043,10 @@ final class LocalProxyServer: @unchecked Sendable {
                 promptCacheWriteTokens: nil,
                 durationSeconds: record.durationSeconds,
                 path: record.path,
-                wasStreaming: record.wasStreaming
+                wasStreaming: record.wasStreaming,
+                requestedModel: record.requestedModel,
+                providerReportedCostUSD: record.providerReportedCostUSD,
+                serverToolCalls: record.serverToolCalls
             )
         }
         return record

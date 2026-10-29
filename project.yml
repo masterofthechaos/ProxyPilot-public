@@ -12,14 +12,14 @@ configs:
 packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    from: "2.8.0"
+    from: "2.10.1"
   ProxyPilotCore:
     path: ProxyPilotCore
 settings:
   base:
     SWIFT_VERSION: 6.0
-    MARKETING_VERSION: "1.17.4"
-    CURRENT_PROJECT_VERSION: "151"
+    MARKETING_VERSION: "1.17.6"
+    CURRENT_PROJECT_VERSION: "153"
 targets:
   ProxyPilot-macOS:
     type: application

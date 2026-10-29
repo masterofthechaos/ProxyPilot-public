@@ -9,6 +9,9 @@ final class SessionReportCard: ObservableObject {
         let id: UUID
         let timestamp: Date
         let model: String
+        let requestedModel: String?
+        let providerReportedCostUSD: Double?
+        let serverToolCalls: [TutorServerToolReceipt]?
         let promptTokens: Int
         let completionTokens: Int
         let promptCacheHitTokens: Int?
@@ -41,11 +44,17 @@ final class SessionReportCard: ObservableObject {
             durationSeconds: TimeInterval,
             path: String,
             wasStreaming: Bool,
-            providerIdentifier: String? = nil
+            providerIdentifier: String? = nil,
+            requestedModel: String? = nil,
+            providerReportedCostUSD: Double? = nil,
+            serverToolCalls: [TutorServerToolReceipt]? = nil
         ) {
             self.id = id
             self.timestamp = timestamp
             self.model = model
+            self.requestedModel = requestedModel
+            self.providerReportedCostUSD = providerReportedCostUSD
+            self.serverToolCalls = serverToolCalls
             self.promptTokens = promptTokens
             self.completionTokens = completionTokens
             self.promptCacheHitTokens = promptCacheHitTokens

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 @MainActor
 final class RepoGPSService: ObservableObject {
@@ -6,10 +7,39 @@ final class RepoGPSService: ObservableObject {
         var installed: Bool
         var ownership: String
         var currentVersion: String?
-        var previousVersion: String?
-        var executable: String?
-        var behaviorPackVersion: String?
+        var previousVersion: String? = nil
+        var executable: String? = nil
+        var behaviorPackVersion: String? = nil
         var engineReady: Bool
+        // Optional additions preserve status decoding from older RepoGPS payloads.
+        var payloadPresent: Bool? = nil
+        var integrity: String? = nil
+        var repairRequired: Bool? = nil
+        var issue: String? = nil
+        var pathConfigured: Bool? = nil
+        var pathRemediation: String? = nil
+
+        var needsRepair: Bool {
+            // External executables remain user-owned, even when unverified.
+            guard ownership != "external" else { return false }
+            if repairRequired == true { return true }
+            guard ownership == "managed" else { return false }
+            return !installed || currentVersion == nil || payloadPresent == false || integrity == "missing" || integrity == "unverifiable"
+        }
+
+        var pathGuidance: String? {
+            guard pathConfigured == false, let pathRemediation,
+                  !pathRemediation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return pathRemediation
+        }
+
+        var primaryAction: PrimaryAction {
+            if ownership == "external" { return .adopt }
+            if needsRepair { return .repair }
+            return installed ? .maintain : .install
+        }
+
+        enum PrimaryAction { case adopt, repair, install, maintain }
 
         enum CodingKeys: String, CodingKey {
             case installed, ownership, executable
@@ -17,6 +47,12 @@ final class RepoGPSService: ObservableObject {
             case previousVersion = "previous_version"
             case behaviorPackVersion = "behavior_pack_version"
             case engineReady = "engine_ready"
+            case payloadPresent = "payload_present"
+            case integrity
+            case repairRequired = "repair_required"
+            case issue
+            case pathConfigured = "path_configured"
+            case pathRemediation = "path_remediation"
         }
 
         static let missing = Self(installed: false, ownership: "missing", currentVersion: nil, previousVersion: nil, executable: nil, behaviorPackVersion: nil, engineReady: false)
@@ -90,6 +126,7 @@ final class RepoGPSService: ObservableObject {
     private let cliActivator: CLIActivator
     private var refreshTask: Task<Void, Never>?
     private var lastUpdateCheckAt: Date?
+    private var payloadCache: [URL: (fingerprint: String, candidate: PayloadCandidate?)] = [:]
 
     private static let automaticUpdateCheckInterval: TimeInterval = 6 * 60 * 60
 
@@ -110,7 +147,7 @@ final class RepoGPSService: ObservableObject {
     deinit { refreshTask?.cancel() }
 
     var isInstalledAndCompatible: Bool {
-        distribution.installed && distribution.ownership == "managed" && distribution.currentVersion != nil
+        distribution.installed && distribution.ownership == "managed" && distribution.currentVersion != nil && !distribution.needsRepair
     }
 
     var bundledUpdateAvailable: Bool {
@@ -194,22 +231,29 @@ final class RepoGPSService: ObservableObject {
 
     func refresh(allowAutomaticUpdate: Bool = false) async {
         bundledVersion = payloadManifest()?.payloadVersion
-        let binary = executableURL ?? bundledExecutable
-        guard let binary else {
-            distribution = externalStatusIfPresent() ?? .missing
-            session = .inactive
-            updateStatus = nil
-            return
+        // A broken stable symlink/binary must not hide the managed damage state.
+        // The bundled control can report it without executing the damaged payload.
+        let candidates = controlCandidates(revalidate: false)
+        var observed: DistributionStatus?
+        for candidate in candidates {
+            if let result = await run(candidate.executable, ["distribution", "status", "--json"]),
+               result.code == 0, var decoded = Self.parseDistributionStatus(result.data) {
+                if decoded.ownership == "managed", let current = decoded.currentVersion,
+                   !candidates.contains(where: { !$0.bundled && $0.version == current }) {
+                    // Legacy status producers do not report checksum damage.
+                    // Preserve their ownership/version but expose local proof.
+                    decoded.integrity = "unverifiable"
+                    decoded.repairRequired = true
+                    decoded.issue = decoded.issue ?? "The managed RepoGPS payload is missing or could not be verified."
+                }
+                observed = decoded
+                break
+            }
         }
-        if let data = await run(binary, ["distribution", "status", "--json"])?.data,
-           let decoded = Self.parseDistributionStatus(data) {
-            distribution = decoded
-        } else if binary == bundledExecutable {
-            distribution = externalStatusIfPresent() ?? .missing
-        }
+        distribution = observed ?? externalStatusIfPresent() ?? damagedManagedStatus() ?? .missing
         if distribution.ownership != "managed" {
             updateStatus = nil
-        } else if allowAutomaticUpdate, !isWorking {
+        } else if allowAutomaticUpdate, !isWorking, !distribution.needsRepair {
             await checkForUpdates(force: false, reportFailure: false)
             if remoteUpdateAvailable {
                 await installAvailableUpdate(installEngine: false)
@@ -220,7 +264,7 @@ final class RepoGPSService: ObservableObject {
                 return
             }
         }
-        if let installed = executableURL,
+        if !distribution.needsRepair, let installed = executableURL,
            let data = await run(installed, ["session", "status", "--json"])?.data,
            let decoded = Self.parseSessionStatus(data) {
             session = decoded
@@ -275,15 +319,15 @@ final class RepoGPSService: ObservableObject {
            Date().timeIntervalSince(lastUpdateCheckAt) < Self.automaticUpdateCheckInterval {
             return
         }
-        guard let bundledExecutable else {
-            if reportFailure { lastError = "This ProxyPilot build does not contain the RepoGPS updater." }
+        guard let control = controlCandidates().first else {
+            if reportFailure { lastError = "No verified RepoGPS updater is available. Update ProxyPilot to restore its bundled payload." }
             return
         }
 
         lastUpdateCheckAt = Date()
         isCheckingForUpdates = true
         defer { isCheckingForUpdates = false }
-        guard let result = await run(bundledExecutable, ["update", "--check", "--json"]),
+        guard let result = await run(control.executable, ["update", "--check", "--json"]),
               result.code == 0,
               let decoded = Self.parseUpdateStatus(result.data) else {
             if reportFailure {
@@ -302,13 +346,13 @@ final class RepoGPSService: ObservableObject {
     }
 
     private func installAvailableUpdate(installEngine: Bool) async {
-        guard let bundledExecutable else {
-            lastError = "This ProxyPilot build does not contain the RepoGPS updater."
+        guard let control = controlCandidates().first else {
+            lastError = "No verified RepoGPS updater is available. Update ProxyPilot to restore its bundled payload."
             return
         }
         isWorking = true
         defer { isWorking = false }
-        guard await succeeds(bundledExecutable, ["update", "--json"]) else { return }
+        guard await succeeds(control.executable, ["update", "--json"]) else { return }
         if installEngine, let installed = stableExecutable,
            !(await succeeds(installed, ["engine", "install", "--json"])) { return }
         let version = updateStatus?.latestVersion ?? "the latest version"
@@ -322,21 +366,32 @@ final class RepoGPSService: ObservableObject {
     }
 
     private func installBundled(adoptExternal: Bool, installEngine: Bool, repair: Bool = false) async {
-        guard let bundledExecutable, let payloadURL else {
-            lastError = "This ProxyPilot build does not contain a RepoGPS payload."
+        let candidates = controlCandidates()
+        guard let selected = Self.preferredPayload(candidates, currentVersion: managedVersion) else {
+            if let current = managedVersion {
+                lastError = "RepoGPS \(current) needs a verified payload of the same or a newer version. Update ProxyPilot or provide a matching RepoGPS payload; the older bundled fallback was not installed."
+            } else {
+                lastError = "This ProxyPilot build does not contain a RepoGPS payload."
+            }
+            return
+        }
+        // 0.8.1 introduced damage-safe repair; older controls can wedge on the
+        // conflicting directory that repair is specifically meant to recover.
+        guard !repair || !Self.isStableVersion("0.8.1", newerThan: selected.version) else {
+            lastError = "Repair requires RepoGPS 0.8.1 or newer. Update ProxyPilot to obtain a recovery payload."
             return
         }
         isWorking = true
         defer { isWorking = false }
-        var args = ["distribution", repair ? "repair" : "install", "--payload", payloadURL.path, "--json"]
+        var args = ["distribution", repair ? "repair" : "install", "--payload", selected.payload.path, "--json"]
         if adoptExternal { args.append("--adopt") }
-        guard await succeeds(bundledExecutable, args) else { return }
+        guard await succeeds(selected.executable, args) else { return }
         if installEngine, let installed = stableExecutable,
            !(await succeeds(installed, ["engine", "install", "--json"])) { return }
         if repair {
-            lastReceipt = "Repaired RepoGPS from ProxyPilot's signed bundled fallback."
+            lastReceipt = "Repaired RepoGPS \(selected.version) from its verified \(selected.bundled ? "bundled" : "installed") payload."
         } else {
-            lastReceipt = installEngine ? "Installed RepoGPS and its pinned coding engine." : "Updated RepoGPS from ProxyPilot's bundled fallback."
+            lastReceipt = installEngine ? "Installed RepoGPS and its pinned coding engine." : "Updated RepoGPS from its verified payload."
         }
         lastError = nil
         updateStatus = nil
@@ -352,8 +407,8 @@ final class RepoGPSService: ObservableObject {
     /// required for OpenCode's interactive input, resize, redraw, and Ctrl-C.
     @discardableResult
     func launch(in repository: URL) async -> Bool {
-        guard let executableURL else {
-            lastError = "Install RepoGPS before opening a terminal session."
+        guard !distribution.needsRepair, let executableURL else {
+            lastError = distribution.needsRepair ? "Repair RepoGPS before opening a terminal session." : "Install RepoGPS before opening a terminal session."
             return false
         }
 
@@ -403,10 +458,13 @@ final class RepoGPSService: ObservableObject {
     }
 
     private func mutate(_ arguments: [String], receipt: String) async {
-        guard let executableURL else { return }
+        guard let control = controlCandidates().first else {
+            lastError = "No verified RepoGPS control is available. Update ProxyPilot or repair RepoGPS first."
+            return
+        }
         isWorking = true
         defer { isWorking = false }
-        guard await succeeds(executableURL, arguments) else { return }
+        guard await succeeds(control.executable, arguments) else { return }
         lastReceipt = receipt
         lastError = nil
         await refresh()
@@ -447,10 +505,6 @@ final class RepoGPSService: ObservableObject {
         }.value
     }
 
-    private var bundledExecutable: URL? {
-        guard let value = payloadURL?.appendingPathComponent("bin/rgps"), FileManager.default.isExecutableFile(atPath: value.path) else { return nil }
-        return value
-    }
     private var stableExecutable: URL? {
         let value = home.appendingPathComponent(".repogps/bin/rgps")
         return FileManager.default.isExecutableFile(atPath: value.path) ? value : nil
@@ -458,10 +512,135 @@ final class RepoGPSService: ObservableObject {
     private func externalStatusIfPresent() -> DistributionStatus? {
         let external = home.appendingPathComponent(".local/bin/rgps")
         guard FileManager.default.fileExists(atPath: external.path) else { return nil }
+        let managed = home.appendingPathComponent(".repogps/bin/rgps")
+        if let target = try? FileManager.default.destinationOfSymbolicLink(atPath: external.path) {
+            let destination = URL(fileURLWithPath: target, relativeTo: external.deletingLastPathComponent()).standardizedFileURL
+            let versions = home.appendingPathComponent(".repogps/versions").resolvingSymlinksInPath().path + "/"
+            if destination == managed.standardizedFileURL || external.resolvingSymlinksInPath().path.hasPrefix(versions) { return nil }
+        }
         return .init(installed: true, ownership: "external", currentVersion: nil, previousVersion: nil, executable: external.resolvingSymlinksInPath().path, behaviorPackVersion: nil, engineReady: false)
     }
 
-    private struct PayloadManifest: Decodable { var payloadVersion: String; enum CodingKeys: String, CodingKey { case payloadVersion = "payload_version" } }
+    struct PayloadCandidate: Equatable, Sendable {
+        var payload: URL
+        var executable: URL { payload.appendingPathComponent("bin/rgps") }
+        var version: String
+        var bundled: Bool
+    }
+
+    private struct PayloadManifest: Decodable {
+        struct File: Decodable { var path: String; var sha256: String; var executable: Bool }
+        var schemaVersion: Int
+        var payloadVersion: String
+        var repoGPSVersion: String
+        var files: [File]
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case payloadVersion = "payload_version"
+            case repoGPSVersion = "repogps_version"
+            case files
+        }
+    }
+
+    /// Select the newest matching executable/payload pair. A newer managed
+    /// installation is never silently replaced by an app's older fallback.
+    nonisolated static func preferredPayload(_ candidates: [PayloadCandidate], currentVersion: String?) -> PayloadCandidate? {
+        candidates.filter { candidate in
+            currentVersion.map { !isStableVersion($0, newerThan: candidate.version) } ?? true
+        }.sorted { lhs, rhs in
+            if lhs.version == rhs.version { return !lhs.bundled && rhs.bundled }
+            return isStableVersion(lhs.version, newerThan: rhs.version)
+        }.first
+    }
+
+    nonisolated static func verifiedPayload(at root: URL, bundled: Bool) -> PayloadCandidate? {
+        let fm = FileManager.default
+        guard let rootValues = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+              rootValues.isDirectory == true, rootValues.isSymbolicLink != true,
+              let manifestData = try? Data(contentsOf: root.appendingPathComponent("payload.json")),
+              let manifest = try? JSONDecoder().decode(PayloadManifest.self, from: manifestData),
+              manifest.schemaVersion == 1, validPayloadVersion(manifest.payloadVersion),
+              manifest.payloadVersion == manifest.repoGPSVersion,
+              !manifest.files.isEmpty else { return nil }
+        var seen = Set<String>()
+        for file in manifest.files {
+            let components = file.path.split(separator: "/", omittingEmptySubsequences: false)
+            guard !components.isEmpty, !file.path.hasPrefix("/"),
+                  !components.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }),
+                  seen.insert(file.path).inserted else { return nil }
+            var url = root
+            for component in components {
+                url.appendPathComponent(String(component))
+                guard let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
+                      values.isSymbolicLink != true else { return nil }
+            }
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]), values.isRegularFile == true,
+                  let data = try? Data(contentsOf: url),
+                  SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == file.sha256.lowercased(),
+                  !file.executable || fm.isExecutableFile(atPath: url.path) else { return nil }
+        }
+        guard manifest.files.contains(where: { $0.path == "bin/rgps" && $0.executable }) else { return nil }
+        return PayloadCandidate(payload: root, version: manifest.payloadVersion, bundled: bundled)
+    }
+
+    nonisolated private static func validPayloadVersion(_ value: String) -> Bool {
+        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+        return parts.count == 3 && parts.allSatisfy { !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }
+    }
+
+    private var managedVersion: String? {
+        if distribution.ownership == "managed", let value = distribution.currentVersion,
+           Self.validPayloadVersion(value) { return value }
+        guard let data = try? Data(contentsOf: home.appendingPathComponent(".repogps/distribution.json")),
+              let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = state["current_version"] as? String, Self.validPayloadVersion(version) else { return nil }
+        return version
+    }
+
+    private func controlCandidates(revalidate: Bool = true) -> [PayloadCandidate] {
+        var candidates: [PayloadCandidate] = []
+        if let version = managedVersion,
+           let installed = verifiedControl(at: home.appendingPathComponent(".repogps/versions/" + version), bundled: false, revalidate: revalidate) {
+            candidates.append(installed)
+        }
+        if let payloadURL, let bundled = verifiedControl(at: payloadURL, bundled: true, revalidate: revalidate) { candidates.append(bundled) }
+        return candidates.sorted { Self.isStableVersion($0.version, newerThan: $1.version) }
+    }
+
+    private func verifiedControl(at root: URL, bundled: Bool, revalidate: Bool) -> PayloadCandidate? {
+        // Monitoring runs frequently. Re-hash only when the manifest or file
+        // metadata changes; every explicit management action revalidates bytes.
+        let fingerprint = payloadFingerprint(at: root)
+        if !revalidate, let cached = payloadCache[root], cached.fingerprint == fingerprint {
+            return cached.candidate
+        }
+        let candidate = Self.verifiedPayload(at: root, bundled: bundled)
+        payloadCache[root] = (fingerprint, candidate)
+        return candidate
+    }
+
+    private func payloadFingerprint(at root: URL) -> String {
+        guard let data = try? Data(contentsOf: root.appendingPathComponent("payload.json")),
+              let manifest = try? JSONDecoder().decode(PayloadManifest.self, from: data) else { return "missing" }
+        var value = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let paths = [root, root.appendingPathComponent("payload.json")] + manifest.files.map { root.appendingPathComponent($0.path) }
+        for path in paths {
+            let attributes = (try? FileManager.default.attributesOfItem(atPath: path.path)) ?? [:]
+            for key: FileAttributeKey in [.type, .size, .modificationDate, .posixPermissions, .systemFileNumber] {
+                value += "|" + String(describing: attributes[key])
+            }
+        }
+        return value
+    }
+
+    private func damagedManagedStatus() -> DistributionStatus? {
+        let version = managedVersion
+        guard version != nil || FileManager.default.fileExists(atPath: home.appendingPathComponent(".repogps/distribution.json").path) else { return nil }
+        return .init(installed: false, ownership: "managed", currentVersion: version, engineReady: false,
+                     payloadPresent: version.map { FileManager.default.fileExists(atPath: home.appendingPathComponent(".repogps/versions/" + $0).path) } ?? false,
+                     integrity: "unverifiable", repairRequired: true,
+                     issue: "No verified RepoGPS control is available. Update ProxyPilot to restore its recovery payload.")
+    }
     private func payloadManifest() -> PayloadManifest? {
         guard let url = payloadURL?.appendingPathComponent("payload.json"), let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(PayloadManifest.self, from: data)
@@ -494,9 +673,13 @@ final class RepoGPSService: ObservableObject {
     }
 
     private func run(_ binary: URL, _ arguments: [String]) async -> ProcessResult? {
-        await Task.detached(priority: .utility) {
+        let commandHome = home
+        return await Task.detached(priority: .utility) {
             let process = Process(); let output = Pipe(); let error = Pipe()
             process.executableURL = binary; process.arguments = arguments
+            var environment = ProcessInfo.processInfo.environment
+            environment["RGPS_HOME"] = commandHome.path
+            process.environment = environment
             process.standardOutput = output; process.standardError = error
             guard (try? process.run()) != nil else { return nil }
             let data = output.fileHandleForReading.readDataToEndOfFile()

@@ -21,6 +21,11 @@ public struct RequestRecord: Sendable, Codable, Equatable {
     public let promptCachingMode: String?
     public let contextCompactionEnabled: Bool?
     public let translationMode: String?
+    /// Actual provider server-tool receipts. These are children of the outer
+    /// request, never additional requests or amounts to add to outer usage.
+    /// Nil is legacy/unobserved; an empty array is an observed request with no
+    /// completed, structurally paired server-tool exchanges.
+    public let serverToolCalls: [TutorServerToolReceipt]?
 
     public init(
         timestamp: Date = Date(),
@@ -38,7 +43,8 @@ public struct RequestRecord: Sendable, Codable, Equatable {
         providerIdentifier: String? = nil,
         promptCachingMode: String? = nil,
         contextCompactionEnabled: Bool? = nil,
-        translationMode: String? = nil
+        translationMode: String? = nil,
+        serverToolCalls: [TutorServerToolReceipt]? = nil
     ) {
         self.timestamp = timestamp
         self.model = model
@@ -56,5 +62,6 @@ public struct RequestRecord: Sendable, Codable, Equatable {
         self.promptCachingMode = promptCachingMode
         self.contextCompactionEnabled = contextCompactionEnabled
         self.translationMode = translationMode
+        self.serverToolCalls = serverToolCalls
     }
 }

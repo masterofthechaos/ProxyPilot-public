@@ -87,9 +87,12 @@ struct CodingHarnessesView: View {
                             .font(.callout).foregroundStyle(.secondary)
 
                         HStack {
-                            if service.distribution.ownership == "external" {
+                            if service.distribution.primaryAction == .adopt {
                                 Button("Adopt and Install") { confirmAdoption = true }
-                            } else if !service.distribution.installed {
+                            } else if service.distribution.primaryAction == .repair {
+                                Button("Repair RepoGPS") { Task { await service.repair() } }
+                                    .buttonStyle(.borderedProminent)
+                            } else if service.distribution.primaryAction == .install {
                                 Button("Install RepoGPS") { Task { await service.install() } }
                                     .buttonStyle(.borderedProminent)
                             } else if service.remoteUpdateAvailable {
@@ -122,12 +125,31 @@ struct CodingHarnessesView: View {
                         }
                         .disabled(service.isWorking || service.isInstallingProxyPilotCLI)
 
+                        if let issue = service.distribution.issue, service.distribution.needsRepair {
+                            Label(issue, systemImage: "exclamationmark.triangle")
+                                .font(.caption).foregroundStyle(.orange)
+                                .textSelection(.enabled)
+                        }
+                        if let guidance = service.distribution.pathGuidance {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("To make rgps available in Terminal, run:")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text(guidance).font(.system(.caption, design: .monospaced))
+                                        .textSelection(.enabled)
+                                    Spacer()
+                                    Button(copiedCommand == guidance ? "Copied" : "Copy PATH Command") { copy(guidance) }
+                                        .buttonStyle(.borderless)
+                                }
+                            }
+                        }
+
                         if let receipt = service.lastReceipt { Text(receipt).font(.caption).foregroundStyle(.green) }
                         if let error = service.lastError { Text(error).font(.caption).foregroundStyle(.orange) }
                     }
                 }
 
-                if service.distribution.installed {
+                if service.distribution.installed && !service.distribution.needsRepair {
                     gettingStartedCard
                     commandGuideCard
                 }
@@ -150,6 +172,9 @@ struct CodingHarnessesView: View {
     }
 
     private var statusText: String {
+        if service.distribution.needsRepair {
+            return "RepoGPS " + (service.distribution.currentVersion ?? "") + " needs repair. Your saved state is retained."
+        }
         switch service.distribution.ownership {
         case "managed":
             return "Managed " + (service.distribution.currentVersion ?? "") + " · engine " + (service.distribution.engineReady ? "ready" : "not installed")
@@ -159,7 +184,7 @@ struct CodingHarnessesView: View {
     }
 
     private var statusBadge: some View {
-        Text(service.updateAvailable ? "Update Available" : (service.distribution.ownership == "managed" ? "Installed" : service.distribution.ownership.capitalized))
+        Text(service.distribution.needsRepair ? "Repair Required" : (service.updateAvailable ? "Update Available" : (service.distribution.ownership == "managed" ? "Installed" : service.distribution.ownership.capitalized)))
             .font(.caption.weight(.semibold))
             .padding(.horizontal, 9).padding(.vertical, 5)
             .background(.quaternary, in: Capsule())

@@ -947,7 +947,24 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             provider: config.upstreamProvider
         )
         let sanitizedBody = withStreamingUsageInjected(sanitizedChatRequestBody(tutorBody))
+        let tracksTutor = TutorRequestAdapter.accepts(
+            envelopeHeader: head.headers[TutorRequestAdapter.headerName].first,
+            attribution: RequestAttribution.validated(
+                client: head.headers["X-ProxyPilot-Client"].first,
+                sessionID: head.headers["X-ProxyPilot-Session-ID"].first,
+                role: head.headers["X-ProxyPilot-Role"].first
+            ),
+            provider: config.upstreamProvider
+        )
         let requestModel = parsedRequestModel ?? config.preferredAnthropicUpstreamModel
+        let timeout = TutorRequestAdapter.upstreamTimeout(
+            envelopeHeader: head.headers[TutorRequestAdapter.headerName].first,
+            attribution: RequestAttribution.validated(
+                client: head.headers["X-ProxyPilot-Client"].first,
+                sessionID: head.headers["X-ProxyPilot-Session-ID"].first,
+                role: head.headers["X-ProxyPilot-Role"].first),
+            provider: config.upstreamProvider)
+        let effectiveConfig = config.withUpstreamRequestTimeout(timeout ?? config.upstreamRequestTimeout)
 
         // Collect headers as tuples
         let headers: [(String, String)] = head.headers.map { ($0.name, $0.value) }
@@ -956,7 +973,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             headers: headers,
             body: sanitizedBody,
             model: requestModel,
-            config: config
+            config: effectiveConfig
         )
 
         // Box context so it can cross the Task boundary safely.
@@ -974,7 +991,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 originalBody: bodyData,
                 body: mutation.body,
                 requestModel: requestModel,
-                config: config
+                tracksTutor: tracksTutor,
+                config: effectiveConfig
             )
         } else {
             handleBufferedCompletions(
@@ -986,7 +1004,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 originalBody: bodyData,
                 body: mutation.body,
                 requestModel: requestModel,
-                config: config
+                tracksTutor: tracksTutor,
+                config: effectiveConfig
             )
         }
     }
@@ -1000,6 +1019,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         originalBody: Data,
         body: Data,
         requestModel: String?,
+        tracksTutor: Bool,
         config: ProxyConfiguration
     ) {
         startRequestTask(on: eventLoop) { [self] in
@@ -1027,6 +1047,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         wasStreaming: false,
                         startedAt: requestStart,
                         responseData: normalized.data,
+                        serverToolCalls: tracksTutor ? TutorResponseAccounting.receipts(from: normalized.data) : nil,
                         config: config
                     )
                 }
@@ -1074,6 +1095,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         originalBody: Data,
         body: Data,
         requestModel: String?,
+        tracksTutor: Bool,
         config: ProxyConfiguration
     ) {
         startRequestTask(on: eventLoop) { [self] in
@@ -1088,6 +1110,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             var lastSeenModel = requestModel ?? config.preferredAnthropicUpstreamModel
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
             var streamingNormalizationContext = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
+            var tutorAccounting = TutorResponseAccounting()
 
             do {
                 let stream = UpstreamClient.forwardStreaming(
@@ -1100,6 +1123,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 for try await chunk in stream {
                     let rawLine = String(decoding: chunk, as: UTF8.self).trimmingCharacters(in: .newlines)
+                    if tracksTutor { tutorAccounting.observe(streamingLine: rawLine) }
                     updateStreamingUsage(
                         from: rawLine,
                         model: &lastSeenModel,
@@ -1160,6 +1184,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         promptCacheMissTokens: lastSeenPromptCacheMissTokens,
                         promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
                         providerReportedCostUSD: lastSeenProviderCostUSD,
+                        serverToolCalls: tracksTutor ? tutorAccounting.receipts : nil,
                         config: config
                     )
                     await recordInputOutputLog(
@@ -1335,6 +1360,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         promptCacheMissTokens: Int? = nil,
         promptCacheWriteTokens: Int? = nil,
         providerReportedCostUSD: Double? = nil,
+        serverToolCalls: [TutorServerToolReceipt]? = nil,
         config: ProxyConfiguration
     ) async {
         guard let sessionStats = config.sessionStats else { return }
@@ -1365,7 +1391,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             contextCompactionEnabled: config.contextCompaction.isEnabled,
             translationMode: config.isAnthropicPassthroughActive
                 ? "anthropic_passthrough"
-                : config.anthropicTranslatorMode.rawValue
+                : config.anthropicTranslatorMode.rawValue,
+            serverToolCalls: serverToolCalls
         ))
     }
 

@@ -270,8 +270,26 @@ struct ContentView: View {
     }
 
     private var collapsedSectionTabs: some View {
+        // Measure the whole strip at its readable intrinsic size. Compressible
+        // text would otherwise "fit" by truncating every destination name.
+        ViewThatFits(in: .horizontal) {
+            collapsedSectionTabRow(style: .text)
+            collapsedSectionTabRow(style: .wrappedText)
+            collapsedSectionTabRow(style: .icons)
+        }
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 18)
+        .padding(.top, 18)
+        .padding(.bottom, 16)
+    }
+
+    private enum CollapsedTabLabelStyle {
+        case text, wrappedText, icons
+    }
+
+    private func collapsedSectionTabRow(style: CollapsedTabLabelStyle) -> some View {
         HStack(spacing: 14) {
-            collapsedTabButton(for: .home, showsIcon: true)
+            collapsedTabButton(for: .home, style: style)
 
             GlassControlGroup(cornerRadius: 24, padding: 4) {
                 HStack(spacing: 0) {
@@ -283,17 +301,14 @@ struct ContentView: View {
                                 .padding(.horizontal, 4)
                         }
 
-                        collapsedTabButton(for: section, showsIcon: false)
+                        collapsedTabButton(for: section, style: style)
                     }
                 }
             }
 
             collapsedCustomizationButton
         }
-        .frame(minWidth: 0, maxWidth: .infinity)
-        .padding(.horizontal, 18)
-        .padding(.top, 18)
-        .padding(.bottom, 16)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var availableCollapsedTabSections: [SettingsSection] {
@@ -302,21 +317,23 @@ struct ContentView: View {
         )
     }
 
-    private func collapsedTabButton(for section: SettingsSection, showsIcon: Bool) -> some View {
+    private func collapsedTabButton(for section: SettingsSection, style: CollapsedTabLabelStyle) -> some View {
         Button {
             selectedSection = section
         } label: {
             HStack(spacing: 6) {
-                if showsIcon {
+                if section == .home || style == .icons {
                     Image(systemName: section.systemImage)
                 }
-                Text(section.compactTitle)
+                if section == .home || style != .icons {
+                    Text(style == .wrappedText ? wrappedCompactTitle(for: section) : section.compactTitle)
+                        .multilineTextAlignment(.center)
+                        .fixedSize()
+                }
             }
             .font(.callout.weight(selectedSection == section ? .semibold : .medium))
-            .lineLimit(1)
-            .minimumScaleFactor(0.85)
             .foregroundStyle(selectedSection == section ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-            .padding(.horizontal, showsIcon ? 16 : 14)
+            .padding(.horizontal, section == .home ? 16 : 14)
             .padding(.vertical, 10)
             .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             .background {
@@ -327,7 +344,20 @@ struct ContentView: View {
             }
         }
         .buttonStyle(.plain)
+        .help(section.title)
         .accessibilityLabel(section.title)
+        .accessibilityAddTraits(selectedSection == section ? .isSelected : [])
+    }
+
+    private func wrappedCompactTitle(for section: SettingsSection) -> String {
+        switch section {
+        case .proxy:
+            return "Xcode\nSetup"
+        case .keys:
+            return "Keys &\nProviders"
+        default:
+            return section.compactTitle
+        }
     }
 
     private var collapsedCustomizationButton: some View {

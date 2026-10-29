@@ -374,18 +374,33 @@ struct NIOProxyServerTests {
         try await stub.stop()
     }
 
-    @Test func repoGPSTutorProjectsServerToolsAndStripsLocalPolicyHeader() async throws {
+    @Test(arguments: [false, true]) func repoGPSTutorProjectsServerToolsAndStripsLocalPolicyHeader(streaming: Bool) async throws {
+        let messages: [[String: Any]] = [
+            ["role": "assistant", "tool_calls": [["id": "actual-advisor-call", "type": "function", "function": ["name": "openrouter_advisor", "arguments": "{}"]]]],
+            ["role": "tool", "tool_call_id": "actual-advisor-call", "content": #"{"status":"ok","model":"returned-advisor","advice":"Check input boundaries."}"#],
+        ]
+        let fixture: [String: Any] = ["id": "chatcmpl-tutor", "model": "returned-lead",
+            "messages": messages, "choices": [["message": ["role": "assistant", "content": "Done"]]],
+            "usage": ["prompt_tokens": 12, "completion_tokens": 7, "cost": 0.006]]
+        let payload = try JSONSerialization.data(withJSONObject: fixture, options: [.sortedKeys])
+        let responseBody = streaming ? "data: \(String(decoding: payload, as: UTF8.self))\n\ndata: [DONE]\n\n" : String(decoding: payload, as: UTF8.self)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let reportURL = directory.appendingPathComponent("session-report.jsonl")
+        let stats = SessionStats(sessionReportURL: reportURL)
         let stub = StubUpstream()
         let upstreamPort = try await stub.start(
             statusCode: 200,
-            body: #"{"id":"chatcmpl-tutor","choices":[]}"#,
-            requireJSONRequest: true
+            body: responseBody,
+            requireJSONRequest: true,
+            contentType: streaming ? "text/event-stream" : "application/json"
         )
         let config = ProxyConfiguration(
             port: 0,
             upstreamProvider: .openRouter,
             upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)",
-            requiresAuth: false
+            requiresAuth: false,
+            sessionStats: stats
         )
         let server = NIOProxyServer()
         let port = try await server.start(config: config)
@@ -393,7 +408,7 @@ struct NIOProxyServerTests {
         let envelope: [String: Any] = [
             "version": 1,
             "backend": "openrouter",
-            "consultation_policy": "automatic",
+            "consultation_policy": "required",
             "advisor": [
                 "model": "~advisor/integration",
                 "max_completion_tokens": 1024,
@@ -420,6 +435,7 @@ struct NIOProxyServerTests {
         request.setValue(envelopeHeader, forHTTPHeaderField: TutorRequestAdapter.headerName)
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": "test-model",
+            "stream": streaming,
             "messages": [["role": "user", "content": "test"]],
             "tools": [[
                 "type": "function",
@@ -427,8 +443,9 @@ struct NIOProxyServerTests {
             ]],
         ])
 
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(String(decoding: data, as: UTF8.self).contains("actual-advisor-call"))
 
         let capturedRequest = try #require(stub.requests().first)
         #expect(capturedRequest.headerValue(TutorRequestAdapter.headerName) == nil)
@@ -438,6 +455,16 @@ struct NIOProxyServerTests {
         #expect(tools.map { $0["type"] as? String } == [
             "function", "openrouter:advisor", "openrouter:subagent",
         ])
+        #expect((captured["tool_choice"] as? [String: String])?["type"] == "openrouter:advisor")
+        let events = try SessionReportStore.readEvents(from: reportURL)
+        #expect(events.count == 1)
+        #expect(events[0].record.model == "returned-lead")
+        #expect(events[0].record.promptTokens == 12)
+        #expect(events[0].record.completionTokens == 7)
+        #expect(events[0].record.providerReportedCostUSD == 0.006)
+        #expect(events[0].record.serverToolCalls?.count == 1)
+        #expect(events[0].record.serverToolCalls?.first?.returnedModel == "returned-advisor")
+        #expect(events[0].record.serverToolCalls?.first?.promptTokens == nil)
 
         try await server.stop()
         try await stub.stop()

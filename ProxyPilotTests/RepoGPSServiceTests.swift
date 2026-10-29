@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import ProxyPilot
 
 final class RepoGPSServiceTests: XCTestCase {
@@ -72,6 +73,178 @@ final class RepoGPSServiceTests: XCTestCase {
         XCTAssertEqual(status.previousVersion, "0.1.0")
         XCTAssertEqual(status.behaviorPackVersion, "1")
         XCTAssertTrue(status.engineReady)
+    }
+
+    func testOldMissingAndExternalStatusRemainBackwardCompatible() throws {
+        let old = try XCTUnwrap(RepoGPSService.parseDistributionStatus(Data(#"{"installed":true,"ownership":"managed","current_version":"0.5.0","engine_ready":true}"#.utf8)))
+        XCTAssertNil(old.integrity)
+        XCTAssertNil(old.pathConfigured)
+        XCTAssertFalse(old.needsRepair)
+        XCTAssertEqual(old.primaryAction, .maintain)
+        XCTAssertEqual(RepoGPSService.DistributionStatus.missing.primaryAction, .install)
+
+        let external = try XCTUnwrap(RepoGPSService.parseDistributionStatus(Data(#"{"installed":true,"ownership":"external","engine_ready":false,"integrity":"unverifiable","repair_required":true}"#.utf8)))
+        XCTAssertFalse(external.needsRepair)
+        XCTAssertEqual(external.primaryAction, .adopt)
+    }
+
+    func testDamagedManagedPayloadOffersRepairEvenWhenExecutableIsMissing() throws {
+        let status = try XCTUnwrap(RepoGPSService.parseDistributionStatus(Data(#"{"installed":false,"ownership":"managed","current_version":"0.8.1","engine_ready":true,"payload_present":false,"integrity":"unverifiable","repair_required":true,"issue":"Missing executable","path_configured":false,"path_remediation":"export PATH='/Users/tester/.local/bin':\"$PATH\""}"#.utf8)))
+        XCTAssertTrue(status.needsRepair)
+        XCTAssertEqual(status.primaryAction, .repair)
+        XCTAssertEqual(status.issue, "Missing executable")
+        XCTAssertEqual(status.pathGuidance, #"export PATH='/Users/tester/.local/bin':"$PATH""#)
+
+        let corrupt = try XCTUnwrap(RepoGPSService.parseDistributionStatus(Data(#"{"installed":true,"ownership":"managed","current_version":"0.8.1","engine_ready":true,"payload_present":true,"integrity":"unverifiable","repair_required":false}"#.utf8)))
+        XCTAssertTrue(corrupt.needsRepair)
+        XCTAssertEqual(corrupt.primaryAction, .repair)
+        let orphaned = try XCTUnwrap(RepoGPSService.parseDistributionStatus(Data(#"{"installed":false,"ownership":"missing","engine_ready":false,"payload_present":true,"repair_required":true}"#.utf8)))
+        XCTAssertEqual(orphaned.primaryAction, .repair)
+    }
+
+    func testHealthyPayloadAndConfiguredPathDoNotShowRecoveryGuidance() throws {
+        let status = try XCTUnwrap(RepoGPSService.parseDistributionStatus(Data(#"{"installed":true,"ownership":"managed","current_version":"0.8.1","engine_ready":true,"payload_present":true,"integrity":"verified","repair_required":false,"path_configured":true,"path_remediation":"stale command"}"#.utf8)))
+        XCTAssertFalse(status.needsRepair)
+        XCTAssertEqual(status.primaryAction, .maintain)
+        XCTAssertNil(status.pathGuidance)
+    }
+
+    func testRecoverySelectsMatchingNewerInstalledPayloadAndRefusesDowngrade() {
+        let installed = RepoGPSService.PayloadCandidate(payload: URL(fileURLWithPath: "/tmp/versions/0.8.1"), version: "0.8.1", bundled: false)
+        let oldBundle = RepoGPSService.PayloadCandidate(payload: URL(fileURLWithPath: "/tmp/app/payload"), version: "0.5.0", bundled: true)
+        XCTAssertEqual(RepoGPSService.preferredPayload([oldBundle, installed], currentVersion: "0.8.1"), installed)
+        XCTAssertNil(RepoGPSService.preferredPayload([oldBundle], currentVersion: "0.8.1"))
+        var sameVersionBundle = oldBundle
+        sameVersionBundle.version = "0.8.1"
+        XCTAssertEqual(RepoGPSService.preferredPayload([sameVersionBundle, installed], currentVersion: "0.8.1"), installed)
+        var newerBundle = oldBundle
+        newerBundle.version = "0.8.2"
+        XCTAssertEqual(RepoGPSService.preferredPayload([installed, newerBundle], currentVersion: "0.8.1"), newerBundle)
+    }
+
+    func testPayloadVerificationRejectsCorruptionVersionMismatchAndSymlink() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try makePayload(at: root, version: "0.8.1")
+        XCTAssertEqual(RepoGPSService.verifiedPayload(at: root, bundled: false)?.executable, root.appendingPathComponent("bin/rgps"))
+        try Data("modified executable".utf8).write(to: root.appendingPathComponent("bin/rgps"))
+        XCTAssertNil(RepoGPSService.verifiedPayload(at: root, bundled: false))
+        try makePayload(at: root, version: "0.8.1", executableVersion: "0.5.0")
+        XCTAssertNil(RepoGPSService.verifiedPayload(at: root, bundled: false))
+        try makePayload(at: root, version: "0.8.1")
+        let binary = root.appendingPathComponent("bin/rgps")
+        let renamed = root.appendingPathComponent("bin/real-rgps")
+        try FileManager.default.moveItem(at: binary, to: renamed)
+        try FileManager.default.createSymbolicLink(at: binary, withDestinationURL: renamed)
+        XCTAssertNil(RepoGPSService.verifiedPayload(at: root, bundled: false))
+    }
+
+    @MainActor
+    func testRefreshFallsBackToVerifiedBundleAndRepairDoesNotDowngradeDamagedNewerInstall() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".repogps/versions/0.8.1/bin"), withIntermediateDirectories: true)
+        try Data(#"{"current_version":"0.8.1"}"#.utf8).write(to: home.appendingPathComponent(".repogps/distribution.json"))
+        let bundle = try makeBundle(at: root.appendingPathComponent("Fixture.bundle"))
+        let payload = try XCTUnwrap(bundle.resourceURL).appendingPathComponent("RepoGPSPayload")
+        let status = #"{"installed":false,"ownership":"managed","current_version":"0.8.1","engine_ready":false,"payload_present":true,"integrity":"unverifiable","repair_required":true,"issue":"Missing executable"}"#
+        try makePayload(at: payload, version: "0.5.0", script: "#!/bin/sh\nprintf '%s' '" + status + "'\n")
+        let service = RepoGPSService(home: home, bundle: bundle, cliActivator: { nil })
+        await service.refresh()
+        XCTAssertEqual(service.distribution.currentVersion, "0.8.1")
+        XCTAssertEqual(service.distribution.primaryAction, .repair)
+        XCTAssertFalse(service.isInstalledAndCompatible)
+        await service.repair()
+        XCTAssertTrue(service.lastError?.contains("older bundled fallback was not installed") == true)
+        XCTAssertEqual(try String(contentsOf: home.appendingPathComponent(".repogps/distribution.json"), encoding: .utf8), #"{"current_version":"0.8.1"}"#)
+    }
+
+    @MainActor
+    func testMonitoringInvalidatesVerifiedControlWhenExecutableChanges() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("home")
+        let payload = home.appendingPathComponent(".repogps/versions/0.8.1")
+        let status = #"{"installed":true,"ownership":"managed","current_version":"0.8.1","engine_ready":true}"#
+        try makePayload(at: payload, version: "0.8.1", script: "#!/bin/sh\nprintf '%s' '" + status + "'\n")
+        try Data(#"{"current_version":"0.8.1"}"#.utf8).write(to: home.appendingPathComponent(".repogps/distribution.json"))
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".repogps/bin"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".local/bin"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent(".repogps/bin/rgps"), withDestinationURL: payload.appendingPathComponent("bin/rgps"))
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent(".local/bin/rgps"), withDestinationURL: home.appendingPathComponent(".repogps/bin/rgps"))
+        let service = RepoGPSService(home: home, bundle: Bundle(for: Self.self), cliActivator: { nil })
+        await service.refresh()
+        XCTAssertFalse(service.distribution.needsRepair)
+        try Data("#!/bin/sh\ntouch \"$RGPS_HOME/corrupt-executed\"\n".utf8).write(to: payload.appendingPathComponent("bin/rgps"))
+        await service.refresh()
+        XCTAssertEqual(service.distribution.ownership, "managed")
+        XCTAssertTrue(service.distribution.needsRepair)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("corrupt-executed").path))
+    }
+
+    @MainActor
+    func testCorruptLegacyDirectVersionShimRemainsManagedAndOffersRepair() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("home")
+        let payload = home.appendingPathComponent(".repogps/versions/0.8.1")
+        try makePayload(at: payload, version: "0.8.1")
+        try Data("corrupted executable".utf8).write(to: payload.appendingPathComponent("bin/rgps"))
+        try Data(#"{"current_version":"0.8.1"}"#.utf8).write(to: home.appendingPathComponent(".repogps/distribution.json"))
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".local/bin"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent(".local/bin/rgps"), withDestinationURL: payload.appendingPathComponent("bin/rgps"))
+        let service = RepoGPSService(home: home, bundle: Bundle(for: Self.self), cliActivator: { nil })
+        await service.refresh()
+        XCTAssertEqual(service.distribution.ownership, "managed")
+        XCTAssertEqual(service.distribution.currentVersion, "0.8.1")
+        XCTAssertTrue(service.distribution.needsRepair)
+        XCTAssertEqual(service.distribution.primaryAction, .repair)
+    }
+
+    @MainActor
+    func testRepairRunsVerifiedInstalledControlWithMatchingPayloadAndIsolatedHome() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("home")
+        let installedPayload = home.appendingPathComponent(".repogps/versions/0.8.1")
+        let status = #"{"installed":true,"ownership":"managed","current_version":"0.8.1","engine_ready":true,"payload_present":true,"integrity":"verified","repair_required":false}"#
+        let script = """
+        #!/bin/sh
+        if [ "$1" = distribution ] && [ "$2" = repair ]; then
+          printf '%s\\n' "$@" > "$RGPS_HOME/repair-arguments"
+          printf '%s' "$RGPS_HOME" > "$RGPS_HOME/command-home"
+        fi
+        printf '%s' '\(status)'
+        """ + "\n"
+        try makePayload(at: installedPayload, version: "0.8.1", script: script)
+        try Data(#"{"current_version":"0.8.1"}"#.utf8).write(to: home.appendingPathComponent(".repogps/distribution.json"))
+        let service = RepoGPSService(home: home, bundle: Bundle(for: Self.self), cliActivator: { nil })
+        await service.repair()
+        XCTAssertNil(service.lastError)
+        XCTAssertEqual(try String(contentsOf: home.appendingPathComponent("command-home"), encoding: .utf8), home.path)
+        let arguments = try String(contentsOf: home.appendingPathComponent("repair-arguments"), encoding: .utf8).split(separator: "\n").map(String.init)
+        XCTAssertEqual(arguments, ["distribution", "repair", "--payload", installedPayload.path, "--json"])
+        XCTAssertTrue(service.lastReceipt?.contains("verified installed payload") == true)
+    }
+
+    private func makePayload(at root: URL, version: String, executableVersion: String? = nil, script: String = "#!/bin/sh\nexit 0\n") throws {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("bin"), withIntermediateDirectories: true)
+        let binary = root.appendingPathComponent("bin/rgps")
+        let bytes = Data(script.utf8)
+        try bytes.write(to: binary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let manifest: [String: Any] = ["schema_version": 1, "payload_version": version, "repogps_version": executableVersion ?? version,
+                                       "files": [["path": "bin/rgps", "sha256": digest, "executable": true]]]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: root.appendingPathComponent("payload.json"))
+    }
+
+    private func makeBundle(at root: URL) throws -> Bundle {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Contents/Resources"), withIntermediateDirectories: true)
+        let info = ["CFBundleIdentifier": "dev.slicewrite.repogps.test." + UUID().uuidString, "CFBundlePackageType": "BNDL"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: root.appendingPathComponent("Contents/Info.plist"))
+        return try XCTUnwrap(Bundle(url: root))
     }
 
     func testIndependentUpdateContractDecodesSignedFeedStatus() throws {

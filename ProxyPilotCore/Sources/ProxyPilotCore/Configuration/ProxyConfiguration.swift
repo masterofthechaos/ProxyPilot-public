@@ -25,6 +25,19 @@ public struct ProxyConfiguration: Sendable {
     public let promptCaching: PromptCachingConfiguration
     public let contextCompaction: ContextCompactionConfiguration
     public let sessionID: String
+    /// Per-request, owner-selected Tutor override; nil preserves ordinary policy.
+    public var upstreamRequestTimeout: TimeInterval?
+
+    public var effectiveUpstreamRequestTimeout: TimeInterval {
+        guard let timeout = upstreamRequestTimeout, timeout.isFinite, timeout > 0 else { return 30 }
+        return timeout
+    }
+
+    public func withUpstreamRequestTimeout(_ timeout: TimeInterval?) -> Self {
+        var result = self
+        result.upstreamRequestTimeout = timeout
+        return result
+    }
 
     /// Protected routes must authenticate whenever an upstream credential would
     /// be exercised, even if a caller forgot to set the explicit preference.
@@ -53,6 +66,7 @@ public struct ProxyConfiguration: Sendable {
         inputOutputLoggerProvider: (@Sendable () -> InputOutputLoggingRecorder?)? = nil,
         promptCaching: PromptCachingConfiguration = .default,
         contextCompaction: ContextCompactionConfiguration = .disabled,
+        upstreamRequestTimeout: TimeInterval? = nil,
         sessionID: String = UUID().uuidString
     ) {
         self.host = host
@@ -73,6 +87,7 @@ public struct ProxyConfiguration: Sendable {
         self.promptCaching = promptCaching
         self.contextCompaction = contextCompaction
         self.sessionID = sessionID
+        self.upstreamRequestTimeout = upstreamRequestTimeout
     }
 
     /// Convenience initializer for callers that already hold a resolved recorder
@@ -97,6 +112,7 @@ public struct ProxyConfiguration: Sendable {
         inputOutputLogger: InputOutputLoggingRecorder?,
         promptCaching: PromptCachingConfiguration = .default,
         contextCompaction: ContextCompactionConfiguration = .disabled,
+        upstreamRequestTimeout: TimeInterval? = nil,
         sessionID: String = UUID().uuidString
     ) {
         let provider: (@Sendable () -> InputOutputLoggingRecorder?)?
@@ -123,6 +139,7 @@ public struct ProxyConfiguration: Sendable {
             inputOutputLoggerProvider: provider,
             promptCaching: promptCaching,
             contextCompaction: contextCompaction,
+            upstreamRequestTimeout: upstreamRequestTimeout,
             sessionID: sessionID
         )
     }

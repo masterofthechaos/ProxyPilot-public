@@ -191,6 +191,70 @@ final class LocalProxyServerTests: XCTestCase {
     }
 
     @MainActor
+    func testTutorServerReceiptsSurviveBothGUIChatTransports() async throws {
+        for streaming in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let report = root.appendingPathComponent("report.jsonl")
+            let responseObject: [String: Any] = ["id": "tutor-fixture", "model": "returned-lead",
+                "messages": [
+                    ["role": "assistant", "tool_calls": [["id": "server-1", "type": "function", "function": ["name": "openrouter_advisor", "arguments": "{}"]]]],
+                    ["role": "tool", "tool_call_id": "server-1", "content": #"{"status":"ok","model":"returned-advisor","advice":"Check the invariant."}"#],
+                ], "choices": [["message": ["role": "assistant", "content": "Done"]]],
+                "usage": ["prompt_tokens": 12, "completion_tokens": 7, "cost": 0.006]]
+            let payload = String(decoding: try JSONSerialization.data(withJSONObject: responseObject, options: [.sortedKeys]), as: UTF8.self)
+            let upstream = LocalHTTPStubServer(body: streaming ? "data: \(payload)\n\ndata: [DONE]\n\n" : payload,
+                contentType: streaming ? "text/event-stream" : "application/json")
+            let upstreamPort = try await upstream.start()
+            defer { upstream.stop() }
+            let server = LocalProxyServer(sessionReportURL: report)
+            let port = try unusedLoopbackPort()
+            try server.start(config: .init(host: "127.0.0.1", port: port, masterKey: "test",
+                upstreamProvider: .openRouter, upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+                upstreamAPIKey: "fixture-key", allowedModels: ["test-model"], requiresAuth: false,
+                anthropicTranslatorMode: .hardened, miniMaxRoutingMode: .standard,
+                preferredAnthropicUpstreamModel: "test-model", googleThoughtSignatureStore: nil))
+            defer { try? server.stop() }
+            await waitForLocalProxyToRun(server)
+            let session = UUID().uuidString.lowercased()
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
+            request.setValue("repogps", forHTTPHeaderField: "X-ProxyPilot-Client")
+            request.setValue(session, forHTTPHeaderField: "X-ProxyPilot-Session-ID")
+            let envelope: [String: Any] = ["version": 1, "backend": "openrouter", "consultation_policy": "required",
+                "advisor": ["model": "configured-advisor", "max_completion_tokens": 4096, "max_tool_calls": 3],
+                "worker": ["model": "configured-worker", "max_completion_tokens": 2048, "max_tool_calls": 5],
+                "worker_web_access": false]
+            request.setValue(try JSONSerialization.data(withJSONObject: envelope).base64EncodedString(), forHTTPHeaderField: TutorRequestAdapter.headerName)
+            request.httpBody = jsonBody(["model": "test-model", "stream": streaming, "messages": [["role": "user", "content": "fixture"]],
+                "tools": [["type": "function", "function": ["name": "read_file", "parameters": ["type": "object"]]]]])
+            let (data, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("server-1"))
+            let sent = try XCTUnwrap(upstream.requests().first)
+            XCTAssertNil(sent.headerValue(TutorRequestAdapter.headerName))
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(sent.body.utf8)) as? [String: Any])
+            XCTAssertEqual((body["tool_choice"] as? [String: String])?["type"], "openrouter:advisor")
+            XCTAssertEqual((body["tools"] as? [[String: Any]])?.compactMap { $0["type"] as? String }, ["function", "openrouter:advisor", "openrouter:subagent"])
+            var recorded: SessionReportEvent?
+            for _ in 0..<200 {
+                recorded = try SessionReportStore.readEvents(from: report).first { $0.sessionID == session }
+                if recorded != nil { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let event = try XCTUnwrap(recorded)
+            XCTAssertEqual(event.record.requestedModel, "test-model")
+            XCTAssertEqual(event.record.providerReportedCostUSD, 0.006)
+            XCTAssertEqual(event.record.serverToolCalls?.count, 1)
+            XCTAssertEqual(event.record.serverToolCalls?.first?.returnedModel, "returned-advisor")
+            XCTAssertNil(event.record.serverToolCalls?.first?.promptTokens)
+            XCTAssertEqual(event.record.promptTokens, 12)
+        }
+    }
+
+    @MainActor
     func testBothRoutesPreserveLeadAndNavigatorInDurableJournal() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -513,7 +577,7 @@ final class LocalProxyServerTests: XCTestCase {
         return UInt16(bigEndian: boundAddress.sin_port)
     }
 
-    private func waitForLocalProxyToRun(_ server: LocalProxyServer) async {
+    private nonisolated(nonsending) func waitForLocalProxyToRun(_ server: LocalProxyServer) async {
         for _ in 0..<30 {
             let isRunning = await MainActor.run { server.state.isRunning }
             if isRunning { return }

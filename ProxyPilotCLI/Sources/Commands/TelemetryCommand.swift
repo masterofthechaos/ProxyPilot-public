@@ -20,6 +20,9 @@ struct TelemetryCommand: ParsableCommand {
         let reportedCostAvailable = events.contains { $0.record.providerReportedCostUSD != nil }
         let estimates = events.compactMap { event -> Double? in
             guard event.record.providerReportedCostUSD == nil,
+                  // An outer Tutor aggregate can contain other models. A
+                  // lead catalog rate cannot price that missing decomposition.
+                  event.record.serverToolCalls == nil,
                   let providerID = event.record.providerIdentifier,
                   let provider = UpstreamProvider(rawValue: providerID),
                   let metadata = provider.knownModelMetadata(for: event.record.model) else { return nil }
@@ -44,12 +47,24 @@ struct TelemetryCommand: ParsableCommand {
             "total_tokens": telemetry.totalTokens,
             "models": telemetry.models,
             "model_breakdown": modelBreakdown,
+            "model_breakdown_scope": "outer_returned_model_not_nested_execution",
             "role_breakdown": roleBreakdown,
+            "role_breakdown_scope": "outer_request_attribution",
+            "nested_role_breakdown": TutorResponseAccounting.nestedBreakdown(records: events.map(\.record)),
+            "nested_accounting": [
+                "schema_version": 1,
+                "observed_requests": events.filter { $0.record.serverToolCalls != nil }.count,
+                "totals_policy": "outer_request_only",
+                "missing_per_call_usage": "unavailable; never inferred from outer totals",
+            ],
             "legacy_role_breakdown_available": !events.contains { $0.role == nil },
             "cache_accounting_available": telemetry.cacheAccountingAvailable,
             "cost": [
                 "provider_reported_usd": providerCostValue,
                 "estimated_usd": estimatedCostValue,
+                "provider_reported_requests": events.filter { $0.record.providerReportedCostUSD != nil }.count,
+                "estimated_requests": estimates.count,
+                "unpriced_requests": events.filter { $0.record.providerReportedCostUSD == nil }.count - estimates.count,
                 "provenance": reportedCostAvailable ? "mixed_or_provider_reported" : (estimates.isEmpty ? "unavailable" : "provider_known_catalog_estimate"),
             ],
         ]
