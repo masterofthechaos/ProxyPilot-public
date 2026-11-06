@@ -843,10 +843,13 @@ struct SessionHistoryView: View {
                     }
 
                 case .cliCaptureDisabled:
-                    Text("Input & Output Logging is enabled for the app, but CLI/MCP capture is off. ProxyPilot can show this session's report-card metadata, but it did not save prompt or output bodies for CLI traffic. Enable logging for ProxyPilot CLI in Advanced before starting a CLI or MCP session if you want future CLI/MCP prompt and output records to appear here.")
+                    Text("Input & Output Logging is enabled for the app, but CLI/MCP capture is off. ProxyPilot can show this session's report-card metadata, but it did not save prompt or output bodies for CLI traffic. Enable logging for ProxyPilot CLI in Settings → Privacy & Logging before starting a CLI or MCP session if you want future CLI/MCP prompt and output records to appear here.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    Button("Open Input & Output Logging Settings", action: onOpenAdvancedLogging)
+                        .font(.caption)
 
                 case .enabledWaitingForRecords:
                     Text("Full logging is enabled for this session source, but this session does not have saved prompt/output records. New records with matching session metadata will appear here as they are captured.")

@@ -2,6 +2,50 @@ import Testing
 import Foundation
 @testable import ProxyPilotCore
 
+@Test func midConversationSystemInstructionsRemainSystemPriorityAndToolsStayOrdered() throws {
+    let original: [String: Any] = ["system": "Initial", "messages": [
+        ["role": "user", "content": "hello"],
+        ["role": "system", "content": [["type": "text", "text": "Agent context"]]],
+        ["role": "assistant", "content": [["type": "tool_use", "id": "call1", "name": "read", "input": [:]]]],
+        ["role": "user", "content": [["type": "tool_result", "tool_use_id": "call1", "content": "result"]]]
+    ] as [[String: Any]]]
+    let translated = AnthropicTranslator.requestToOpenAI(original)
+    let messages = try #require(translated["messages"] as? [[String: Any]])
+    #expect(messages.compactMap { $0["role"] as? String } == ["system", "user", "assistant", "tool"])
+    #expect(messages.first?["content"] as? String == "Initial\n\nAgent context")
+    #expect(messages.last?["tool_call_id"] as? String == "call1")
+    let calls = messages[2]["tool_calls"] as? [[String: Any]]
+    #expect(calls?.first?["id"] as? String == "call1")
+}
+
+@Test func strictChatNormalizationPreservesStructuredSystemBlocksAndScopesEndpoint() throws {
+    let messages: [[String: Any]] = [
+        ["role": "system", "content": "Initial"],
+        ["role": "user", "content": "hello"],
+        ["role": "system", "content": [["type": "text", "text": "Additional", "cache_control": ["type": "ephemeral"]]]]
+    ]
+    let body = try JSONSerialization.data(withJSONObject: ["messages": messages, "temperature": 0.5])
+    #expect(AnthropicTranslator.normalizeStrictChatRequest(body, provider: .openAI, baseURL: "https://api.example.com") == body)
+    #expect(AnthropicTranslator.normalizeStrictChatRequest(body, provider: .openAI, baseURL: "https://api.cerebras.ai.evil.example") == body)
+    for (provider, url) in [(UpstreamProvider.cerebras, "http://localhost"), (.openAI, "https://api.cerebras.ai/v1")] {
+        let normalized = AnthropicTranslator.normalizeStrictChatRequest(body, provider: provider, baseURL: url)
+        let payload = try #require(JSONSerialization.jsonObject(with: normalized) as? [String: Any])
+        let result = try #require(payload["messages"] as? [[String: Any]])
+        #expect(result.compactMap { $0["role"] as? String } == ["system", "user"])
+        let blocks = try #require(result.first?["content"] as? [[String: Any]])
+        #expect(blocks.compactMap { $0["text"] as? String } == ["Initial", "Additional"])
+        #expect((blocks.last?["cache_control"] as? [String: String])?["type"] == "ephemeral")
+        #expect(payload["temperature"] as? Double == 0.5)
+    }
+}
+
+@Test func malformedSystemContentIsNotSilentlyDiscarded() throws {
+    let messages: [[String: Any]] = [["role": "user", "content": "hi"], ["role": "system", "content": 42]]
+    let result = AnthropicTranslator.leadingSystemMessages(messages)
+    #expect(result.count == 2)
+    #expect(result.last?["content"] as? Int == 42)
+}
+
 // MARK: - SSE Parsing Helper
 
 private func parseSSE(_ sse: String) throws -> (event: String, data: [String: Any]) {

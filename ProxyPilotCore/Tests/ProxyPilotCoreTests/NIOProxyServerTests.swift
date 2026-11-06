@@ -1616,5 +1616,114 @@ struct NIOProxyServerTests {
         try await server.stop()
         try await stub.stop()
     }
+    @Test(arguments: [false, true], [false, true])
+    func omlxHTTPContract(nativeMessages: Bool, streaming: Bool) async throws {
+        let path = nativeMessages ? "/v1/messages" : "/v1/chat/completions"
+        let model = "local-fixture"
+        let nativeHistory: [[String: Any]] = [
+            ["role": "user", "content": "Read a and report its content."],
+            ["role": "assistant", "content": [["type": "redacted_thinking", "data": "opaque"], ["type": "tool_use", "id": "call_1", "name": "read", "input": ["path": "a"]]]],
+            ["role": "user", "content": [["type": "tool_result", "tool_use_id": "call_1", "content": "hello"]]]
+        ]
+        let chatHistory: [[String: Any]] = [
+            ["role": "user", "content": "Read a and report its content."],
+            ["role": "assistant", "content": NSNull(), "tool_calls": [["id": "call_1", "type": "function", "function": ["name": "read", "arguments": "{\"path\":\"a\"}"]]]],
+            ["role": "tool", "tool_call_id": "call_1", "content": "hello"]
+        ]
+        let messages = nativeMessages ? nativeHistory : chatHistory
+        let nativeResponse = #"{"id":"msg_omlx","type":"message","role":"assistant","model":"local-fixture","content":[{"type":"redacted_thinking","data":"opaque"},{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"cache_read_input_tokens":4,"output_tokens":2}}"#
+        let chatResponse = #"{"id":"chatcmpl-omlx","model":"local-fixture","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens":2}}"#
+        let nativeSSE = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_omlx\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"local-fixture\",\"content\":[],\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":4,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        let chatSSE = "data: {\"id\":\"chatcmpl-omlx\",\"model\":\"local-fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-omlx\",\"model\":\"local-fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":4},\"completion_tokens\":2}}\n\ndata: [DONE]\n\n"
+        let responseBody = streaming ? (nativeMessages ? nativeSSE : chatSSE) : (nativeMessages ? nativeResponse : chatResponse)
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(statusCode: 200, body: responseBody, requireJSONRequest: true, contentType: streaming ? "text/event-stream" : "application/json")
+        let stats = SessionStats()
+        let server = NIOProxyServer()
+        let port = try await server.start(config: ProxyConfiguration(port: 0, upstreamProvider: .omlx,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)/v1", upstreamAPIKey: "omlx-test-key", masterKey: "test", requiresAuth: false, preferredAnthropicUpstreamModel: model, sessionStats: stats))
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var payload: [String: Any] = ["model": model, "max_tokens": 4096, "messages": messages, "stream": streaming]
+        if nativeMessages {
+            payload["thinking"] = ["type": "adaptive"]
+            payload["output_config"] = ["effort": "high"]
+            payload["top_k"] = 10
+        } else {
+            payload["reasoning_effort"] = "high"
+            payload["stop"] = ["unsupported"]
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(String(decoding: data, as: UTF8.self) == responseBody)
+        let captured = try #require(stub.requests().first)
+        #expect(captured.uri == path)
+        #expect(captured.headerValue("Authorization") == "Bearer omlx-test-key")
+        #expect(captured.headerValue("Accept") == (streaming ? "text/event-stream" : "application/json"))
+        let sent = try #require(JSONSerialization.jsonObject(with: Data(captured.body.utf8)) as? [String: Any])
+        #expect(NSDictionary(dictionary: ["messages": sent["messages"]!]).isEqual(to: ["messages": messages]))
+        #expect(sent["top_k"] as? Int == (nativeMessages ? 10 : nil))
+        #expect((sent["stop"] != nil) == !nativeMessages)
+        if nativeMessages {
+            #expect((sent["thinking"] as? [String: String])?["type"] == "adaptive")
+            #expect((sent["output_config"] as? [String: String])?["effort"] == "high")
+        } else {
+            #expect(sent["reasoning_effort"] as? String == "high")
+        }
+        let snapshot = await stats.snapshot()
+        #expect(snapshot.totalPromptCacheHitTokens == 4)
+        #expect(snapshot.totalCompletionTokens == 2)
+        #expect(snapshot.totalPromptTokens == (nativeMessages ? 14 : 10))
+        try await server.stop()
+        try await stub.stop()
+    }
+
+    @Test func cerebrasSystemInstructionsAcrossProtocolsAndStreaming() async throws {
+        for nativeMessages in [false, true] {
+            for streaming in [false, true] {
+                try await assertCerebrasSystemInstructions(nativeMessages: nativeMessages, streaming: streaming)
+            }
+        }
+    }
+
+    private func assertCerebrasSystemInstructions(nativeMessages: Bool, streaming: Bool) async throws {
+        let responseBody = streaming
+            ? "data: {\"id\":\"fixture\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"fixture\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+            : #"{"id":"fixture","model":"fixture-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#
+        let upstream = StubUpstream()
+        let upstreamPort = try await upstream.start(statusCode: 200, body: responseBody, contentType: streaming ? "text/event-stream" : "application/json")
+        let server = NIOProxyServer()
+        let config = ProxyConfiguration(port: 0, upstreamProvider: .cerebras,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)/v1", upstreamAPIKey: "upstream-fixture",
+            masterKey: "local-fixture", allowedModels: ["fixture-model"], requiresAuth: true,
+            preferredAnthropicUpstreamModel: "fixture-model")
+        let port = try await server.start(config: config)
+        let path = nativeMessages ? "/v1/messages" : "/v1/chat/completions"
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer local-fixture", forHTTPHeaderField: "Authorization")
+        let history: [[String: Any]] = [["role": "user", "content": "hello"], ["role": "system", "content": "extra"]]
+        var payload: [String: Any] = ["model": "fixture-model", "messages": history, "stream": streaming, "max_tokens": 32]
+        if nativeMessages { payload["system"] = "base" }
+        else { payload["messages"] = [["role": "system", "content": "base"]] + history }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(String(decoding: data, as: UTF8.self).contains("ok"))
+        let captured = try #require(upstream.requests().first)
+        #expect(captured.uri == "/v1/chat/completions")
+        #expect(captured.headerValue("Authorization") == "Bearer upstream-fixture")
+        let sent = try #require(JSONSerialization.jsonObject(with: Data(captured.body.utf8)) as? [String: Any])
+        let messages = try #require(sent["messages"] as? [[String: Any]])
+        #expect(messages.compactMap { $0["role"] as? String } == ["system", "user"])
+        #expect(messages.first?["content"] as? String == "base\n\nextra")
+        #expect(messages.last?["content"] as? String == "hello")
+        try await server.stop()
+        try await upstream.stop()
+    }
 
 }

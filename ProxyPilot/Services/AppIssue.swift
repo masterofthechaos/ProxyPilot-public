@@ -20,6 +20,7 @@ struct AppIssue: Identifiable, Equatable, Error {
         case upstreamUnauthorized = "E006"
         case upstreamTimeout = "E007"
         case requestTooLarge = "E008"
+        case noProviderSelected = "E009"
         case generic = "E999"
     }
 
@@ -73,5 +74,18 @@ struct AppIssue: Identifiable, Equatable, Error {
 
     var id: String {
         "\(code.rawValue)-\(title)-\(message)"
+    }
+}
+
+extension AppIssue {
+    /// E009: ProxyPilot has no default provider, so anything that would reach an
+    /// upstream refuses until the user chooses one.
+    static var noProviderSelected: AppIssue {
+        AppIssue(
+            code: .noProviderSelected,
+            title: String(localized: "No Provider Selected"),
+            message: String(localized: "Choose a provider in Keys & Providers or Models before starting the proxy or fetching models."),
+            actions: []
+        )
     }
 }

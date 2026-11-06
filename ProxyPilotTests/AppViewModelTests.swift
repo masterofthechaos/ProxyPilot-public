@@ -6,6 +6,70 @@ import ProxyPilotCore
 
 @MainActor
 final class AppViewModelTests: XCTestCase {
+    func testGradientPresetPersistsAndResets() {
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertEqual(vm.gradientPreset, .violet)
+        vm.gradientPreset = .sunset
+        XCTAssertEqual(defaults.string(forKey: ProxyPilotGradientPreset.defaultsKey), "sunset")
+        XCTAssertEqual(AppViewModel(defaults: defaults).gradientPreset, .sunset)
+        XCTAssertEqual(ProxyPilotGradientPreset.allCases.count, 2)
+        XCTAssertNotEqual(ProxyPilotGradientPreset.violet.hexColors, ProxyPilotGradientPreset.sunset.hexColors)
+    }
+
+    func testAgentSetupDoesNotClaimVerificationWithoutRegistration() {
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertFalse(vm.proxyPilotAgentSetupVerified)
+        XCTAssertEqual(vm.proxyPilotAgentSetupLabel, "Setup needed")
+        XCTAssertEqual(vm.xcodeAgentLiveRouteText, "Model list not checked")
+    }
+
+    func testFreshProviderSelectionDoesNotPersistPlaceholder() {
+        defaults.set(["old-openai-model"], forKey: ProviderManager.defaultModelsKey(for: .openAI))
+        let manager = ProviderManager(defaults: defaults, proxyService: ProxyService())
+        XCTAssertFalse(manager.hasSelectedBuiltInProvider)
+        XCTAssertTrue(manager.savedDefaultModels.isEmpty)
+        XCTAssertFalse(manager.hasUpstreamKey)
+        XCTAssertNil(defaults.string(forKey: ProviderManager.upstreamProviderDefaultsKey))
+        manager.upstreamProvider = .openRouter
+        XCTAssertTrue(manager.hasSelectedBuiltInProvider)
+        manager.clearProviderSelection()
+        XCTAssertFalse(manager.hasSelectedBuiltInProvider)
+        XCTAssertTrue(manager.savedDefaultModels.isEmpty)
+        XCTAssertFalse(manager.hasUpstreamKey)
+        XCTAssertNil(defaults.string(forKey: ProviderManager.upstreamProviderDefaultsKey))
+        XCTAssertTrue(manager.upstreamAPIBaseURLString.isEmpty)
+    }
+
+    func testLegacyZAISelectionMigrationRequiresKeyOnlyOnce() {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        XCTAssertNil(ProviderManager.initialProviderSelection(defaults: defaults, hasZAIKey: { false }))
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        XCTAssertEqual(ProviderManager.initialProviderSelection(defaults: defaults, hasZAIKey: { false }), .zAI)
+        defaults.removeObject(forKey: ProviderManager.noDefaultProviderMigrationKey)
+        XCTAssertEqual(ProviderManager.initialProviderSelection(defaults: defaults, hasZAIKey: { true }), .zAI)
+    }
+
+    func testUnselectedProviderBlocksProxyAndNetworkActions() async {
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertFalse(vm.hasSelectedProvider)
+        XCTAssertEqual(vm.selectedUpstreamSelection, .none)
+        XCTAssertThrowsError(try vm.buildBuiltInProxyConfig())
+        await vm.fetchUpstreamModels()
+        XCTAssertFalse(vm.hasSelectedProvider)
+    }
+
+    func testIssue26ProvidersArriveOnceWithoutRestoringOtherHiddenProviders() {
+        defaults.set(["openrouter"], forKey: AppViewModel.visibleKeysProvidersDefaultsKey)
+        defaults.set(true, forKey: AppViewModel.didMigrateQwenVisibleProviderDefaultsKey)
+        defaults.set(true, forKey: AppViewModel.didMigrateNineRouterVisibleProviderDefaultsKey)
+        defaults.set(true, forKey: AppViewModel.didMigrateMetaVisibleProviderDefaultsKey)
+        let migrated = AppViewModel.decodedVisibleKeysProviders(from: defaults, storedOrderRawValues: ["openrouter"])
+        XCTAssertEqual(migrated, [.openRouter, .cerebras, .omlx])
+        defaults.set(["openrouter"], forKey: AppViewModel.visibleKeysProvidersDefaultsKey)
+        let hiddenAfterUpgrade = AppViewModel.decodedVisibleKeysProviders(from: defaults, storedOrderRawValues: ["openrouter"])
+        XCTAssertEqual(hiddenAfterUpgrade, [.openRouter])
+    }
+
     func testMetaBecomesVisibleOnceForCustomizedLegacyProviderLists() {
         defaults.set(["openrouter"], forKey: AppViewModel.visibleKeysProvidersDefaultsKey)
         defaults.set(true, forKey: AppViewModel.didMigrateQwenVisibleProviderDefaultsKey)
@@ -99,6 +163,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testStartProxyOutOfRangePortReturnsE004() async {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         let vm = AppViewModel(defaults: defaults)
         vm.proxyURLString = "http://127.0.0.1:99999"
 
@@ -109,6 +175,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testInvalidUpstreamBaseProvidesResetAction() async {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         let vm = AppViewModel(defaults: defaults)
         vm.upstreamAPIBaseURLString = "not-a-valid-upstream-url"
 
@@ -151,23 +219,24 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(relaunched.liquidGlassEnabled)
     }
 
-    func testDockTileInteractiveDefaultsOff() {
+    func testDockTileInteractiveDefaultsOn() {
         let vm = AppViewModel(defaults: defaults)
 
-        XCTAssertFalse(vm.dockTileInteractiveEnabled)
+        XCTAssertTrue(vm.dockTileInteractiveEnabled)
     }
 
     func testDockTileInteractivePreferencePersists() {
         var vm: AppViewModel? = AppViewModel(defaults: defaults)
-        vm?.setDockTileInteractiveEnabled(true)
+        vm?.setDockTileInteractiveEnabled(false)
         vm = nil
 
         let relaunched = AppViewModel(defaults: defaults)
 
-        XCTAssertTrue(relaunched.dockTileInteractiveEnabled)
+        XCTAssertFalse(relaunched.dockTileInteractiveEnabled)
     }
 
     func testSetDockTileInteractiveEnabledFiresPostHogEventOnlyOnEnableTransition() {
+        defaults.set(false, forKey: "proxypilot.dockTileInteractiveEnabled")
         var capturedEvents: [(name: String, properties: [String: String])] = []
         let telemetryService = TelemetryService(
             defaults: defaults,
@@ -211,11 +280,11 @@ final class AppViewModelTests: XCTestCase {
 
     func testResetToFreshInstallResetsDockTileInteractivePreference() async {
         let vm = AppViewModel(defaults: defaults)
-        vm.setDockTileInteractiveEnabled(true)
+        vm.setDockTileInteractiveEnabled(false)
 
         await vm.resetToFreshInstall()
 
-        XCTAssertFalse(vm.dockTileInteractiveEnabled)
+        XCTAssertTrue(vm.dockTileInteractiveEnabled)
     }
 
     func testPromptCachingModeDefaultsToAutoAndPersists() {
@@ -252,6 +321,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testContextCompactionConfigurationIsFeatureGated() throws {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         // Ruleset v2 (2026-07-14 Xcode-wall capture) opens the MVP feature
         // gate, so the effective configuration follows the user preference.
         XCTAssertTrue(ContextCompactionFeatureGate.isAvailable)
@@ -343,6 +414,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testBuiltInProxyConfigCarriesPromptCachingMode() throws {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         let vm = AppViewModel(defaults: defaults)
         vm.promptCachingMode = .off
 
@@ -363,6 +436,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testBuiltInProxyConfigAutomaticallyProtectsStoredUpstreamKey() throws {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         try KeychainService.set("sk-test", forKey: .zaiAPIKey)
         let vm = AppViewModel(defaults: defaults)
         vm.requireLocalAuth = false
@@ -377,6 +452,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testBuiltInProxyConfigUsesExistingLocalCredentialForStoredUpstreamKey() throws {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         try KeychainService.set("sk-test", forKey: .zaiAPIKey)
         try KeychainService.set("local-secret", forKey: .litellmMasterKey)
         let vm = AppViewModel(defaults: defaults)
@@ -392,6 +469,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testBuiltInProxyConfigGeneratesCredentialWhenLocalAuthEnabled() throws {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         try KeychainService.set("sk-test", forKey: .zaiAPIKey)
         let vm = AppViewModel(defaults: defaults)
         vm.requireLocalAuth = true
@@ -667,7 +746,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(
             SettingsSection.availableSidebarSections(
                 repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled
-            ).contains(.routing)
+            ).contains(.harnesses)
         )
     }
 
@@ -840,7 +919,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.keysProviderOrder.first, .openAI)
         XCTAssertFalse(vm.keysProviderOrder.map(\.rawValue).contains("github-copilot"))
         XCTAssertEqual(vm.keysProviderOrder.count, KeysProviderViewItem.defaultOrder.count)
-        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .qwen, .nineRouter, .meta])
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .qwen, .nineRouter, .meta, .cerebras, .omlx])
     }
 
     func testKeysProviderCustomizationMigratesQwenIntoLegacyVisibleProvidersOnce() {
@@ -922,7 +1001,7 @@ final class AppViewModelTests: XCTestCase {
         let vm = AppViewModel(defaults: defaults)
 
         XCTAssertTrue(vm.keysProviderOrder.contains(.qwen))
-        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .qwen, .nineRouter, .meta])
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .qwen, .nineRouter, .meta, .cerebras, .omlx])
         XCTAssertTrue(defaults.bool(forKey: AppViewModel.didMigrateQwenVisibleProviderDefaultsKey))
     }
 
@@ -948,7 +1027,7 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertTrue(vm.keysProviderOrder.contains(.qwen))
         XCTAssertFalse(vm.visibleKeysProviders.contains(.qwen))
-        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .meta])
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .meta, .cerebras, .omlx])
     }
 
     func testKeysProviderCustomizationRespectsQwenHiddenAfterVisibilityOnlyMigration() {
@@ -965,7 +1044,7 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertTrue(vm.keysProviderOrder.contains(.qwen))
         XCTAssertFalse(vm.visibleKeysProviders.contains(.qwen))
-        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .meta])
+        XCTAssertEqual(vm.visibleKeysProviders, [.openAI, .meta, .cerebras, .omlx])
     }
 
 
@@ -1026,7 +1105,7 @@ final class AppViewModelTests: XCTestCase {
         vm.appearancePreference = .dark
         vm.proxyPilotAccentHex = "#FF2D55"
         vm.liquidGlassEnabled = false
-        vm.dockTileInteractiveEnabled = true
+        vm.dockTileInteractiveEnabled = false
         vm.showMenuBarExtra = false
         vm.menuBarSectionOrder = [.quickActions, .statusDetails, .updates, .modelPicker, .sessionStats]
         vm.visibleMenuBarSections = [.statusDetails]
@@ -1040,7 +1119,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.appearancePreference, .system)
         XCTAssertEqual(vm.proxyPilotAccentHex, ProxyPilotAccentColor.defaultHex)
         XCTAssertTrue(vm.liquidGlassEnabled)
-        XCTAssertFalse(vm.dockTileInteractiveEnabled)
+        XCTAssertTrue(vm.dockTileInteractiveEnabled)
         XCTAssertTrue(vm.showMenuBarExtra)
         XCTAssertEqual(vm.menuBarSectionOrder, MenuBarSection.defaultOrder)
         XCTAssertEqual(vm.visibleMenuBarSections, Set(MenuBarSection.defaultOrder))
@@ -1100,6 +1179,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testXcodeAgentModelSelectionIsStoredPerProvider() {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         let vm = AppViewModel(defaults: defaults)
         vm.selectedXcodeAgentModel = "glm-4.7"
 
@@ -1276,6 +1357,11 @@ final class AppViewModelTests: XCTestCase {
         vm.selectedXcodeAgentModel = "test-model"
         await vm.startProxy()
         XCTAssertEqual(vm.activeIssue?.code, .portInUse)
+        // The occupying socket belongs to the test host (this app), so E005 should say so.
+        XCTAssertTrue(
+            vm.activeIssue?.message.contains("PID \(getpid())") ?? false,
+            "E005 message should name the owning PID: \(vm.activeIssue?.message ?? "nil")"
+        )
         close(occupied)
         isOpen = false
         await vm.startProxy()
@@ -1412,6 +1498,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testSaveSelectedModelsAsDefaults() {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         let vm = AppViewModel(defaults: defaults)
         vm.upstreamModels = [
             UpstreamModel(id: "model-c", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
@@ -1427,6 +1515,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testSavedDefaultModelsLoadPerProvider() {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         defaults.set(["glm-5"], forKey: "proxypilot.defaultModels.zai")
         defaults.set(["grok-3"], forKey: "proxypilot.defaultModels.xai")
 
@@ -1454,6 +1544,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testFetchedModelsKeepSavedDefaultsPinnedAndVisible() {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         defaults.set(["default-live", "default-missing"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
         let manager = makeProviderManager()
 
@@ -1470,6 +1562,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testDefaultRowsCannotBeDeselected() {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         defaults.set(["pinned-model"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
         let manager = makeProviderManager()
         manager.applyFetchedUpstreamModels([
@@ -1483,6 +1577,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testClearSelectionKeepsDefaultModels() {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         defaults.set(["pinned-model"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
         let manager = makeProviderManager()
         manager.applyFetchedUpstreamModels([
@@ -1525,6 +1621,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testSaveDefaultsPromotesSelectedVisibleModels() {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         defaults.set(["existing-default"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
         let manager = makeProviderManager()
         manager.applyFetchedUpstreamModels([
@@ -1540,6 +1638,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testRemoveDefaultModelExplicitlyUnpinsAndDeselects() {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         defaults.set(["pinned-model"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
         let manager = makeProviderManager()
         manager.applyFetchedUpstreamModels([
@@ -1554,6 +1654,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testDefaultModelPinsAreProviderScoped() {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         defaults.set(["zai-default"], forKey: ProviderManager.defaultModelsKey(for: .zAI))
         defaults.set(["openrouter-default"], forKey: ProviderManager.defaultModelsKey(for: .openRouter))
         let manager = makeProviderManager()
@@ -1567,7 +1669,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(manager.isDefaultModel("openrouter-default"))
     }
 
-    func testExactoFilterShowsToolCapableModelsAsExactoVariantsForOpenRouter() {
+    func testLegacyExactoPreferenceDoesNotFilterOrRewriteCatalog() {
         let vm = AppViewModel(defaults: defaults)
         vm.upstreamProvider = .openRouter
         vm.upstreamModels = [
@@ -1577,9 +1679,9 @@ final class AppViewModelTests: XCTestCase {
         ]
         vm.exactoFilterEnabled = true
 
-        XCTAssertEqual(vm.filteredUpstreamModels.count, 2)
+        XCTAssertEqual(vm.filteredUpstreamModels.count, 3)
         XCTAssertEqual(vm.filteredUpstreamModels.map(\.id), [
-            "anthropic/claude-opus-4:exacto",
+            "anthropic/claude-opus-4", "meta/llama-3",
             "google/gemini-3.1-pro:exacto"
         ])
     }
@@ -1608,7 +1710,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.filteredUpstreamModels.count, 2)
     }
 
-    func testSelectAllRespectsExactoFilter() {
+    func testSelectAllIgnoresRetiredExactoFilter() {
         let vm = AppViewModel(defaults: defaults)
         vm.upstreamProvider = .openRouter
         vm.upstreamModels = [
@@ -1619,8 +1721,8 @@ final class AppViewModelTests: XCTestCase {
         vm.selectedUpstreamModels = []
 
         vm.selectAllUpstreamModels()
-        XCTAssertEqual(vm.selectedUpstreamModels, ["anthropic/claude-opus-4:exacto"])
-        XCTAssertEqual(vm.effectiveXcodeAgentModel, "anthropic/claude-opus-4:exacto")
+        XCTAssertEqual(vm.selectedUpstreamModels, ["anthropic/claude-opus-4", "meta/llama-3"])
+        XCTAssertEqual(vm.effectiveXcodeAgentModel, "anthropic/claude-opus-4")
     }
 
     func testExactoFilterPersistence() {
@@ -1630,6 +1732,8 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testProxySyncFallsBackToSavedDefaults() {
+        defaults.set("zai", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        defaults.set(true, forKey: ProviderManager.noDefaultProviderMigrationKey)
         defaults.set(["saved-model-1", "saved-model-2"], forKey: "proxypilot.defaultModels.zai")
         let vm = AppViewModel(defaults: defaults)
 
@@ -1709,7 +1813,7 @@ final class AppViewModelTests: XCTestCase {
     func testNoGenericGPTFallbackWithoutSavedOrProviderFallbackModels() {
         let vm = AppViewModel(defaults: defaults)
 
-        XCTAssertEqual(vm.upstreamProvider, .zAI)
+        XCTAssertFalse(vm.hasSelectedProvider)
         XCTAssertEqual(vm.effectiveXcodeAgentModel, "")
         XCTAssertTrue(vm.xcodeAgentModelCandidates.isEmpty)
         XCTAssertFalse(vm.canSyncProxyModels)
@@ -1745,13 +1849,13 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.canSyncProxyModels)
     }
 
-    func testRetiredProviderStoredSelectionFallsBackToDefault() {
+    func testRetiredProviderStoredSelectionRequiresChoice() {
         defaults.set("github-copilot", forKey: ProviderManager.upstreamProviderDefaultsKey)
 
         let vm = AppViewModel(defaults: defaults)
 
-        XCTAssertEqual(vm.upstreamProvider, .zAI)
-        XCTAssertEqual(defaults.string(forKey: ProviderManager.upstreamProviderDefaultsKey), UpstreamProvider.zAI.rawValue)
+        XCTAssertFalse(vm.hasSelectedProvider)
+        XCTAssertNil(defaults.string(forKey: ProviderManager.upstreamProviderDefaultsKey))
     }
 
     // MARK: - MiniMax Routing Mode (v1.4.16)

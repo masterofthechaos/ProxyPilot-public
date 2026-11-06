@@ -1,5 +1,7 @@
 import AppKit
 import Combine
+import QuartzCore
+import SwiftUI
 
 enum ProxyPilotDockActivity: Equatable {
     case inactive
@@ -87,8 +89,11 @@ enum ProxyPilotDockModelName {
 }
 
 enum ProxyPilotDockLEDMatrix {
-    static let dotPitch: CGFloat = 2.25
+    static let dotPitch: CGFloat = 1.8
+    static let dotDiameter: CGFloat = 1.4
     static let glyphAdvance: CGFloat = dotPitch * 6
+    /// Height of one 7-row glyph, from the bottom of the lowest dot to the top of the highest.
+    static let glyphHeight: CGFloat = (dotPitch * 6) + dotDiameter
 
     static func textWidth(_ text: String) -> CGFloat {
         guard !text.isEmpty else { return 0 }
@@ -145,16 +150,58 @@ enum ProxyPilotDockLEDMatrix {
     ]
 }
 
+/// Colors sampled from the three route nodes in the ProxyPilot app icon, so the
+/// Dock overlay reads as part of the icon rather than something pasted on top.
+enum ProxyPilotDockPalette {
+    private static var colors: [NSColor] {
+        let preset = ProxyPilotGradientPreset(rawValue: UserDefaults.standard.string(forKey: ProxyPilotGradientPreset.defaultsKey) ?? "") ?? .violet
+        return preset.colors.map { NSColor($0) }
+    }
+    static var pink: NSColor { colors[0] }
+    static var violet: NSColor { colors[1] }
+    static var indigo: NSColor { colors[2] }
+    static let ledLit = NSColor(srgbRed: 0.95, green: 0.92, blue: 1.0, alpha: 1)
+    static let failure = NSColor(srgbRed: 1.0, green: 0.36, blue: 0.42, alpha: 1)
+    static let housing = NSColor(srgbRed: 0.05, green: 0.0, blue: 0.10, alpha: 0.86)
+}
+
+/// Geometry of the icon shape macOS actually draws in the Dock.
+enum ProxyPilotDockGeometry {
+    /// macOS renders app icons as an 824/1024 squircle inset 100/1024 from the canvas edge.
+    static let iconInsetFraction: CGFloat = 100.0 / 1024.0
+    /// A continuous-corner rounded rect at 0.26 x side matches the system icon mask
+    /// to sub-pixel accuracy at 1024px (measured against NSWorkspace's rendered icon).
+    static let cornerRadiusFraction: CGFloat = 0.26
+
+    static func iconRect(in bounds: NSRect) -> NSRect {
+        bounds.insetBy(dx: bounds.width * iconInsetFraction, dy: bounds.height * iconInsetFraction)
+    }
+
+    static func squircle(in rect: NSRect) -> CGPath {
+        RoundedRectangle(cornerRadius: rect.width * cornerRadiusFraction, style: .continuous)
+            .path(in: rect)
+            .cgPath
+    }
+}
+
 @MainActor
 final class ProxyPilotDockTileView: NSView {
-    static let signRect = NSRect(x: 11, y: 9, width: 106, height: 23)
-    static let signHorizontalInset: CGFloat = 6
-    static let marqueeGap: CGFloat = 24
+    /// Model-name sign. Sits inside the squircle's bottom edge, above the activity ring.
+    static let signRect = NSRect(x: 22, y: 20, width: 84, height: 16)
+    static let signHorizontalInset: CGFloat = 4
+    static let marqueeGap: CGFloat = 18
+    /// Marquee speed in points per second.
+    static let marqueeSpeed: CGFloat = 12
+    static let ringLineWidth: CGFloat = 3.5
+    /// Seconds for the comet to travel once around the squircle.
+    static let ringLapDuration: CFTimeInterval = 1.8
+    static let frameInterval: TimeInterval = 1.0 / 20.0
 
     var presentation = ProxyPilotDockPresentation(activity: .inactive, modelLabel: "") {
         didSet {
             if presentation.modelLabel != oldValue.modelLabel {
                 scrollOffset = 0
+                marqueeStart = CACurrentMediaTime()
             }
             updateAnimation()
             needsDisplay = true
@@ -168,9 +215,15 @@ final class ProxyPilotDockTileView: NSView {
         }
     }
 
+    /// Position of the comet head around the perimeter, 0..<1. Driven by wall-clock
+    /// time while animating so a stalled frame never slows the lap.
+    var ringPhase: CGFloat = 0
+    /// Horizontal marquee offset in points.
+    var scrollOffset: CGFloat = 0
+
     private var animationTimer: Timer?
-    private var animationPhase: CGFloat = 0
-    private var scrollOffset: CGFloat = 0
+    private var animationStart: CFTimeInterval = 0
+    private var marqueeStart: CFTimeInterval = 0
 
     override var isFlipped: Bool { false }
 
@@ -179,11 +232,19 @@ final class ProxyPilotDockTileView: NSView {
         guard let icon = NSApp.applicationIconImage else { return }
         icon.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
 
-        guard presentation.activity != .inactive else { return }
-        drawActivityPerimeter()
+        guard presentation.activity != .inactive,
+              let context = NSGraphicsContext.current?.cgContext else { return }
+
+        // Everything below is clipped to the icon's own squircle, so no overlay can
+        // spill past the icon edge into the Dock.
+        let iconRect = ProxyPilotDockGeometry.iconRect(in: bounds)
+        context.saveGState()
+        context.addPath(ProxyPilotDockGeometry.squircle(in: iconRect))
+        context.clip()
+        drawActivityRing(in: context, iconRect: iconRect)
         drawSignHousing()
         drawModelLabel()
-        drawStatusDot()
+        context.restoreGState()
     }
 
     static func shouldAnimate(_ presentation: ProxyPilotDockPresentation, reduceMotion: Bool) -> Bool {
@@ -203,16 +264,20 @@ final class ProxyPilotDockTileView: NSView {
     }
 
     private func updateAnimation() {
-        animationTimer?.invalidate()
-        animationTimer = nil
         guard Self.shouldAnimate(presentation, reduceMotion: reduceMotion) else {
-            animationPhase = 0
+            animationTimer?.invalidate()
+            animationTimer = nil
+            ringPhase = 0
             scrollOffset = 0
             return
         }
+        // Already spinning: keep the lap continuous across label changes.
+        guard animationTimer == nil else { return }
 
+        animationStart = CACurrentMediaTime()
+        marqueeStart = animationStart
         let timer = Timer(
-            timeInterval: 1.0 / 20.0,
+            timeInterval: Self.frameInterval,
             target: self,
             selector: #selector(animationTick),
             userInfo: nil,
@@ -223,74 +288,122 @@ final class ProxyPilotDockTileView: NSView {
     }
 
     @objc private func animationTick() {
-        animationPhase = (animationPhase + 0.025).truncatingRemainder(dividingBy: 1)
+        let now = CACurrentMediaTime()
+        ringPhase = CGFloat(((now - animationStart) / Self.ringLapDuration).truncatingRemainder(dividingBy: 1))
         if shouldScrollModel {
             let cycleWidth = modelTextWidth + Self.marqueeGap
-            scrollOffset += 0.65
-            if scrollOffset >= cycleWidth {
-                scrollOffset -= cycleWidth
-            }
+            scrollOffset = (CGFloat(now - marqueeStart) * Self.marqueeSpeed)
+                .truncatingRemainder(dividingBy: cycleWidth)
         }
         needsDisplay = true
         NSApp.dockTile.display()
     }
 
-    private func drawActivityPerimeter() {
-        let center = NSPoint(x: bounds.midX, y: bounds.midY)
-        let radius = min(bounds.width, bounds.height) * 0.43
+    // MARK: - Activity ring
 
-        let track = NSBezierPath()
-        track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
-        track.lineWidth = 3.5
-        NSColor.black.withAlphaComponent(0.30).setStroke()
-        track.stroke()
+    private func drawActivityRing(in context: CGContext, iconRect: NSRect) {
+        let inset = (Self.ringLineWidth / 2) + 0.75
+        let ringPath = ProxyPilotDockGeometry.squircle(in: iconRect.insetBy(dx: inset, dy: inset))
+        let stroke = ringPath.copy(
+            strokingWithWidth: Self.ringLineWidth,
+            lineCap: .round,
+            lineJoin: .round,
+            miterLimit: 10
+        )
+        let center = CGPoint(x: iconRect.midX, y: iconRect.midY)
 
-        let arc = NSBezierPath()
-        let startAngle: CGFloat
-        let sweep: CGFloat
-        let color: NSColor
         switch presentation.activity {
-        case .inactive:
+        case .inactive, .idle:
             return
-        case .idle:
-            startAngle = 200
-            sweep = 140
-            color = .systemGreen
-        case .processing:
-            startAngle = (animationPhase * 360) - 35
-            sweep = reduceMotion ? 250 : 105
-            color = NSColor(calibratedRed: 0.82, green: 0.28, blue: 1.0, alpha: 1.0)
         case .failed:
-            startAngle = 190
-            sweep = 160
-            color = .systemRed
+            context.saveGState()
+            context.addPath(stroke)
+            context.setFillColor(ProxyPilotDockPalette.failure.withAlphaComponent(0.9).cgColor)
+            context.fillPath()
+            context.restoreGState()
+        case .processing:
+            context.saveGState()
+            context.addPath(stroke)
+            context.clip()
+            if reduceMotion {
+                // Static, seamless full-perimeter gradient.
+                drawConicGradient(
+                    in: context,
+                    center: center,
+                    angle: .pi / 2,
+                    colors: [
+                        ProxyPilotDockPalette.pink,
+                        ProxyPilotDockPalette.violet,
+                        ProxyPilotDockPalette.indigo,
+                        ProxyPilotDockPalette.violet,
+                        ProxyPilotDockPalette.pink
+                    ],
+                    locations: [0, 0.25, 0.5, 0.75, 1]
+                )
+            } else {
+                // Faint track so the full squircle reads, then a comet whose bright
+                // pink head leads and whose indigo tail fades out behind it.
+                context.setFillColor(ProxyPilotDockPalette.violet.withAlphaComponent(0.16).cgColor)
+                context.fill(iconRect)
+                // Conic gradients advance counter-clockwise from `angle`, so the head sits
+                // at location 0 and the tail trails behind it; decreasing the angle over
+                // time spins the comet clockwise, starting from 12 o'clock.
+                drawConicGradient(
+                    in: context,
+                    center: center,
+                    angle: (.pi / 2) - (ringPhase * 2 * .pi),
+                    colors: [
+                        ProxyPilotDockPalette.pink,
+                        ProxyPilotDockPalette.pink,
+                        ProxyPilotDockPalette.violet.withAlphaComponent(0.9),
+                        ProxyPilotDockPalette.indigo.withAlphaComponent(0.5),
+                        ProxyPilotDockPalette.indigo.withAlphaComponent(0),
+                        ProxyPilotDockPalette.indigo.withAlphaComponent(0)
+                    ],
+                    locations: [0, 0.03, 0.2, 0.4, 0.55, 1]
+                )
+            }
+            context.restoreGState()
         }
-        arc.appendArc(withCenter: center, radius: radius, startAngle: startAngle, endAngle: startAngle + sweep)
-        arc.lineWidth = 4.5
-        arc.lineCapStyle = .round
-        color.setStroke()
-        arc.stroke()
     }
 
+    private func drawConicGradient(
+        in context: CGContext,
+        center: CGPoint,
+        angle: CGFloat,
+        colors: [NSColor],
+        locations: [CGFloat]
+    ) {
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let gradient = CGGradient(
+                colorsSpace: space,
+                colors: colors.map(\.cgColor) as CFArray,
+                locations: locations
+              ) else { return }
+        // CoreGraphics has no Swift-renamed overlay for this API (macOS 14+), so call the C symbol.
+        CGContextDrawConicGradient(context, gradient, center, angle)
+    }
+
+    // MARK: - Model sign
+
     private func drawSignHousing() {
-        let housing = NSBezierPath(roundedRect: Self.signRect, xRadius: 5, yRadius: 5)
-        NSColor.black.withAlphaComponent(0.88).setFill()
+        let housing = NSBezierPath(roundedRect: Self.signRect, xRadius: 4, yRadius: 4)
+        ProxyPilotDockPalette.housing.setFill()
         housing.fill()
 
-        let inner = NSBezierPath(roundedRect: Self.signRect.insetBy(dx: 2, dy: 2), xRadius: 3, yRadius: 3)
-        NSColor(calibratedRed: 0.12, green: 0.055, blue: 0.012, alpha: 0.96).setFill()
-        inner.fill()
-        NSColor.systemOrange.withAlphaComponent(0.35).setStroke()
-        inner.lineWidth = 1
-        inner.stroke()
+        let rim = NSBezierPath(roundedRect: Self.signRect.insetBy(dx: 0.4, dy: 0.4), xRadius: 3.6, yRadius: 3.6)
+        rim.lineWidth = 0.8
+        let rimColor = presentation.activity == .failed ? ProxyPilotDockPalette.failure : ProxyPilotDockPalette.violet
+        rimColor.withAlphaComponent(0.5).setStroke()
+        rim.stroke()
     }
 
     private func drawModelLabel() {
-        let clipRect = Self.signRect.insetBy(dx: 3, dy: 3)
+        let clipRect = Self.signRect.insetBy(dx: 2, dy: 1.5)
         NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(roundedRect: clipRect, xRadius: 2, yRadius: 2).addClip()
+        NSBezierPath(roundedRect: clipRect, xRadius: 2.5, yRadius: 2.5).addClip()
 
-        let y = Self.signRect.minY + 3.5
+        let y = Self.signRect.minY + ((Self.signRect.height - ProxyPilotDockLEDMatrix.glyphHeight) / 2)
         if shouldScrollModel {
             let cycleWidth = modelTextWidth + Self.marqueeGap
             let firstX = Self.signRect.minX + Self.signHorizontalInset - scrollOffset
@@ -305,8 +418,9 @@ final class ProxyPilotDockTileView: NSView {
     }
 
     private func drawLEDText(_ text: String, at origin: NSPoint) {
-        let dotDiameter: CGFloat = 1.55
-        let litColor: NSColor = presentation.activity == .failed ? .systemRed : .systemOrange
+        let pitch = ProxyPilotDockLEDMatrix.dotPitch
+        let diameter = ProxyPilotDockLEDMatrix.dotDiameter
+        let litColor = presentation.activity == .failed ? ProxyPilotDockPalette.failure : ProxyPilotDockPalette.ledLit
         litColor.setFill()
 
         for (characterIndex, character) in text.enumerated() {
@@ -314,32 +428,13 @@ final class ProxyPilotDockTileView: NSView {
             let glyphX = origin.x + (CGFloat(characterIndex) * ProxyPilotDockLEDMatrix.glyphAdvance)
             for (rowIndex, row) in rows.enumerated() {
                 for (columnIndex, bit) in row.enumerated() where bit == "1" {
-                    let x = glyphX + (CGFloat(columnIndex) * ProxyPilotDockLEDMatrix.dotPitch)
-                    let y = origin.y + (CGFloat(6 - rowIndex) * ProxyPilotDockLEDMatrix.dotPitch)
-                    NSBezierPath(
-                        ovalIn: NSRect(x: x, y: y, width: dotDiameter, height: dotDiameter)
-                    ).fill()
+                    let x = glyphX + (CGFloat(columnIndex) * pitch)
+                    let y = origin.y + (CGFloat(6 - rowIndex) * pitch)
+                    NSBezierPath(ovalIn: NSRect(x: x, y: y, width: diameter, height: diameter)).fill()
                 }
             }
         }
     }
-
-    private func drawStatusDot() {
-        let color: NSColor
-        switch presentation.activity {
-        case .inactive:
-            return
-        case .idle:
-            color = .systemGreen
-        case .processing:
-            color = NSColor(calibratedRed: 0.82, green: 0.28, blue: 1.0, alpha: 1.0)
-        case .failed:
-            color = .systemRed
-        }
-        color.setFill()
-        NSBezierPath(ovalIn: NSRect(x: 108, y: 107, width: 9, height: 9)).fill()
-    }
-
 }
 
 @MainActor

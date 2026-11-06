@@ -49,8 +49,20 @@ final class ProviderManager: ObservableObject {
 
     // MARK: - Published Properties
 
-    @Published var upstreamProvider: UpstreamProvider = .zAI {
+    /// There is no default provider. Until the user chooses one, `hasSelectedBuiltInProvider`
+    /// is false and `upstreamProvider` holds this placeholder, which must never be routed to,
+    /// fetched from, persisted, or shown. Gate on `hasSelectedBuiltInProvider` (or
+    /// AppViewModel's `hasSelectedProvider`, which also counts custom providers).
+    static let unselectedPlaceholder: UpstreamProvider = .openAI
+    /// One-time upgrade marker: before 1.17.7 every launch silently stored "zai".
+    static let noDefaultProviderMigrationKey = "proxypilot.providerSelection.noDefaultMigrated"
+
+    @Published private(set) var hasSelectedBuiltInProvider = false
+
+    @Published var upstreamProvider: UpstreamProvider = ProviderManager.unselectedPlaceholder {
         didSet {
+            guard !isApplyingPlaceholder else { return }
+            hasSelectedBuiltInProvider = true
             defaults.set(upstreamProvider.rawValue, forKey: Self.upstreamProviderDefaultsKey)
             let savedURL = defaults.string(forKey: "proxypilot.upstreamAPIBaseURL.\(upstreamProvider.rawValue)")
             upstreamAPIBaseURLString = savedURL ?? upstreamProvider.defaultAPIBaseURL
@@ -60,15 +72,13 @@ final class ProviderManager: ObservableObject {
             selectedUpstreamModels.formUnion(savedDefaultModelSet)
             reconcileXcodeAgentModelSelection()
             onClearIssue?()
-            if upstreamProvider == .openRouter {
-                Task { await loadVerifiedModels() }
-            }
+
         }
     }
 
-    @Published var upstreamAPIBaseURLString: String = UpstreamProvider.zAI.defaultAPIBaseURL {
+    @Published var upstreamAPIBaseURLString: String = "" {
         didSet {
-            guard isInitialized, !isResettingUpstreamAPIBaseURL else { return }
+            guard isInitialized, !isResettingUpstreamAPIBaseURL, !isApplyingPlaceholder, hasSelectedBuiltInProvider else { return }
             let key = "proxypilot.upstreamAPIBaseURL.\(upstreamProvider.rawValue)"
             defaults.set(upstreamAPIBaseURLString, forKey: key)
         }
@@ -124,6 +134,8 @@ final class ProviderManager: ObservableObject {
 
     var isInitialized = false
     private var isResettingUpstreamAPIBaseURL = false
+    /// Suppresses every persisting observer while the placeholder is being applied.
+    private var isApplyingPlaceholder = false
     private var upstreamModelsByID: [String: UpstreamModel] = [:]
     private var upstreamModelsByLowercasedID: [String: UpstreamModel] = [:]
 
@@ -142,20 +154,23 @@ final class ProviderManager: ObservableObject {
         self.defaults = defaults
         self.proxyService = proxyService
 
-        if let rawProvider = defaults.string(forKey: Self.upstreamProviderDefaultsKey) {
-            if let provider = UpstreamProvider(rawValue: rawProvider) {
-                upstreamProvider = provider
-            } else {
-                upstreamProvider = .zAI
-                defaults.set(UpstreamProvider.zAI.rawValue, forKey: Self.upstreamProviderDefaultsKey)
-            }
-        } else {
-            upstreamProvider = .zAI
-        }
+        let initialProvider = Self.initialProviderSelection(
+            defaults: defaults,
+            hasZAIKey: { UpstreamProvider.zAI.keychainKey.map(KeychainService.exists(key:)) ?? false }
+        )
 
-        let savedURL = defaults.string(forKey: "proxypilot.upstreamAPIBaseURL.\(upstreamProvider.rawValue)")
-        upstreamAPIBaseURLString = savedURL ?? upstreamProvider.defaultAPIBaseURL
-        selectedXcodeAgentModel = storedXcodeAgentModel(for: upstreamProvider)
+        // Observers stay suppressed for init-time assignments; the selected state is
+        // applied explicitly below so nothing is persisted as a side effect of launching.
+        isApplyingPlaceholder = true
+        upstreamProvider = initialProvider ?? Self.unselectedPlaceholder
+        isApplyingPlaceholder = false
+        hasSelectedBuiltInProvider = initialProvider != nil
+
+        if hasSelectedBuiltInProvider {
+            let savedURL = defaults.string(forKey: "proxypilot.upstreamAPIBaseURL.\(upstreamProvider.rawValue)")
+            upstreamAPIBaseURLString = savedURL ?? upstreamProvider.defaultAPIBaseURL
+            selectedXcodeAgentModel = storedXcodeAgentModel(for: upstreamProvider)
+        }
 
         exactoFilterEnabled = defaults.object(forKey: Self.exactoFilterDefaultsKey) as? Bool ?? true
         verifiedFilterEnabled = defaults.object(forKey: Self.verifiedFilterDefaultsKey) as? Bool ?? false
@@ -167,9 +182,47 @@ final class ProviderManager: ObservableObject {
         }
 
         Self.purgeLegacyUpstreamModelCache(from: defaults)
-        upstreamModels = Self.cachedUpstreamModels(from: defaults, provider: upstreamProvider)
+        if hasSelectedBuiltInProvider {
+            upstreamModels = Self.cachedUpstreamModels(from: defaults, provider: upstreamProvider)
+            selectedUpstreamModels.formUnion(savedDefaultModelSet)
+        }
         rebuildUpstreamModelLookup()
-        selectedUpstreamModels.formUnion(savedDefaultModelSet)
+    }
+
+    /// The provider to restore at launch, or nil when the user hasn't chosen one.
+    ///
+    /// Before 1.17.7 every launch silently stored "zai", so a stored "zai" doesn't prove
+    /// a choice. On the first launch after upgrading, a stored "zai" is kept only when a
+    /// z.ai API key exists (without one it could never have worked); otherwise it is
+    /// cleared. Unknown raw values are cleared too. The migration runs once.
+    static func initialProviderSelection(defaults: UserDefaults, hasZAIKey: () -> Bool) -> UpstreamProvider? {
+        let alreadyMigrated = defaults.bool(forKey: noDefaultProviderMigrationKey)
+        defaults.set(true, forKey: noDefaultProviderMigrationKey)
+
+        guard let raw = defaults.string(forKey: upstreamProviderDefaultsKey) else { return nil }
+        guard let provider = UpstreamProvider(rawValue: raw) else {
+            defaults.removeObject(forKey: upstreamProviderDefaultsKey)
+            return nil
+        }
+        if provider == .zAI, !alreadyMigrated, !hasZAIKey() {
+            defaults.removeObject(forKey: upstreamProviderDefaultsKey)
+            return nil
+        }
+        return provider
+    }
+
+    /// Returns to the "no provider chosen" state without persisting the placeholder.
+    func clearProviderSelection() {
+        isApplyingPlaceholder = true
+        upstreamProvider = Self.unselectedPlaceholder
+        upstreamAPIBaseURLString = ""
+        selectedXcodeAgentModel = ""
+        isApplyingPlaceholder = false
+        hasSelectedBuiltInProvider = false
+        defaults.removeObject(forKey: Self.upstreamProviderDefaultsKey)
+        upstreamModels = []
+        selectedUpstreamModels = []
+        onClearIssue?()
     }
 
     /// Drops the pre-v2 model cache blobs the prefix bump orphaned. These are large —
@@ -184,10 +237,11 @@ final class ProviderManager: ObservableObject {
     // MARK: - Computed Properties
 
     var selectedUpstreamProviderDefaultAPIBaseURL: String {
-        upstreamProvider.defaultAPIBaseURL
+        hasSelectedBuiltInProvider ? upstreamProvider.defaultAPIBaseURL : ""
     }
 
     var hasUpstreamKey: Bool {
+        guard hasSelectedBuiltInProvider else { return false }
         guard let key = upstreamProvider.keychainKey else { return true }
         return KeychainService.exists(key: key)
     }
@@ -197,7 +251,7 @@ final class ProviderManager: ObservableObject {
     }
 
     var savedDefaultModels: [String] {
-        rawSavedDefaultModels
+        hasSelectedBuiltInProvider ? rawSavedDefaultModels : []
     }
 
     var hasSavedDefaultModels: Bool { !savedDefaultModels.isEmpty }
@@ -238,11 +292,12 @@ final class ProviderManager: ObservableObject {
 
     var proxySyncModelCandidates: [String] {
         if !upstreamModels.isEmpty {
-            return Set(
-                modelSelectionRows
-                    .filter { isModelSelected($0.id) }
-                    .map(\.id)
-            ).sorted()
+            var models = Set(modelSelectionRows.filter { isModelSelected($0.id) }.map(\.id))
+            if !selectedXcodeAgentModel.isEmpty,
+               defaults.string(forKey: "proxypilot.explicitRouteModel.builtin:" + upstreamProvider.rawValue) == selectedXcodeAgentModel {
+                models.insert(selectedXcodeAgentModel)
+            }
+            return models.sorted()
         }
 
         var fallbackModels = Set(savedDefaultModels)
@@ -260,24 +315,7 @@ final class ProviderManager: ObservableObject {
         !proxySyncModelCandidates.isEmpty
     }
 
-    var filteredUpstreamModels: [UpstreamModel] {
-        var models = upstreamModels
-
-        if exactoFilterEnabled && upstreamProvider == .openRouter {
-            var seen = Set<String>()
-            models = models.compactMap { model in
-                guard model.isExactoEligible else { return nil }
-                let exacto = model.exactoVariant
-                return seen.insert(exacto.id).inserted ? exacto : nil
-            }
-        }
-
-        if verifiedFilterEnabled && upstreamProvider == .openRouter {
-            models = models.filter { verifiedModels.contains($0.id) }
-        }
-
-        return models
-    }
+    var filteredUpstreamModels: [UpstreamModel] { upstreamModels }
 
     var modelSelectionRows: [ModelSelectionRow] {
         let liveRows = filteredUpstreamModels.map { model in
@@ -289,13 +327,13 @@ final class ProviderManager: ObservableObject {
             )
         }
         let liveIDs = Set(liveRows.map(\.id))
-        let missingDefaultRows = savedDefaultModels
-            .filter { !liveIDs.contains($0) }
+        let missingDefaultRows = Set(savedDefaultModels).union(selectedUpstreamModels)
+            .sorted().filter { !liveIDs.contains($0) }
             .map {
                 ModelSelectionRow(
                     id: $0,
                     model: upstreamModel(for: $0),
-                    isDefault: true,
+                    isDefault: isDefaultModel($0),
                     isLive: false
                 )
             }
@@ -598,6 +636,7 @@ final class ProviderManager: ObservableObject {
     }
 
     private func persistSelectedXcodeAgentModel() {
+        guard hasSelectedBuiltInProvider, !isApplyingPlaceholder else { return }
         defaults.set(selectedXcodeAgentModel, forKey: Self.xcodeAgentModelDefaultsKey(for: upstreamProvider))
         if upstreamProvider == .zAI {
             defaults.set(selectedXcodeAgentModel, forKey: Self.xcodeAgentModelLegacyDefaultsKey)

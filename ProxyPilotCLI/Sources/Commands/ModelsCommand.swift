@@ -9,7 +9,7 @@ struct ModelsCommand: AsyncParsableCommand {
     )
 
     @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)).")
-    var provider: String = ProxyPilotDefaults.defaultCLIProvider.rawValue
+    var provider: String?
 
     @Option(name: .long, help: "Override the upstream API base URL.")
     var url: String?
@@ -47,14 +47,13 @@ struct ModelsCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        guard let upstream = UpstreamProvider(rawValue: provider) else {
-            OutputFormatter.error(
-                command: "models",
-                code: "E001",
-                message: "Unknown provider: \(provider)",
-                suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
-                json: json
-            )
+        let choices = ProviderCredentialResolver.selectionPrompt(secrets: SecretsProviderFactory.make())
+        guard let selected = provider ?? (choices.availableProviders.count == 1 ? choices.availableProviders.first?.provider : nil) else {
+            OutputFormatter.error(command: "models", code: "E047", message: "Choose an upstream provider with --provider.", suggestion: choices.humanList, json: json)
+            throw ExitCode.failure
+        }
+        guard let upstream = UpstreamProvider(rawValue: selected) else {
+            OutputFormatter.error(command: "models", code: "E001", message: "Unknown provider: \(selected)", json: json)
             throw ExitCode.failure
         }
 

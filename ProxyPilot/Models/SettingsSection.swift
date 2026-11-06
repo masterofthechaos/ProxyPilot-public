@@ -13,9 +13,9 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 
     var id: Self { self }
 
-    static let sidebarSections: [SettingsSection] = [.home, .history, .proxy, .models, .routing, .keys, .harnesses, .advanced, .customization]
+    static let sidebarSections: [SettingsSection] = [.home, .models, .proxy, .history, .harnesses, .advanced]
 
-    static let collapsedTabSections: [SettingsSection] = [.home, .history, .proxy, .models, .routing, .keys, .harnesses, .advanced]
+    static let collapsedTabSections: [SettingsSection] = [.home, .models, .proxy, .history, .harnesses, .advanced]
 
     static func availableSidebarSections(repoGPSRoutingEnabled: Bool) -> [SettingsSection] {
         sidebarSections.filter { repoGPSRoutingEnabled || $0 != .routing }
@@ -30,19 +30,19 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .home:
             return "Home"
         case .history:
-            return "Session History"
+            return "Sessions"
         case .harnesses:
             return "RepoGPS"
         case .proxy:
-            return "Xcode Setup"
+            return "Xcode"
         case .models:
-            return "Models"
+            return "Providers & Models"
         case .routing:
             return "Connections"
         case .keys:
             return "Keys & Providers"
         case .advanced:
-            return "Advanced"
+            return "Settings"
         case .customization:
             return "Customization"
         }
@@ -57,15 +57,15 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .harnesses:
             return "RepoGPS"
         case .proxy:
-            return "Xcode Setup"
+            return "Xcode"
         case .models:
-            return "Models"
+            return "Providers & Models"
         case .routing:
             return "Connections"
         case .keys:
             return "Keys & Providers"
         case .advanced:
-            return "Advanced"
+            return "Settings"
         case .customization:
             return "Customization"
         }
@@ -82,13 +82,13 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .proxy:
             return "Agent registration and setup"
         case .models:
-            return "Live catalogs and saved models"
+            return "Browse, favorite and choose models"
         case .routing:
             return "Selected and running models"
         case .keys:
             return "API keys and local providers"
         case .advanced:
-            return "App preferences"
+            return "Appearance, connection and privacy"
         case .customization:
             return "Appearance and menu bar"
         }
@@ -184,6 +184,28 @@ enum ProxySectionFocus: String, Identifiable, Hashable {
             return 4
         case .agentRegistration:
             return 4
+        }
+    }
+}
+
+enum SettingsCategory: String, CaseIterable, Identifiable {
+    case general = "General", appearance = "Appearance", connection = "Connection"
+    case privacy = "Privacy & Logging", support = "Updates & Support"
+    var id: Self { self }
+}
+
+struct AppNavigationTarget: Equatable {
+    let section: SettingsSection
+    var category: SettingsCategory? = nil
+    var focus: ProxySectionFocus? = nil
+
+    static func migrated(_ section: SettingsSection) -> Self {
+        switch section {
+        case .keys: return .init(section: .models)
+        case .routing: return .init(section: .harnesses)
+        case .customization: return .init(section: .advanced, category: .appearance)
+        case .advanced: return .init(section: .advanced, category: .connection)
+        default: return .init(section: section)
         }
     }
 }

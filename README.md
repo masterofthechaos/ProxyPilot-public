@@ -6,6 +6,12 @@ macOS utility that makes Xcode Intelligence and Agent Mode work with non-native 
 
 Xcode's built-in Intelligence features only support a handful of providers natively. ProxyPilot runs a local proxy on your Mac that translates requests, letting you use **any OpenAI-compatible provider** (or Anthropic's API) with Xcode Intelligence using the Claude Agent framework.
 
+## v1.18.0
+
+Providers & Models brings provider keys, endpoints, live model browsing, comparison, and Favorite Models into one workspace. Home, Xcode, and the menu bar share the selected Xcode model; browsing does not change your running route. RepoGPS retains its independent selection. Six focused workspaces and categorized Settings keep related controls together.
+
+This release also includes Cerebras and oMLX support, clearer setup and port-conflict messages, Violet and Coral appearance gradients, and a live Dock tile enabled by default for new preferences.
+
 ## Prerequisites
 
 - macOS 15+
@@ -38,6 +44,8 @@ Build a Release app bundle and install to `/Applications/ProxyPilot.app`:
 ```bash
 zsh scripts/build_and_install.sh
 ```
+
+For Developer ID-signed local installation, the signing helper selects your unique Developer ID Application identity. If you have multiple distinct identities, set `PROXYPILOT_SIGNING_IDENTITY` to the full certificate label before running the build-and-install script.
 
 ### CLI
 

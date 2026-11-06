@@ -181,14 +181,25 @@ final class ProxyService {
                 promptCacheHitPricePer1M: hitPer1M,
                 promptCacheMissPricePer1M: missPer1M,
                 promptCacheWritePricePer1M: cacheWritePer1M,
-                supportedParameters: Set(model.supportedParameters ?? [])
+                supportedParameters: Set(model.supportedParameters ?? []),
+                displayName: model.name,
+                lab: provider == .openRouter ? model.id.split(separator: "/").dropLast().first.map(String.init) : nil,
+                catalogAddedAt: model.created.map { Date(timeIntervalSince1970: $0) }
             )
             guard discovered.promptPricePer1M == nil,
                   discovered.completionPricePer1M == nil,
                   let known = provider.knownModelMetadata(for: model.id) else {
                 return discovered
             }
-            return known
+            return UpstreamModel(
+                id: discovered.id, contextLength: discovered.contextLength ?? known.contextLength,
+                promptPricePer1M: known.promptPricePer1M, completionPricePer1M: known.completionPricePer1M,
+                promptCacheHitPricePer1M: known.promptCacheHitPricePer1M,
+                promptCacheMissPricePer1M: known.promptCacheMissPricePer1M,
+                promptCacheWritePricePer1M: known.promptCacheWritePricePer1M,
+                supportedParameters: discovered.supportedParameters.union(known.supportedParameters),
+                displayName: discovered.displayName, lab: discovered.lab, catalogAddedAt: discovered.catalogAddedAt
+            )
         }.sorted { $0.id < $1.id }
     }
 
@@ -264,6 +275,7 @@ final class ProxyService {
         provider: UpstreamProvider,
         request: inout URLRequest
     ) {
+        OpenRouterAppAttribution.apply(to: &request)
         guard !apiKey.isEmpty else { return }
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
     }
@@ -273,6 +285,8 @@ final class ProxyService {
 struct OpenAIModelsResponse: Decodable {
     struct Model: Decodable {
         let id: String
+        let name: String?
+        let created: Double?
         let contextLength: Int?
         let pricing: Pricing?
         let supportedParameters: [String]?
@@ -294,7 +308,7 @@ struct OpenAIModelsResponse: Decodable {
         }
 
         enum CodingKeys: String, CodingKey {
-            case id
+            case id, name, created
             case contextLength = "context_length"
             case pricing
             case supportedParameters = "supported_parameters"

@@ -48,6 +48,7 @@ struct CodingHarnessesView: View {
     @State private var copiedCommand: String?
 
     let onOpenHome: () -> Void
+    var onOpenModels: () -> Void = {}
 
     private var service: RepoGPSService { vm.repoGPS }
 
@@ -149,12 +150,14 @@ struct CodingHarnessesView: View {
                     }
                 }
 
+                DashboardCard { RoutingView(embedded: true, onOpenModels: onOpenModels) }
+
                 if service.distribution.installed && !service.distribution.needsRepair {
                     gettingStartedCard
-                    commandGuideCard
+                    DisclosureGroup("Command guide") { commandGuideCard }
                 }
 
-                glossaryCard
+                DisclosureGroup("Glossary") { glossaryCard }
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .topLeading)

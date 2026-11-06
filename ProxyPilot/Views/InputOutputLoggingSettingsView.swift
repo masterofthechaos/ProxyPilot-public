@@ -72,7 +72,7 @@ struct InputOutputLoggingSettingsView: View {
 
     private var introCopy: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("This feature is off by default. ProxyPilot only transmits your requests to and from the provider you choose in Proxy.")
+            Text("This feature is off by default. ProxyPilot only transmits your requests to and from the provider you choose in Providers & Models.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -80,11 +80,11 @@ struct InputOutputLoggingSettingsView: View {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text("Review provider routing in")
                     .foregroundStyle(.secondary)
-                Button("Proxy settings") {
+                Button("Providers & Models") {
                     onOpenProxySettings()
                 }
                 .buttonStyle(.link)
-                .accessibilityLabel("Open Proxy settings")
+                .accessibilityLabel("Open Providers & Models")
                 Text("before enabling logging.")
                     .foregroundStyle(.secondary)
             }

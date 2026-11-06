@@ -221,7 +221,11 @@ enum UpstreamClient {
 
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = method
-        request.httpBody = body
+        request.httpBody = body.map {
+            path.hasSuffix("/chat/completions")
+                ? AnthropicTranslator.normalizeStrictChatRequest($0, provider: config.upstreamProvider, baseURL: config.upstreamAPIBaseURL)
+                : $0
+        }
         request.timeoutInterval = config.effectiveUpstreamRequestTimeout
 
         // Forward relevant headers, excluding auth headers (we set our own)
@@ -244,6 +248,8 @@ enum UpstreamClient {
         if let apiKey = config.upstreamAPIKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
+        // After forwarding client headers, so ProxyPilot's identity wins on OpenRouter.
+        OpenRouterAppAttribution.apply(to: &request)
 
         return request
     }

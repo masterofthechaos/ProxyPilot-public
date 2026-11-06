@@ -11,8 +11,8 @@ struct SetupXcodeCommand: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "Proxy port for the local listener.")
     var port: UInt16 = ProxyPilotDefaults.defaultPort
 
-    @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)). Defaults to \(ProxyPilotDefaults.defaultXcodeProvider.rawValue) for Xcode setup.")
-    var provider: String = ProxyPilotDefaults.defaultXcodeProvider.rawValue
+    @Option(name: .long, help: "Upstream provider (\(UpstreamProvider.cliOptionsDescription)). Omit to select the sole configured provider.")
+    var provider: String?
 
     @Option(name: .long, help: "Override the upstream API base URL.")
     var upstreamUrl: String?
@@ -31,11 +31,16 @@ struct SetupXcodeCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         #if os(macOS)
-        guard let upstreamProvider = UpstreamProvider(rawValue: provider) else {
+        let choices = ProviderCredentialResolver.selectionPrompt(secrets: SecretsProviderFactory.make())
+        guard let selected = provider ?? (choices.availableProviders.count == 1 ? choices.availableProviders.first?.provider : nil) else {
+            OutputFormatter.error(command: "setup xcode", code: "E047", message: "Choose an upstream provider with --provider.", suggestion: choices.humanList, json: json)
+            throw ExitCode.failure
+        }
+        guard let upstreamProvider = UpstreamProvider(rawValue: selected) else {
             OutputFormatter.error(
                 command: "setup xcode",
                 code: "E001",
-                message: "Unknown provider: \(provider)",
+                message: "Unknown provider: \(selected)",
                 suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
                 json: json
             )
@@ -229,7 +234,7 @@ struct SetupXcodeCommand: AsyncParsableCommand {
                 modelsCount: finalProbe.modelCount,
                 authBackend: authBackendPayload,
                 authPath: authPathPayload,
-                defaultProviderDivergesFromCLI: upstreamProvider == ProxyPilotDefaults.defaultXcodeProvider && ProxyPilotDefaults.defaultCLIProvider != ProxyPilotDefaults.defaultXcodeProvider
+                defaultProviderDivergesFromCLI: false
             ),
             humanMessage: """
             Xcode setup complete.

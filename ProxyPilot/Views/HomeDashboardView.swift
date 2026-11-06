@@ -32,11 +32,19 @@ struct HomeDashboardView: View {
                     if vm.isHomeDashboardSectionVisible(.sessionSummary) {
                         heroCard
                     }
-                    if vm.isHomeDashboardSectionVisible(.workflowControls) {
-                        workflowControls
-                    }
-                    if vm.isHomeDashboardSectionVisible(.xcodeAgentRouting) {
-                        xcodeAgentControls
+                    if vm.isHomeDashboardSectionVisible(.workflowControls) || vm.isHomeDashboardSectionVisible(.xcodeAgentRouting) {
+                        DashboardCard {
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack {
+                                    Text("Xcode").font(.headline)
+                                    Spacer()
+                                    Text(vm.proxyPilotAgentSetupLabel).font(.caption).foregroundStyle(.secondary)
+                                    Button("Setup", action: onOpenProxy)
+                                }
+                                XcodeRouteControls()
+                                Button("Browse Providers & Models", action: onOpenKeys)
+                            }
+                        }
                     }
                     if vm.isHomeDashboardSectionVisible(.sessionReportCard) {
                         sessionDetails
@@ -238,9 +246,18 @@ struct HomeDashboardView: View {
                 }
 
                 if let issue = vm.activeIssue {
-                    Text("\(issue.code.rawValue): \(issue.title)")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(issue.code.rawValue): \(issue.title)")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Text(issue.message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .truncationMode(.middle)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
                 } else if let lastError = vm.lastError, !lastError.isEmpty {
                     Text(lastError)
                         .font(.caption)
@@ -361,9 +378,9 @@ struct HomeDashboardView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Spacer()
-                    Text(vm.agentRuntimeStatus.isReady ? "Ready" : "Not Installed")
+                    Label(vm.proxyPilotAgentSetupLabel, systemImage: vm.proxyPilotAgentSetupVerified ? "checkmark.seal.fill" : "exclamationmark.circle")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(vm.agentRuntimeStatus.isReady ? .green : .secondary)
+                        .foregroundStyle(vm.proxyPilotAgentSetupVerified ? .green : .secondary)
                 }
 
                 Text("Select ProxyPilot in Xcode’s agent picker, then choose your provider and model here.")
@@ -391,7 +408,7 @@ struct HomeDashboardView: View {
                 // are remapped by the same running proxy, so this is not mode-specific.
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Xcode route: \(vm.xcodeAgentAppliedModelText)")
-                    Text("Live: \(vm.xcodeAgentLiveRouteText)")
+                    Text("Model availability: \(vm.xcodeAgentLiveRouteText)")
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -478,7 +495,7 @@ struct HomeDashboardView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Xcode route: \(vm.xcodeAgentAppliedModelText)")
-                    Text("Live: \(vm.xcodeAgentLiveRouteText)")
+                    Text("Model availability: \(vm.xcodeAgentLiveRouteText)")
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -999,7 +1016,7 @@ struct HomeDashboardView: View {
         }
         .buttonStyle(.plain)
         .help(vm.promptCachingProviderStatusText)
-        .accessibilityHint("Opens Xcode Setup to configure provider cache signals.")
+        .accessibilityHint("Opens Settings → Connection to configure provider cache signals.")
     }
 
     private var cacheStatusColor: Color {

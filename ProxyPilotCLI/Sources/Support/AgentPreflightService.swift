@@ -7,7 +7,15 @@ enum AgentPreflightService {
         provider rawProvider: String,
         model: String?
     ) async -> (AgentPreflightPayload, [NextAction]) {
-        let upstream = UpstreamProvider(rawValue: rawProvider) ?? ProxyPilotDefaults.defaultXcodeProvider
+        guard let upstream = UpstreamProvider(rawValue: rawProvider) else {
+            return (AgentPreflightPayload(
+                ready: false, provider: rawProvider, model: model ?? "",
+                auth: .init(required: false, stored: false, provider: rawProvider),
+                proxy: .init(running: false, port: Int(port), effectiveStatus: "unknown", errorMessage: nil),
+                xcodeConfig: .init(installed: false, baseURL: nil, requiresXcodeRestart: false),
+                blockers: [AgentError(code: "E001", message: "Unknown provider: \(rawProvider)", suggestion: "Choose a supported provider.", recoverable: true)]
+            ), [])
+        }
         let secrets = SecretsProviderFactory.make()
         let stored = upstream.secretKey.flatMap { try? secrets.exists(key: $0) } ?? false
         let authRequired = upstream.requiresAPIKey

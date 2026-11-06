@@ -2308,6 +2308,9 @@ final class LocalProxyServer: @unchecked Sendable {
     }
 
     private func applyUpstreamAuth(config: Config, request: inout URLRequest) {
+        // Attribution first: it doesn't depend on a key (OpenRouter requests always carry one,
+        // but this keeps the identity on every OpenRouter-bound request regardless).
+        OpenRouterAppAttribution.apply(to: &request)
         guard let apiKey = config.upstreamAPIKey, !apiKey.isEmpty else { return }
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
     }
@@ -2318,7 +2321,10 @@ final class LocalProxyServer: @unchecked Sendable {
         config: Config,
         request: inout URLRequest
     ) {
-        guard let body = request.httpBody else { return }
+        guard let originalBody = request.httpBody else { return }
+        let body = path.hasSuffix("/chat/completions")
+            ? AnthropicTranslator.normalizeStrictChatRequest(originalBody, provider: config.upstreamProvider, baseURL: config.upstreamAPIBase.absoluteString)
+            : originalBody
         let headers = (request.allHTTPHeaderFields ?? [:]).map { ($0.key, $0.value) }
         let mutation = PromptCacheAdapter.mutate(
             path: path,

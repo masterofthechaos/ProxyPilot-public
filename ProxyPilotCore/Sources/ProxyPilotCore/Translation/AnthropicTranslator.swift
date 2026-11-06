@@ -146,7 +146,11 @@ public enum AnthropicTranslator {
             }
         }
 
-        openAI["messages"] = messages
+        // Anthropic's mid-conversation-system beta can put instruction messages
+        // inside history. Strict OpenAI chat templates accept system only first.
+        // Keep instructions at system priority and preserve every non-system
+        // message (including tool call/result pairs) in its original order.
+        openAI["messages"] = leadingSystemMessages(messages)
 
         if let maxTokens = anthropic["max_tokens"] {
             openAI["max_tokens"] = maxTokens
@@ -703,6 +707,43 @@ public enum AnthropicTranslator {
         guard let string = value as? String else { return nil }
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Adapts system instructions to strict chat templates. Text is joined in
+    /// encounter order; structured content blocks retain their type and order.
+    /// Already compatible histories are returned unchanged.
+    public static func leadingSystemMessages(_ messages: [[String: Any]]) -> [[String: Any]] {
+        let systemMessages = messages.filter { $0["role"] as? String == "system" }
+        guard !systemMessages.isEmpty,
+              systemMessages.count > 1 || messages.first?["role"] as? String != "system" else {
+            return messages
+        }
+        // Leave malformed input for the upstream validator; never drop content.
+        guard systemMessages.allSatisfy({ $0["content"] is String || $0["content"] is [[String: Any]] }) else {
+            return messages
+        }
+        var system = systemMessages[0]
+        if systemMessages.allSatisfy({ $0["content"] is String }) {
+            system["content"] = systemMessages.compactMap { $0["content"] as? String }.joined(separator: "\n\n")
+        } else {
+            system["content"] = systemMessages.flatMap { message -> [[String: Any]] in
+                if let text = message["content"] as? String { return [["type": "text", "text": text]] }
+                return message["content"] as? [[String: Any]] ?? []
+            }
+        }
+        return [system] + messages.filter { $0["role"] as? String != "system" }
+    }
+
+    /// Also covers existing custom-provider configurations using Cerebras's
+    /// official endpoint, without rewriting unrelated OpenAI requests.
+    public static func normalizeStrictChatRequest(_ body: Data, provider: UpstreamProvider, baseURL: String) -> Data {
+        guard provider == .cerebras || URL(string: baseURL)?.host?.lowercased() == "api.cerebras.ai",
+              var request = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let messages = request["messages"] as? [[String: Any]] else { return body }
+        let systemPositions = messages.indices.filter { messages[$0]["role"] as? String == "system" }
+        guard systemPositions.count > 1 || systemPositions.first.map({ $0 != 0 }) == true else { return body }
+        request["messages"] = leadingSystemMessages(messages)
+        return (try? JSONSerialization.data(withJSONObject: request)) ?? body
     }
 
     private static func convertMessage(

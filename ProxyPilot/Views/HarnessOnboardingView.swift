@@ -92,7 +92,7 @@ struct HarnessOnboardingView: View {
         HStack(spacing: 12) {
             Image(systemName: step.systemImage)
                 .font(.title2)
-                .foregroundStyle(ProxyPilotBrandPalette.violet)
+                .foregroundStyle(vm.gradientPreset.colors[1])
                 .frame(width: 28)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -116,7 +116,7 @@ struct HarnessOnboardingView: View {
             ForEach(steps) { entry in
                 Circle()
                     .fill(entry.id == stepIndex
-                          ? AnyShapeStyle(ProxyPilotBrandPalette.violet)
+                          ? AnyShapeStyle(vm.gradientPreset.colors[1])
                           : AnyShapeStyle(.quaternary))
                     .frame(width: 6, height: 6)
             }
@@ -272,21 +272,14 @@ struct HarnessOnboardingView: View {
 /// The shimmer sweeps the app icon's circuit-trail hues. It is suppressed entirely
 /// under Reduce Motion, where the pill keeps its brand fill and stays legible.
 struct NewFeaturesPill: View {
+    @EnvironmentObject private var vm: AppViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let action: () -> Void
 
     @State private var shimmerPhase: CGFloat = -1.0
 
-    private static let brandGradient = LinearGradient(
-        colors: [
-            ProxyPilotBrandPalette.pink,
-            ProxyPilotBrandPalette.violet,
-            ProxyPilotBrandPalette.blueViolet
-        ],
-        startPoint: .leading,
-        endPoint: .trailing
-    )
+    private var brandGradient: LinearGradient { vm.gradientPreset.gradient }
 
     var body: some View {
         Button(action: action) {
@@ -322,11 +315,11 @@ struct NewFeaturesPill: View {
     }
 
     private var pillBackground: some View {
-        Capsule().fill(Self.brandGradient.opacity(0.22))
+        Capsule().fill(brandGradient.opacity(0.22))
     }
 
     private var pillBorder: some View {
-        Capsule().strokeBorder(Self.brandGradient.opacity(0.55), lineWidth: 1)
+        Capsule().strokeBorder(brandGradient.opacity(0.55), lineWidth: 1)
     }
 
     @ViewBuilder
@@ -354,9 +347,9 @@ struct NewFeaturesPill: View {
             LinearGradient(
                 colors: [
                     .clear,
-                    ProxyPilotBrandPalette.pink.opacity(0.45),
+                    vm.gradientPreset.colors[0].opacity(0.45),
                     .white.opacity(0.55),
-                    ProxyPilotBrandPalette.blueViolet.opacity(0.45),
+                    vm.gradientPreset.colors[2].opacity(0.45),
                     .clear
                 ],
                 startPoint: .leading,

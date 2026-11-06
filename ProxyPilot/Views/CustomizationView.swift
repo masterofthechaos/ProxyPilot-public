@@ -19,8 +19,7 @@ struct CustomizationView: View {
     var body: some View {
         Form {
             appearanceSection
-            windowToolbarSection
-            keysProvidersSection
+            DisclosureGroup("Provider list organization") { keysProvidersSection }
             homeDashboardSection
             menuBarSection
             resetViewsSection
@@ -40,11 +39,18 @@ struct CustomizationView: View {
             }
             .pickerStyle(.segmented)
 
-            ColorPicker("ProxyPilot accent color", selection: Binding(
-                get: { vm.proxyPilotAccentColor },
-                set: { vm.proxyPilotAccentHex = $0.proxyPilotHexString ?? ProxyPilotAccentColor.defaultHex }
-            ), supportsOpacity: false)
-            .help("Used for ProxyPilot-specific highlights and glows. Native macOS controls keep their system tint.")
+            Picker("App gradient", selection: $vm.gradientPreset) {
+                ForEach(ProxyPilotGradientPreset.allCases) { preset in
+                    Text(preset.title).tag(preset)
+                }
+            }
+            .pickerStyle(.segmented)
+            RoundedRectangle(cornerRadius: 8)
+                .fill(vm.gradientPreset.gradient)
+                .frame(height: 28)
+                .accessibilityLabel("\(vm.gradientPreset.title) gradient preview")
+            Text("Updates window washes, decorative highlights and the Dock activity ring throughout ProxyPilot. Status colors keep their meaning.")
+                .font(.caption).foregroundStyle(.secondary)
 
             Toggle(vm.liquidGlassPreferenceTitle, isOn: Binding(
                 get: { effectiveLiquidGlassEnabled },
@@ -73,7 +79,7 @@ struct CustomizationView: View {
                 set: { vm.setDockTileInteractiveEnabled($0) }
             ))
             .toggleStyle(.switch)
-            .help("Replaces the Dock icon with a live LED-style model marquee and activity ring while ProxyPilot is running. Off by default.")
+            .help("Replaces the Dock icon with a live LED-style model marquee and activity ring while ProxyPilot is running. On by default.")
 
             Text("Shows the active model and request activity directly on the Dock icon instead of the plain app icon.")
                 .font(.caption)
@@ -159,7 +165,14 @@ struct CustomizationView: View {
 
     private var homeDashboardSection: some View {
         Section("Home Dashboard") {
-            ForEach(HomeDashboardSection.allCases) { section in
+            Toggle("Xcode quick controls", isOn: Binding(
+                get: { vm.visibleHomeDashboardSections.contains(.workflowControls) || vm.visibleHomeDashboardSections.contains(.xcodeAgentRouting) },
+                set: {
+                    vm.setHomeDashboardSection(.workflowControls, isVisible: $0)
+                    vm.setHomeDashboardSection(.xcodeAgentRouting, isVisible: $0)
+                }
+            )).toggleStyle(.checkbox)
+            ForEach(HomeDashboardSection.allCases.filter { $0 != .workflowControls && $0 != .xcodeAgentRouting }) { section in
                 Toggle(isOn: Binding(
                     get: { vm.visibleHomeDashboardSections.contains(section) },
                     set: { vm.setHomeDashboardSection(section, isVisible: $0) }
@@ -177,8 +190,8 @@ struct CustomizationView: View {
     }
 
     private var keysProvidersSection: some View {
-        Section("Keys & Providers") {
-            Text("Choose which built-in providers appear in Keys & Providers and use the row controls to change their display order. This only changes the settings view; existing keys and provider routing settings are preserved.")
+        Section("Providers & Models") {
+            Text("Choose which built-in providers appear in the Providers & Models browser and use the row controls to change their display order. This only changes the settings view; existing keys and provider routing settings are preserved.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -193,7 +206,7 @@ struct CustomizationView: View {
             }
             .padding(.vertical, 4)
 
-            Button("Reset Keys & Providers view") {
+            Button("Reset provider list") {
                 vm.resetKeysProvidersCustomization()
             }
             .buttonStyle(.link)

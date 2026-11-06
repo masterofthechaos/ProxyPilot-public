@@ -446,12 +446,17 @@ enum MCPServerSetup {
             switch params.name {
 
             case "preflight":
+                let choices = ProviderCredentialResolver.selectionPrompt(secrets: SecretsProviderFactory.make())
+                let fallbackProvider = provider ?? (choices.availableProviders.count == 1 ? choices.availableProviders.first?.provider : nil)
+                if params.arguments?["provider"] == nil && fallbackProvider == nil {
+                    return toolError(tool: "preflight", code: "E047", message: "Choose an upstream provider.", suggestion: choices.humanList)
+                }
                 let parsedPort = portArgument(params.arguments, default: port, tool: "preflight")
                 if let error = parsedPort.error { return error }
                 let reqPort = parsedPort.port ?? port
                 let parsedProvider = MCPArgumentValidator.provider(
                     params.arguments?["provider"],
-                    default: provider ?? ProxyPilotDefaults.defaultCLIProvider.rawValue,
+                    default: fallbackProvider ?? "",
                     tool: "preflight"
                 )
                 guard case .success(let upstream) = parsedProvider else {
@@ -1128,9 +1133,14 @@ enum MCPServerSetup {
                 }
 
             case "list_upstream_models":
+                let choices = ProviderCredentialResolver.selectionPrompt(secrets: SecretsProviderFactory.make())
+                let fallbackProvider = provider ?? (choices.availableProviders.count == 1 ? choices.availableProviders.first?.provider : nil)
+                if params.arguments?["provider"] == nil && fallbackProvider == nil {
+                    return toolError(tool: "list_upstream_models", code: "E047", message: "Choose an upstream provider.", suggestion: choices.humanList)
+                }
                 let parsedProvider = MCPArgumentValidator.provider(
                     params.arguments?["provider"],
-                    default: provider ?? ProxyPilotDefaults.defaultCLIProvider.rawValue,
+                    default: fallbackProvider ?? "",
                     tool: "list_upstream_models"
                 )
                 let parsedKey = stringArgument(params.arguments, name: "key", default: key, tool: "list_upstream_models")

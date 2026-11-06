@@ -139,4 +139,54 @@ final class DockTileControllerTests: XCTestCase {
             reduceMotion: false
         ))
     }
+
+    func testSquircleMatchesSystemIconRect() {
+        let bounds = NSRect(x: 0, y: 0, width: 128, height: 128)
+        let iconRect = ProxyPilotDockGeometry.iconRect(in: bounds)
+        XCTAssertEqual(iconRect.minX, 12.5, accuracy: 0.001)
+        XCTAssertEqual(iconRect.width, 103, accuracy: 0.001)
+        let squircle = ProxyPilotDockGeometry.squircle(in: iconRect)
+        // The sign must sit entirely inside the icon shape, corners included.
+        let sign = ProxyPilotDockTileView.signRect.insetBy(dx: 1, dy: 1)
+        for corner in [
+            NSPoint(x: sign.minX, y: sign.minY), NSPoint(x: sign.maxX, y: sign.minY),
+            NSPoint(x: sign.minX, y: sign.maxY), NSPoint(x: sign.maxX, y: sign.maxY)
+        ] {
+            XCTAssertTrue(squircle.contains(corner), "sign corner \(corner) falls outside the icon")
+        }
+    }
+
+    /// Renders every tile state to PNGs for visual review. Skipped unless
+    /// PROXYPILOT_DOCK_SNAPSHOT_DIR is set (pass TEST_RUNNER_PROXYPILOT_DOCK_SNAPSHOT_DIR to xcodebuild).
+    func testRenderDockTileSnapshotsWhenRequested() throws {
+        guard let directory = ProcessInfo.processInfo.environment["PROXYPILOT_DOCK_SNAPSHOT_DIR"] else {
+            throw XCTSkip("Set PROXYPILOT_DOCK_SNAPSHOT_DIR to render Dock tile snapshots")
+        }
+        let view = ProxyPilotDockTileView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
+        let cases: [(String, ProxyPilotDockPresentation, Bool, CGFloat, CGFloat)] = [
+            ("inactive", .init(activity: .inactive, modelLabel: ""), false, 0, 0),
+            ("idle", .init(activity: .idle, modelLabel: "GLM-5"), false, 0, 0),
+            ("failed", .init(activity: .failed, modelLabel: "GLM-5"), false, 0, 0),
+            ("processing-p00", .init(activity: .processing, modelLabel: "GPT-5.6"), false, 0, 0),
+            ("processing-p25", .init(activity: .processing, modelLabel: "GPT-5.6"), false, 0.25, 0),
+            ("processing-p60", .init(activity: .processing, modelLabel: "GEMINI-4-PRO"), false, 0.6, 30),
+            ("processing-reduce-motion", .init(activity: .processing, modelLabel: "GEMINI-4-PRO"), true, 0, 0)
+        ]
+        for (name, presentation, reduceMotion, phase, offset) in cases {
+            view.presentation = presentation
+            view.reduceMotion = reduceMotion
+            view.ringPhase = phase
+            view.scrollOffset = offset
+            let rep = try XCTUnwrap(NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: 512, pixelsHigh: 512,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+            ))
+            rep.size = view.bounds.size
+            view.cacheDisplay(in: view.bounds, to: rep)
+            let data = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+            try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
+        }
+        view.presentation = .init(activity: .inactive, modelLabel: "")
+    }
 }

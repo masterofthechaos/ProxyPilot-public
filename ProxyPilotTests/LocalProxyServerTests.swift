@@ -2513,4 +2513,138 @@ final class LocalProxyServerTests: XCTestCase {
         }
     }
 
+    private func assertOMLXHTTPContract(nativeMessages: Bool, streaming: Bool) async throws {
+        let path = nativeMessages ? "/v1/messages" : "/v1/chat/completions"
+        let model = "local-fixture"
+        let nativeHistory: [[String: Any]] = [
+            ["role": "user", "content": "Read a and report its content."],
+            ["role": "assistant", "content": [["type": "redacted_thinking", "data": "opaque"], ["type": "tool_use", "id": "call_1", "name": "read", "input": ["path": "a"]]]],
+            ["role": "user", "content": [["type": "tool_result", "tool_use_id": "call_1", "content": "hello"]]]
+        ]
+        let chatHistory: [[String: Any]] = [
+            ["role": "user", "content": "Read a and report its content."],
+            ["role": "assistant", "content": NSNull(), "tool_calls": [["id": "call_1", "type": "function", "function": ["name": "read", "arguments": "{\"path\":\"a\"}"]]]],
+            ["role": "tool", "tool_call_id": "call_1", "content": "hello"]
+        ]
+        let messages = nativeMessages ? nativeHistory : chatHistory
+        let nativeResponse = #"{"id":"msg_omlx","type":"message","role":"assistant","model":"local-fixture","content":[{"type":"redacted_thinking","data":"opaque"},{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"cache_read_input_tokens":4,"output_tokens":2}}"#
+        let chatResponse = #"{"id":"chatcmpl-omlx","model":"local-fixture","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens":2}}"#
+        let nativeSSE = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_omlx\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"local-fixture\",\"content\":[],\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":4,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        let chatSSE = "data: {\"id\":\"chatcmpl-omlx\",\"model\":\"local-fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-omlx\",\"model\":\"local-fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":4},\"completion_tokens\":2}}\n\ndata: [DONE]\n\n"
+        let responseBody = streaming ? (nativeMessages ? nativeSSE : chatSSE) : (nativeMessages ? nativeResponse : chatResponse)
+        let stub = LocalHTTPStubServer(body: responseBody, contentType: streaming ? "text/event-stream" : "application/json")
+        let upstreamPort = try await stub.start()
+        defer { stub.stop() }
+        let server = makeIsolatedProxyServer()
+        let port = try unusedLoopbackPort()
+        let config = LocalProxyServer.Config(host: "127.0.0.1", port: port, masterKey: "test", upstreamProvider: .omlx,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!, upstreamAPIKey: "omlx-test-key",
+            allowedModels: [model], requiresAuth: false, anthropicTranslatorMode: .hardened, miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: model, googleThoughtSignatureStore: nil)
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var payload: [String: Any] = ["model": model, "max_tokens": 4096, "messages": messages, "stream": streaming]
+        if nativeMessages {
+            payload["thinking"] = ["type": "adaptive"]
+            payload["output_config"] = ["effort": "high"]
+            payload["top_k"] = 10
+        } else {
+            payload["reasoning_effort"] = "high"
+            payload["stop"] = ["unsupported"]
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        XCTAssertTrue((response as? HTTPURLResponse)?.statusCode == 200)
+        if streaming {
+            // The GUI transport appends a final newline before closing. Keep
+            // every internal event boundary and payload byte in the comparison.
+            XCTAssertEqual(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .newlines), responseBody.trimmingCharacters(in: .newlines))
+        } else {
+            let actual = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(responseBody.utf8)) as? [String: Any])
+            XCTAssertTrue(NSDictionary(dictionary: actual).isEqual(to: expected))
+        }
+        let captured = try XCTUnwrap(stub.requests().first)
+        XCTAssertTrue(captured.path == path)
+        XCTAssertTrue(captured.headerValue("Authorization") == "Bearer omlx-test-key")
+        XCTAssertTrue(captured.headerValue("Accept") == (streaming ? "text/event-stream" : "application/json"))
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(captured.body.utf8)) as? [String: Any])
+        XCTAssertTrue(NSDictionary(dictionary: ["messages": sent["messages"]!]).isEqual(to: ["messages": messages]))
+        XCTAssertEqual(sent["top_k"] as? Int, nativeMessages ? 10 : nil)
+        XCTAssertEqual(sent["stop"] != nil, !nativeMessages)
+        let recorded = await waitForReportCard(server, requestCount: 1)
+        XCTAssertTrue(recorded)
+        let record = try await MainActor.run { try XCTUnwrap(server.reportCard.requests.last) }
+        XCTAssertEqual(record.promptCacheHitTokens, 4)
+        XCTAssertEqual(record.promptTokens, nativeMessages ? 14 : 10)
+        XCTAssertEqual(record.completionTokens, 2)
+        if nativeMessages {
+            XCTAssertTrue((sent["thinking"] as? [String: String])?["type"] == "adaptive")
+            XCTAssertTrue((sent["output_config"] as? [String: String])?["effort"] == "high")
+        } else {
+            XCTAssertTrue(sent["reasoning_effort"] as? String == "high")
+        }
+    }
+
+    func testOMLXHTTPContractAcrossProtocolsAndStreaming() async throws {
+        for nativeMessages in [false, true] {
+            for streaming in [false, true] {
+                try await assertOMLXHTTPContract(nativeMessages: nativeMessages, streaming: streaming)
+            }
+        }
+    }
+
+    func testCerebrasSystemInstructionsAcrossProtocolsAndStreaming() async throws {
+        for nativeMessages in [false, true] {
+            for streaming in [false, true] {
+                try await assertCerebrasSystemInstructions(nativeMessages: nativeMessages, streaming: streaming)
+            }
+        }
+    }
+
+    private func assertCerebrasSystemInstructions(nativeMessages: Bool, streaming: Bool) async throws {
+        let responseBody = streaming
+            ? "data: {\"id\":\"fixture\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"fixture\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+            : #"{"id":"fixture","model":"fixture-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#
+        let upstream = LocalHTTPStubServer(body: responseBody, contentType: streaming ? "text/event-stream" : "application/json")
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+        let port = try unusedLoopbackPort()
+        let server = makeIsolatedProxyServer()
+        let config = LocalProxyServer.Config(host: "127.0.0.1", port: port, masterKey: "local-fixture",
+            upstreamProvider: .cerebras, upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: "upstream-fixture", allowedModels: ["fixture-model"], requiresAuth: true,
+            anthropicTranslatorMode: .hardened, miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "fixture-model", googleThoughtSignatureStore: nil)
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+        let path = nativeMessages ? "/v1/messages" : "/v1/chat/completions"
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer local-fixture", forHTTPHeaderField: "Authorization")
+        let history: [[String: Any]] = [["role": "user", "content": "hello"], ["role": "system", "content": "extra"]]
+        var payload: [String: Any] = ["model": "fixture-model", "messages": history, "stream": streaming, "max_tokens": 32]
+        if nativeMessages { payload["system"] = "base" }
+        else { payload["messages"] = [["role": "system", "content": "base"]] + history }
+        request.httpBody = jsonBody(payload)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("ok"))
+        let captured = try XCTUnwrap(upstream.requests().first)
+        XCTAssertEqual(captured.path, "/v1/chat/completions")
+        XCTAssertEqual(captured.headerValue("Authorization"), "Bearer upstream-fixture")
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(captured.body.utf8)) as? [String: Any])
+        let messages = try XCTUnwrap(sent["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["system", "user"])
+        XCTAssertEqual(messages.first?["content"] as? String, "base\n\nextra")
+        XCTAssertEqual(messages.last?["content"] as? String, "hello")
+    }
+
 }

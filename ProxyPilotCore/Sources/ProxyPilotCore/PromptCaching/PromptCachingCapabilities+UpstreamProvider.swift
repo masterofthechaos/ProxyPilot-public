@@ -27,7 +27,7 @@ extension UpstreamProvider {
                 supportsExplicitCacheObjects: false,
                 supportsProviderCacheTelemetry: true
             )
-        case .deepSeek, .moonshot:
+        case .deepSeek, .moonshot, .omlx:
             return PromptCacheCapabilities(
                 supportsAutomaticProviderCaching: true,
                 supportsPromptCacheKey: false,

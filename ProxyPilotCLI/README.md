@@ -94,7 +94,7 @@ proxypilot setup xcode [--port <port>] [--provider <provider>] [--upstream-url <
 | Flag | Default | Description |
 |---|---|---|
 | `--port`, `-p` | `4000` | Port to listen on / route Xcode to |
-| `--provider` | `zai` | Upstream provider |
+| `--provider` | sole configured provider | Upstream provider |
 | `--upstream-url` | provider default | Override upstream API base URL |
 | `--key` | — | Upstream API key value |
 | `--key-stdin` | false | Read one API key line from stdin |
@@ -114,7 +114,7 @@ proxypilot start [--port <port>] [--provider <provider>] [--upstream-url <url>] 
 | Flag | Default | Description |
 |---|---|---|
 | `--port`, `-p` | `4000` | Port to listen on |
-| `--provider` | `openai` | Upstream provider. Valid: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `deepseek`, `mistral`, `minimax`, `minimax-cn`, `qwen`, `9router`, `ollama`, `lmstudio` |
+| `--provider` | sole configured provider | Upstream provider. Valid: `openai`, `groq`, `zai`, `openrouter`, `xai`, `chutes`, `google`, `deepseek`, `mistral`, `minimax`, `minimax-cn`, `qwen`, `9router`, `ollama`, `lmstudio` |
 | `--upstream-url` | provider default | Override upstream API base URL |
 | `--key` | — | Upstream API key. Falls back to environment variable, then keychain/secrets store |
 | `--key-stdin` | false | Read one API key line from stdin |
@@ -285,7 +285,7 @@ proxypilot models [--provider <provider>] [--url <base-url>] [--key <key>] [--fi
 
 | Flag | Default | Description |
 |---|---|---|
-| `--provider` | `openai` | Upstream provider |
+| `--provider` | sole configured provider | Upstream provider |
 | `--url` | provider default | Override upstream API base URL |
 | `--key` | — | Upstream API key |
 | `--filter` | — | Optional filter (`exacto` returns explicit OpenRouter `:exacto` slugs; `verified` uses ProxyPilot Verified models) |
@@ -356,7 +356,7 @@ proxypilot serve [--port <port>] [--provider <provider>] [--upstream-url <upstre
 | Flag | Default | Description |
 |---|---|---|
 | `--port`, `-p` | `4000` | Port to listen on |
-| `--provider` | `openai` | Upstream provider |
+| `--provider` | sole configured provider | Upstream provider |
 | `--upstream-url` | provider default | Override upstream API base URL |
 | `--key` | — | Upstream API key |
 | `--prompt-caching` | `auto` | Cache mode: `auto`, `observe-only`, or `off` |
@@ -504,3 +504,11 @@ Error codes:
 | `E020`-`E027` | Update command fetch/install/permission errors |
 
 In `--json` mode, human-readable errors that would normally go to stderr are written to stdout instead, wrapped in the `{"ok": false, ...}` envelope.
+
+### Cerebras and oMLX
+
+`--provider cerebras` uses `https://api.cerebras.ai/v1` with `CEREBRAS_API_KEY` (or a stored key). Discover current models with `proxypilot models --provider cerebras --json`.
+
+`--provider omlx` uses `http://localhost:8000/v1`; override it with `--upstream-url` to match the server. `OMLX_API_KEY` is optional for the default endpoint; for an overridden endpoint use an explicit `--key` when authentication is enabled. Messages requests use native `/v1/messages`, preserving thinking/tool content and reported cache usage. ProxyPilot does not change oMLX's cache or memory budgets.
+
+When no provider or multiple providers are configured, pass `--provider` explicitly. MCP preflight and model discovery return E047 with configured choices when ambiguous. `setup xcode` retains `default_provider_diverges_from_cli` as a compatibility field, always false.

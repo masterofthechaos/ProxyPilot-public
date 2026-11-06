@@ -64,6 +64,7 @@ public enum ModelDiscovery {
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
+        OpenRouterAppAttribution.apply(to: &request)
 
         let data: Data
         let response: URLResponse

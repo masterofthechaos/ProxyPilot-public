@@ -82,6 +82,7 @@ final class AppViewModel: ObservableObject {
     static let didMigrateQwenVisibleProviderDefaultsKey = "proxypilot.customization.didMigrateQwenVisibleProvider"
     static let didMigrateNineRouterVisibleProviderDefaultsKey = "proxypilot.customization.didMigrateNineRouterVisibleProvider"
     static let didMigrateMetaVisibleProviderDefaultsKey = "proxypilot.customization.didMigrateMetaVisibleProvider"
+    static let didMigrateIssue26ProvidersDefaultsKey = "proxypilot.customization.didMigrateIssue26Providers"
     // autoRestartEnabled defaults key: kept here for resetToFreshInstall cleanup
     private static let autoRestartEnabledDefaultsKey = "proxypilot.autoRestartEnabled"
     private static let requireLocalAuthDefaultsKey = "proxypilot.requireLocalAuth"
@@ -114,8 +115,10 @@ final class AppViewModel: ObservableObject {
         return formatter
     }()
 
-    static let defaultUpstreamAPIBaseURL = UpstreamProvider.zAI.defaultAPIBaseURL
 
+    @Published var providerWorkspaceShowsConfiguration = false
+    let providerCatalog: ProviderCatalogStore
+    let modelFavorites: ModelFavoritesStore
     let providerManager: ProviderManager
     let proxyLifecycle: ProxyLifecycleManager
     let customProviderStorage: CustomProviderStorage
@@ -296,10 +299,12 @@ final class AppViewModel: ObservableObject {
             if let provider = activeCustomProvider {
                 return .custom(provider.id)
             }
-            return .builtIn(upstreamProvider)
+            return hasSelectedProvider ? .builtIn(upstreamProvider) : .none
         }
         set {
             switch newValue {
+            case .none:
+                return
             case .builtIn(let provider):
                 selectBuiltInUpstreamProvider(provider)
             case .custom(let id):
@@ -308,8 +313,17 @@ final class AppViewModel: ObservableObject {
             }
         }
     }
+    /// False until the user chooses a built-in or custom provider. There is no default;
+    /// while false, `upstreamProvider` is an unobservable placeholder.
+    var hasSelectedProvider: Bool {
+        hasActiveCustomProvider || providerManager.hasSelectedBuiltInProvider
+    }
+    func isSelectedBuiltInProvider(_ provider: UpstreamProvider) -> Bool {
+        providerManager.hasSelectedBuiltInProvider && !hasActiveCustomProvider && upstreamProvider == provider
+    }
     var upstreamProviderDisplayTitle: String {
-        activeCustomProvider?.name ?? upstreamProvider.title
+        if let custom = activeCustomProvider { return custom.name }
+        return hasSelectedProvider ? upstreamProvider.title : String(localized: "No provider")
     }
     var selectedUpstreamProviderForNetworking: UpstreamProvider {
         hasActiveCustomProvider ? .openAI : upstreamProvider
@@ -339,7 +353,11 @@ final class AppViewModel: ObservableObject {
 
     func deleteCustomProvider(_ provider: CustomProvider) {
         if activeCustomProviderID == provider.id {
-            selectBuiltInUpstreamProvider(.zAI)
+            // No default to fall back to: deleting the active custom provider
+            // leaves the user choosing again.
+            setActiveCustomProviderID(nil)
+            providerManager.clearProviderSelection()
+            persistAgentLaunchSettings()
         }
         customProviderStorage.delete(provider)
         objectWillChange.send()
@@ -728,6 +746,7 @@ final class AppViewModel: ObservableObject {
     ) -> Set<KeysProviderViewItem> {
         guard let stored = defaults.stringArray(forKey: visibleKeysProvidersDefaultsKey) else {
             defaults.set(true, forKey: didMigrateMetaVisibleProviderDefaultsKey)
+            defaults.set(true, forKey: didMigrateIssue26ProvidersDefaultsKey)
             return Set(KeysProviderViewItem.defaultOrder)
         }
         var decoded = Set(stored.compactMap(KeysProviderViewItem.init(rawValue:)))
@@ -756,6 +775,17 @@ final class AppViewModel: ObservableObject {
                 forKey: visibleKeysProvidersDefaultsKey
             )
             defaults.set(true, forKey: didMigrateMetaVisibleProviderDefaultsKey)
+        }
+        if !defaults.bool(forKey: didMigrateIssue26ProvidersDefaultsKey) {
+            for item in [KeysProviderViewItem.cerebras, .omlx]
+                where storedOrderRawValues?.contains(item.rawValue) != true {
+                decoded.insert(item)
+            }
+            defaults.set(
+                KeysProviderViewItem.defaultOrder.filter { decoded.contains($0) }.map(\.rawValue),
+                forKey: visibleKeysProvidersDefaultsKey
+            )
+            defaults.set(true, forKey: didMigrateIssue26ProvidersDefaultsKey)
         }
         return decoded
     }
@@ -836,9 +866,10 @@ final class AppViewModel: ObservableObject {
 
     func resetAllViewCustomizations() {
         appearancePreference = .system
+        gradientPreset = .violet
         proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
         liquidGlassEnabled = true
-        dockTileInteractiveEnabled = false
+        dockTileInteractiveEnabled = true
         defaultSettingsSection = .home
         visibleHomeDashboardSections = Set(HomeDashboardSection.allCases)
         resetMenuBarCustomization()
@@ -927,6 +958,8 @@ final class AppViewModel: ObservableObject {
             try? KeychainService.delete(key: key)
         }
         customProviderStorage.removeAll()
+        modelFavorites.reset()
+        providerCatalog.reset()
         telemetryService.resetForFreshInstall()
 
         defaults.removeObject(forKey: ProviderManager.upstreamProviderDefaultsKey)
@@ -955,6 +988,7 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.didMigrateQwenVisibleProviderDefaultsKey)
         defaults.removeObject(forKey: Self.didMigrateNineRouterVisibleProviderDefaultsKey)
         defaults.removeObject(forKey: Self.didMigrateMetaVisibleProviderDefaultsKey)
+        defaults.removeObject(forKey: Self.didMigrateIssue26ProvidersDefaultsKey)
         defaults.removeObject(forKey: Self.autoRestartEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.requireLocalAuthDefaultsKey)
         defaults.removeObject(forKey: Self.runInBackgroundDefaultsKey)
@@ -970,6 +1004,10 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: ProviderManager.xcodeAgentModelLegacyDefaultsKey)
         defaults.removeObject(forKey: Self.preflightExpandedDefaultsKey)
         defaults.removeObject(forKey: Self.activeCustomProviderIDDefaultsKey)
+
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("proxypilot.explicitRouteModel.") {
+            defaults.removeObject(forKey: key)
+        }
 
         for provider in UpstreamProvider.allCases {
             defaults.removeObject(forKey: "proxypilot.upstreamAPIBaseURL.\(provider.rawValue)")
@@ -994,12 +1032,8 @@ final class AppViewModel: ObservableObject {
         proxyURLString = Self.defaultProxyURLString
         useBuiltInProxy = true
         setActiveCustomProviderID(nil)
-        upstreamProvider = .zAI
-        upstreamAPIBaseURLString = upstreamProvider.defaultAPIBaseURL
-        upstreamModels = []
-        selectedUpstreamModels = []
-        selectedXcodeAgentModel = providerManager.preferredXcodeAgentModel(from: savedDefaultModels, provider: upstreamProvider)
-        providerManager.reconcileXcodeAgentModelSelection()
+        // A fresh install has no provider; the user chooses one in onboarding.
+        providerManager.clearProviderSelection()
         launchAtLogin = false
         anthropicTranslatorFallbackEnabled = false
         requireLocalAuth = false
@@ -1009,7 +1043,7 @@ final class AppViewModel: ObservableObject {
         showOnboardingWizard = true
         telemetryOptIn = false
         liquidGlassEnabled = true
-        dockTileInteractiveEnabled = false
+        dockTileInteractiveEnabled = true
         inputOutputLoggingEnabled = false
         inputOutputLoggingRecordInputs = false
         inputOutputLoggingRecordOutputs = false
@@ -1020,6 +1054,7 @@ final class AppViewModel: ObservableObject {
         promptCachingMode = .computeCacheHints
         contextCompactionEnabled = false
         appearancePreference = .system
+        gradientPreset = .violet
         proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
         showMenuBarExtra = true
         runInBackground = false
@@ -1030,6 +1065,7 @@ final class AppViewModel: ObservableObject {
         keysProviderOrder = KeysProviderViewItem.defaultOrder
         visibleKeysProviders = Set(KeysProviderViewItem.defaultOrder)
         defaults.set(true, forKey: Self.didMigrateMetaVisibleProviderDefaultsKey)
+        defaults.set(true, forKey: Self.didMigrateIssue26ProvidersDefaultsKey)
         showKeychainAccessPrimer = false
         suppressKeychainAccessPrimer = false
         autoRestartEnabled = true
@@ -1214,10 +1250,9 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    /// The animated LED model marquee/activity ring on the Dock icon. Off by default —
-    /// unlike `liquidGlassEnabled`, enabling this changes system chrome outside the app
-    /// window, so it opts in rather than opts out.
-    @Published var dockTileInteractiveEnabled: Bool = false {
+    /// The animated LED model marquee/activity ring on the Dock icon. On by default;
+    /// a persisted explicit off preference is preserved.
+    @Published var dockTileInteractiveEnabled: Bool = true {
         didSet {
             defaults.set(dockTileInteractiveEnabled, forKey: Self.dockTileInteractiveEnabledDefaultsKey)
         }
@@ -1550,6 +1585,13 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    @Published var gradientPreset: ProxyPilotGradientPreset = .violet {
+        didSet {
+            defaults.set(gradientPreset.rawValue, forKey: ProxyPilotGradientPreset.defaultsKey)
+            NSApp?.dockTile.display()
+        }
+    }
+
     @Published var proxyPilotAccentHex: String = ProxyPilotAccentColor.defaultHex {
         didSet {
             guard let normalized = ProxyPilotAccentColor.normalizedHex(proxyPilotAccentHex) else {
@@ -1675,7 +1717,7 @@ final class AppViewModel: ObservableObject {
     var recoveryState: RecoveryState { proxyLifecycle.recoveryState }
 
     var proxyPilotAccentColor: Color {
-        Color(proxyPilotHex: proxyPilotAccentHex)
+        gradientPreset.colors[1]
     }
 
     var shouldShowToolbarStatus: Bool {
@@ -1981,17 +2023,26 @@ final class AppViewModel: ObservableObject {
         return "Not applied until proxy start"
     }
 
+    var proxyPilotAgentSetupVerified: Bool {
+        agentRuntimeStatus.isReady && proxyPilotAgentRegistrationStatus?.isRegistered == true
+    }
+
+    var proxyPilotAgentSetupLabel: String {
+        if proxyPilotAgentSetupVerified { return "Setup verified" }
+        return agentRuntimeStatus.isReady ? "Registration needed" : "Setup needed"
+    }
+
     var xcodeAgentLiveRouteText: String {
         if xcodeVisibleModelsSnapshot.reflectsRunningProxy {
             return "\(xcodeVisibleModelsSnapshot.modelIDs.count) model(s) from running proxy"
         }
         if let error = xcodeVisibleModelsSnapshot.errorMessage {
-            return "Live check failed: \(error)"
+            return "Model-list check failed: \(error)"
         }
         if xcodeVisibleModelsSnapshot.source == .pendingSettings {
             return "\(xcodeVisibleModelsSnapshot.modelIDs.count) model(s) from pending settings"
         }
-        return "Not checked"
+        return "Model list not checked"
     }
 
     var xcodeAgentLiveProofText: String {
@@ -2073,6 +2124,9 @@ final class AppViewModel: ObservableObject {
         if let provider = activeCustomProvider {
             return "\(provider.name) is a custom OpenAI-compatible provider. Fetch Live Models calls \(provider.apiBaseURL)/models, and Test Upstream Response sends a minimal completion request that may consume credits or quota."
         }
+        guard hasSelectedProvider else {
+            return "Choose a provider first. Nothing is sent anywhere until you do."
+        }
         if upstreamProvider.isLocal {
             return "\(upstreamProvider.title) is local/helper-backed. Fetching or testing checks a local endpoint and does not create cloud-provider billing from ProxyPilot."
         }
@@ -2123,7 +2177,7 @@ final class AppViewModel: ObservableObject {
 
     func localProviderStatusText(for provider: UpstreamProvider) -> String {
         switch provider {
-        case .nineRouter, .ollama, .lmStudio:
+        case .nineRouter, .ollama, .lmStudio, .omlx:
             guard let base = URL(string: provider.defaultAPIBaseURL) else {
                 return "Default URL could not be parsed."
             }
@@ -2141,6 +2195,8 @@ final class AppViewModel: ObservableObject {
         switch provider {
         case .ollama:
             return "Start with `ollama serve`, then pull a model such as `ollama pull qwen2.5-coder:0.5b`."
+        case .omlx:
+            return "Start oMLX and load a model. Match its server URL here; store an oMLX API key if authentication is enabled. Messages requests use its native Anthropic endpoint."
         case .lmStudio:
             return "Open LM Studio, load a model, and start the Local Server with OpenAI-compatible mode enabled."
         case .nineRouter:
@@ -2655,6 +2711,168 @@ final class AppViewModel: ObservableObject {
         preflightResults.contains { $0.status == .fail }
     }
 
+    // MARK: - Provider workspace (browsing never selects a route)
+
+    func browserTitle(_ selection: UpstreamSelection) -> String {
+        switch selection {
+        case .none: return "Choose a provider"
+        case .builtIn(let provider): return provider.title
+        case .custom(let id): return customProviders.first { $0.id == id }?.name ?? "Unavailable provider"
+        }
+    }
+
+    func browserEndpoint(_ selection: UpstreamSelection) -> String {
+        switch selection {
+        case .none: return ""
+        case .builtIn(let provider): return providerManager.upstreamAPIBaseURL(for: provider)?.absoluteString ?? provider.defaultAPIBaseURL
+        case .custom(let id): return customProviders.first { $0.id == id }?.apiBaseURL ?? ""
+        }
+    }
+
+    func browserIdentity(_ selection: UpstreamSelection) -> ProviderCatalogStore.Identity {
+        let raw = browserEndpoint(selection)
+        let normalized = proxyService.normalizedUpstreamAPIBase(from: raw)?.absoluteString ?? raw
+        return .init(providerID: selection.id, endpoint: normalized)
+    }
+
+    func browserSavedModels(_ selection: UpstreamSelection) -> [String] {
+        switch selection {
+        case .none: return []
+        case .builtIn(let provider): return defaults.stringArray(forKey: ProviderManager.defaultModelsKey(for: provider)) ?? []
+        case .custom(let id): return defaults.stringArray(forKey: Self.customProviderDefaultModelsKey(for: id)) ?? []
+        }
+    }
+
+    func prepareBrowser(_ selection: UpstreamSelection) {
+        guard selection != .none else { return }
+        modelFavorites.migrate(providerID: selection.id, savedDefaults: browserSavedModels(selection))
+        providerCatalog.hydrate(browserIdentity(selection))
+    }
+
+    func browserHasKey(_ selection: UpstreamSelection) -> Bool {
+        switch selection {
+        case .none: return false
+        case .builtIn(let provider): return hasKey(for: provider)
+        case .custom(let id): return customProviders.first { $0.id == id }.map(customProviderHasKey) ?? false
+        }
+    }
+
+    func browserRequiresKey(_ selection: UpstreamSelection) -> Bool {
+        switch selection {
+        case .none: return false
+        case .builtIn(let provider): return provider.requiresAPIKey
+        case .custom: return true
+        }
+    }
+
+    func saveBrowserEndpoint(_ raw: String, selection: UpstreamSelection) -> Bool {
+        guard let url = proxyService.normalizedUpstreamAPIBase(from: raw),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.host != nil, url.user == nil, url.password == nil else { return false }
+        providerCatalog.invalidate(browserIdentity(selection))
+        switch selection {
+        case .none: return false
+        case .builtIn(let provider):
+            defaults.set(url.absoluteString, forKey: "proxypilot.upstreamAPIBaseURL." + provider.rawValue)
+            if isSelectedBuiltInProvider(provider) { upstreamAPIBaseURLString = url.absoluteString }
+        case .custom(let id):
+            guard var provider = customProviders.first(where: { $0.id == id }) else { return false }
+            provider.apiBaseURL = url.absoluteString
+            updateCustomProvider(provider)
+        }
+        objectWillChange.send()
+        return true
+    }
+
+    @discardableResult
+    func saveBrowserKey(_ key: String, selection: UpstreamSelection) -> Bool {
+        let success: Bool
+        switch selection {
+        case .none: return false
+        case .builtIn(let provider):
+            providerKeyDrafts[provider] = key
+            success = providerManager.saveKey(for: provider)
+        case .custom(let id):
+            guard let provider = customProviders.first(where: { $0.id == id }) else { return false }
+            do { try KeychainService.set(key, forAccount: provider.keychainAccountName); success = true }
+            catch { return false }
+        }
+        if success { providerCatalog.invalidate(browserIdentity(selection)); objectWillChange.send() }
+        return success
+    }
+
+    func deleteBrowserKey(_ selection: UpstreamSelection) {
+        switch selection {
+        case .none: return
+        case .builtIn(let provider): deleteKey(for: provider)
+        case .custom(let id):
+            if let custom = customProviders.first(where: { $0.id == id }) { deleteCustomProviderKey(for: custom) }
+        }
+        providerCatalog.invalidate(browserIdentity(selection))
+        objectWillChange.send()
+    }
+
+    func browserModels(_ selection: UpstreamSelection) -> [UpstreamModel] {
+        if let snapshot = providerCatalog.snapshots[browserIdentity(selection)] { return snapshot.models }
+        return []
+    }
+
+    func refreshBrowser(_ selection: UpstreamSelection, force: Bool = false) async {
+        guard selection != .none else { return }
+        prepareBrowser(selection)
+        let identity = browserIdentity(selection)
+        guard let endpoint = URL(string: identity.endpoint) else { return }
+        let provider: UpstreamProvider
+        let key: String
+        switch selection {
+        case .none: return
+        case .builtIn(let selected):
+            provider = selected
+            key = selected.keychainKey.flatMap { KeychainService.get(key: $0) } ?? ""
+        case .custom(let id):
+            guard let custom = customProviders.first(where: { $0.id == id }) else { return }
+            provider = .openAI
+            key = KeychainService.get(account: custom.keychainAccountName) ?? ""
+        }
+        guard !browserRequiresKey(selection) || !key.isEmpty else { return }
+        await providerCatalog.refresh(identity, force: force) { [proxyService] in
+            try await proxyService.fetchUpstreamModels(apiBase: endpoint, apiKey: key, provider: provider)
+        }
+    }
+
+    func useBrowserModel(_ model: UpstreamModel, selection: UpstreamSelection) {
+        guard selection != .none else { return }
+        selectedUpstreamSelection = selection
+        if let snapshot = providerCatalog.snapshots[browserIdentity(selection)] {
+            upstreamModels = snapshot.models
+        }
+        if !upstreamModels.contains(where: { $0.id == model.id }) { upstreamModels.append(model) }
+        selectedUpstreamModels.formUnion(browserSavedModels(selection))
+        selectedUpstreamModels.insert(model.id)
+        selectedXcodeAgentModel = model.id
+        defaults.set(model.id, forKey: "proxypilot.explicitRouteModel." + selection.id)
+        objectWillChange.send()
+    }
+
+    var favoriteXcodeModels: [String] {
+        modelFavorites.favorites(providerID: selectedUpstreamSelection.id).sorted()
+    }
+
+    func setBrowserAdvertised(_ id: String, selection: UpstreamSelection, enabled: Bool) {
+        var values = Set(browserSavedModels(selection))
+        if enabled { values.insert(id) } else { values.remove(id) }
+        switch selection {
+        case .none: return
+        case .builtIn(let provider): defaults.set(values.sorted(), forKey: ProviderManager.defaultModelsKey(for: provider))
+        case .custom(let uuid): defaults.set(values.sorted(), forKey: Self.customProviderDefaultModelsKey(for: uuid))
+        }
+        if selectedUpstreamSelection == selection {
+            if enabled { selectedUpstreamModels.insert(id) }
+            else if selectedXcodeAgentModel != id { selectedUpstreamModels.remove(id) }
+        }
+        objectWillChange.send()
+    }
+
     init(
         defaults: UserDefaults = .standard,
         proxyService: ProxyService = ProxyService(),
@@ -2676,6 +2894,8 @@ final class AppViewModel: ObservableObject {
         inputOutputLoggingPreferencesStore: InputOutputLoggingPreferencesStore? = nil
     ) {
         self.defaults = defaults
+        self.providerCatalog = ProviderCatalogStore(defaults: defaults)
+        self.modelFavorites = ModelFavoritesStore(defaults: defaults)
         self.proxyService = proxyService
         self.localProxyServer = localProxyServer
         self.preflightService = PreflightService(proxyService: proxyService)
@@ -2710,7 +2930,7 @@ final class AppViewModel: ObservableObject {
 
         telemetryOptIn = defaults.bool(forKey: Self.telemetryOptInDefaultsKey)
         liquidGlassEnabled = defaults.object(forKey: Self.liquidGlassEnabledDefaultsKey) as? Bool ?? true
-        dockTileInteractiveEnabled = defaults.object(forKey: Self.dockTileInteractiveEnabledDefaultsKey) as? Bool ?? false
+        dockTileInteractiveEnabled = defaults.object(forKey: Self.dockTileInteractiveEnabledDefaultsKey) as? Bool ?? true
         inputOutputLoggingEnabled = defaults.bool(forKey: Self.inputOutputLoggingEnabledDefaultsKey)
         inputOutputLoggingRecordInputs = defaults.bool(forKey: Self.inputOutputLoggingRecordInputsDefaultsKey)
         inputOutputLoggingRecordOutputs = defaults.bool(forKey: Self.inputOutputLoggingRecordOutputsDefaultsKey)
@@ -2740,6 +2960,7 @@ final class AppViewModel: ObservableObject {
         appearancePreference = AppAppearancePreference(
             rawValue: defaults.string(forKey: Self.appearancePreferenceDefaultsKey) ?? ""
         ) ?? .system
+        gradientPreset = ProxyPilotGradientPreset(rawValue: defaults.string(forKey: ProxyPilotGradientPreset.defaultsKey) ?? "") ?? .violet
         proxyPilotAccentHex = ProxyPilotAccentColor.normalizedHex(
             defaults.string(forKey: Self.proxyPilotAccentHexDefaultsKey) ?? ""
         ) ?? ProxyPilotAccentColor.defaultHex
@@ -2880,9 +3101,7 @@ final class AppViewModel: ObservableObject {
                 repoGPS.startMonitoring()
             }
             Task { await detectXcodeInstallations() }
-            if upstreamProvider == .openRouter {
-                Task { await providerManager.loadVerifiedModels() }
-            }
+
             Task { await hydrateCurrentProviderModelCacheIfNeeded() }
         }
 
@@ -3582,6 +3801,10 @@ final class AppViewModel: ObservableObject {
 
     func fetchUpstreamModels() async {
         clearIssue()
+        guard hasSelectedProvider else {
+            applyIssue(.noProviderSelected)
+            return
+        }
         let provider = selectedUpstreamProviderForNetworking
         let customProviderID = activeCustomProviderID
 
@@ -3649,7 +3872,8 @@ final class AppViewModel: ObservableObject {
         guard upstreamModels.isEmpty else { return }
         let provider = selectedUpstreamProviderForNetworking
         let customProviderID = activeCustomProviderID
-        guard selectedUpstreamRequiresAPIKey,
+        guard hasSelectedProvider,
+              selectedUpstreamRequiresAPIKey,
               let apiKey = selectedUpstreamAPIKey(),
               !apiKey.isEmpty else {
             return
@@ -3705,6 +3929,10 @@ final class AppViewModel: ObservableObject {
         clearIssue()
         upstreamTestOutput = ""
         upstreamTestModelUsed = ""
+        guard hasSelectedProvider else {
+            applyIssue(.noProviderSelected)
+            return
+        }
         let provider = selectedUpstreamProviderForNetworking
 
         let apiBase: URL
@@ -4347,6 +4575,7 @@ final class AppViewModel: ObservableObject {
     /// Builds a `LocalProxyServer.Config` from current AppViewModel state.
     /// Called by `ProxyLifecycleManager` via the `builtInProxyConfigBuilder` closure.
     func buildBuiltInProxyConfig() throws -> LocalProxyServer.Config {
+        guard hasSelectedProvider else { throw IssueError(issue: .noProviderSelected) }
         let provider = selectedUpstreamProviderForNetworking
         let proxy = try validatedProxyURL(requireLocalhost: true)
 
@@ -4384,7 +4613,7 @@ final class AppViewModel: ObservableObject {
         }
 
         let hasFetchedModels = !upstreamModels.isEmpty
-        let allowedModels: Set<String> = {
+        var allowedModels: Set<String> = {
             if hasActiveCustomProvider { return selectedUpstreamModels.union(savedDefaultModels) }
             if !selectedUpstreamModels.isEmpty {
                 let visibleIDs = Set(providerManager.modelSelectionRows.map(\.id))
@@ -4396,6 +4625,11 @@ final class AppViewModel: ObservableObject {
             return Set(savedDefaultModels)
         }()
         let preferredModel = effectiveXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Explicit route selection survives relaunch independently of advertised defaults.
+        if !selectedXcodeAgentModel.isEmpty,
+           defaults.string(forKey: "proxypilot.explicitRouteModel." + selectedUpstreamSelection.id) == selectedXcodeAgentModel {
+            allowedModels.insert(selectedXcodeAgentModel)
+        }
         guard let defaultUpstreamBase = URL(string: selectedUpstreamProviderDefaultAPIBaseURL) else {
             throw IssueError(issue: AppIssue(
                 code: .invalidProxyURL,
@@ -4855,12 +5089,7 @@ final class AppViewModel: ObservableObject {
         if let serverError = error as? LocalProxyServer.ServerError,
            case .bindFailed(let message) = serverError,
            message.lowercased().contains("address already in use") {
-            return AppIssue(
-                code: .portInUse,
-                title: String(localized: "Proxy Port Already In Use"),
-                message: String(localized: "Another process is using this port. Switch to 4001 or free the current port."),
-                actions: [.setProxyURLTo4001, .runPreflight]
-            )
+            return .portInUse(port: URL(string: proxyURLString)?.port.flatMap(UInt16.init(exactly:)))
         }
 
         let text = error.localizedDescription.lowercased()
@@ -5041,6 +5270,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func persistAgentLaunchSettings() {
+        // Never hand the Xcode launcher a placeholder provider.
         guard providerManager.isInitialized else { return }
         let port = URL(string: proxyURLString)?.port.flatMap(UInt16.init(exactly:))
             ?? ProxyPilotDefaults.defaultPort
@@ -5051,10 +5281,10 @@ final class AppViewModel: ObservableObject {
         }
         let settings = AgentLaunchSettings(
             port: port,
-            modelID: effectiveXcodeAgentModel,
-            upstreamLabel: upstreamProviderDisplayTitle,
-            providerID: hasActiveCustomProvider ? UpstreamProvider.openAI.rawValue : upstreamProvider.rawValue,
-            upstreamURL: upstreamAPIBaseURLString,
+            modelID: hasSelectedProvider ? effectiveXcodeAgentModel : nil,
+            upstreamLabel: hasSelectedProvider ? upstreamProviderDisplayTitle : nil,
+            providerID: hasSelectedProvider ? (hasActiveCustomProvider ? UpstreamProvider.openAI.rawValue : upstreamProvider.rawValue) : nil,
+            upstreamURL: hasSelectedProvider ? upstreamAPIBaseURLString : nil,
             credentialKey: activeCustomProvider?.keychainAccountName,
             promptCachingMode: cacheMode,
             contextCompactionEnabled: contextCompactionEnabled

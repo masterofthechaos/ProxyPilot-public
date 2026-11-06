@@ -59,4 +59,34 @@ final class UpstreamClientTests: XCTestCase {
         XCTAssertEqual(base.withUpstreamRequestTimeout(.infinity).effectiveUpstreamRequestTimeout, 30)
     }
 
+    func testOpenRouterRequestsCarryProxyPilotAttributionOverClientHeaders() throws {
+        let config = ProxyConfiguration(upstreamAPIBaseURL: "https://openrouter.ai/api/v1", upstreamAPIKey: "upstream-key")
+        let request = try UpstreamClient.buildRequest(
+            path: "/v1/chat/completions",
+            method: "POST",
+            headers: [("X-Title", "SomeClient"), ("HTTP-Referer", "https://client.example")],
+            body: Data(#"{"model":"m"}"#.utf8),
+            config: config
+        )
+        XCTAssertEqual(request.value(forHTTPHeaderField: "HTTP-Referer"), "https://micah.chat/proxypilot")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-OpenRouter-Title"), "ProxyPilot")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Title"), "ProxyPilot")
+    }
+
+    func testNonOpenRouterRequestsDoNotGainAttribution() throws {
+        let config = ProxyConfiguration(upstreamAPIBaseURL: "https://api.example.com/v1/", upstreamAPIKey: "upstream-key")
+        let request = try UpstreamClient.buildRequest(path: "chat/completions", method: "POST", headers: [], body: nil, config: config)
+        XCTAssertNil(request.value(forHTTPHeaderField: "HTTP-Referer"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "X-OpenRouter-Title"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "X-Title"))
+    }
+
+    func testAttributionHostMatching() {
+        XCTAssertTrue(OpenRouterAppAttribution.appliesTo(URL(string: "https://openrouter.ai/api/v1/chat/completions")))
+        XCTAssertTrue(OpenRouterAppAttribution.appliesTo(URL(string: "https://eu.openrouter.ai/api/v1")))
+        XCTAssertFalse(OpenRouterAppAttribution.appliesTo(URL(string: "https://notopenrouter.ai/api")))
+        XCTAssertFalse(OpenRouterAppAttribution.appliesTo(URL(string: "https://openrouter.ai.evil.example/api")))
+        XCTAssertFalse(OpenRouterAppAttribution.appliesTo(nil))
+    }
+
 }

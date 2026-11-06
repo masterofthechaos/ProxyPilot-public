@@ -10,6 +10,8 @@ enum KeychainService {
         case xAIAPIKey = "XAI_API_KEY"
         case chutesAPIKey = "CHUTES_API_KEY"
         case groqAPIKey = "GROQ_API_KEY"
+        case cerebrasAPIKey = "CEREBRAS_API_KEY"
+        case omlxAPIKey = "OMLX_API_KEY"
         case googleAPIKey = "GOOGLE_API_KEY"
         case metaAPIKey = "MODEL_API_KEY"
         case moonshotAPIKey = "MOONSHOT_API_KEY"

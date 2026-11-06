@@ -18,8 +18,8 @@ packages:
 settings:
   base:
     SWIFT_VERSION: 6.0
-    MARKETING_VERSION: "1.17.6"
-    CURRENT_PROJECT_VERSION: "153"
+    MARKETING_VERSION: "1.18.0"
+    CURRENT_PROJECT_VERSION: "160"
 targets:
   ProxyPilot-macOS:
     type: application

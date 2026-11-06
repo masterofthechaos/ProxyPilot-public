@@ -317,6 +317,8 @@ final class PreflightService {
         switch provider {
         case .ollama:
             return "Ollama is not listening at \(baseURL.absoluteString). Start it with `ollama serve`, then pull a model such as `ollama pull qwen2.5-coder:0.5b`."
+        case .omlx:
+            return "oMLX is not listening at \(baseURL.absoluteString). Start oMLX, load a model, and check its configured server URL."
         case .lmStudio:
             return "LM Studio is not listening at \(baseURL.absoluteString). Start LM Studio's local server and load an OpenAI-compatible model."
         case .nineRouter:

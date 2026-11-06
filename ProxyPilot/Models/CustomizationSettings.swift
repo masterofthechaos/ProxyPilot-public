@@ -158,6 +158,8 @@ enum KeysProviderViewItem: String, CaseIterable, Identifiable {
     case xAI = "xai"
     case chutes = "chutes"
     case groq = "groq"
+    case cerebras = "cerebras"
+    case omlx = "omlx"
     case google = "google"
     case deepSeek = "deepseek"
     case moonshot = "moonshot"
@@ -190,6 +192,8 @@ enum KeysProviderViewItem: String, CaseIterable, Identifiable {
         switch provider {
         case .nineRouter:
             return "9Router local gateway setup row. No ProxyPilot API key required."
+        case .omlx:
+            return "Local inference with an optional oMLX API key and native Messages routing."
         case .ollama, .lmStudio:
             return "Local provider setup row. No ProxyPilot API key required."
         default:
@@ -223,4 +227,17 @@ extension Color {
         let blue = Double(value & 0x0000FF) / 255.0
         self.init(red: red, green: green, blue: blue)
     }
+}
+
+/// Shared decorative palette. Semantic status colors keep their meaning.
+enum ProxyPilotGradientPreset: String, CaseIterable, Identifiable {
+    case violet, sunset
+    static let defaultsKey = "proxypilot.customization.gradientPreset"
+    var id: Self { self }
+    var title: String { self == .violet ? "Violet & Indigo" : "Coral & Amber" }
+    var hexColors: [String] {
+        self == .violet ? ["#F678C0", "#B27DFB", "#7674FD"] : ["#F77791", "#ED7955", "#DDA33E"]
+    }
+    var colors: [Color] { hexColors.map { Color(proxyPilotHex: $0) } }
+    var gradient: LinearGradient { LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing) }
 }

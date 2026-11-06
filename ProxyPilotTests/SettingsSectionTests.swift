@@ -62,14 +62,14 @@ final class SettingsSectionTests: XCTestCase {
 
     func testSettingsSectionsExposeNativeSidebarMetadataInOrder() {
         XCTAssertEqual(SettingsSection.allCases, [.home, .history, .harnesses, .proxy, .models, .routing, .keys, .advanced, .customization])
-        XCTAssertEqual(SettingsSection.sidebarSections, [.home, .history, .proxy, .models, .routing, .keys, .harnesses, .advanced, .customization])
+        XCTAssertEqual(SettingsSection.sidebarSections, [.home, .models, .proxy, .history, .harnesses, .advanced])
         XCTAssertEqual(SettingsSection.home.title, "Home")
-        XCTAssertEqual(SettingsSection.history.title, "Session History")
+        XCTAssertEqual(SettingsSection.history.title, "Sessions")
         XCTAssertEqual(SettingsSection.harnesses.title, "RepoGPS")
-        XCTAssertEqual(SettingsSection.proxy.title, "Xcode Setup")
+        XCTAssertEqual(SettingsSection.proxy.title, "Xcode")
         XCTAssertEqual(SettingsSection.routing.title, "Connections")
         XCTAssertEqual(SettingsSection.keys.title, "Keys & Providers")
-        XCTAssertEqual(SettingsSection.advanced.title, "Advanced")
+        XCTAssertEqual(SettingsSection.advanced.title, "Settings")
         XCTAssertEqual(SettingsSection.customization.title, "Customization")
         XCTAssertEqual(SettingsSection.home.systemImage, "house")
         XCTAssertEqual(SettingsSection.history.systemImage, "clock.arrow.circlepath")
@@ -82,8 +82,8 @@ final class SettingsSectionTests: XCTestCase {
     }
 
     func testSettingsSectionsExposeCompactTabTitlesForCollapsedSidebar() {
-        XCTAssertEqual(SettingsSection.collapsedTabSections, [.home, .history, .proxy, .models, .routing, .keys, .harnesses, .advanced])
-        XCTAssertEqual(SettingsSection.collapsedTabSections.map(\.compactTitle), ["Home", "History", "Xcode Setup", "Models", "Connections", "Keys & Providers", "RepoGPS", "Advanced"])
+        XCTAssertEqual(SettingsSection.collapsedTabSections, [.home, .models, .proxy, .history, .harnesses, .advanced])
+        XCTAssertEqual(SettingsSection.collapsedTabSections.map(\.compactTitle), ["Home", "Providers & Models", "Xcode", "History", "RepoGPS", "Settings"])
         XCTAssertFalse(SettingsSection.collapsedTabSections.contains(.customization))
     }
 
@@ -95,12 +95,11 @@ final class SettingsSectionTests: XCTestCase {
         XCTAssertFalse(
             SettingsSection.availableCollapsedTabSections(repoGPSRoutingEnabled: false).contains(.routing)
         )
-        XCTAssertTrue(
-            SettingsSection.availableSidebarSections(repoGPSRoutingEnabled: true).contains(.routing)
-        )
-        XCTAssertTrue(
-            SettingsSection.availableCollapsedTabSections(repoGPSRoutingEnabled: true).contains(.routing)
-        )
+        XCTAssertFalse(SettingsSection.availableSidebarSections(repoGPSRoutingEnabled: true).contains(.routing))
+        XCTAssertEqual(AppNavigationTarget.migrated(.routing).section, .harnesses)
+        XCTAssertEqual(AppNavigationTarget.migrated(.keys).section, .models)
+        XCTAssertEqual(AppNavigationTarget.migrated(.customization).category, .appearance)
+        XCTAssertFalse(SettingsSection.availableCollapsedTabSections(repoGPSRoutingEnabled: true).contains(.routing))
     }
 
     func testRepoGPSRoutingFeatureRequiresInstallerOwnedExecutable() {

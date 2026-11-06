@@ -14,6 +14,7 @@ import ProxyPilotCore
 /// must not change the model RepoGPS uses, and vice versa.
 struct RoutingView: View {
     @EnvironmentObject private var vm: AppViewModel
+    var embedded = false
     var onOpenModels: () -> Void = {}
 
     /// Shared with Home and the menu bar via `AppViewModel`. Previously a
@@ -23,17 +24,26 @@ struct RoutingView: View {
 
     /// Pending RepoGPS selection. Held locally so the route only changes when
     /// the owner commits it — picking a model must not restart their daemon.
-    @State private var pendingProvider: UpstreamProvider = .openRouter
+    @State private var pendingProvider: UpstreamProvider?
     @State private var pendingModel: String = ""
     @State private var hasLoadedPending = false
     @State private var cliInstallError: String?
 
     var body: some View {
-        Form {
-            xcodeRouteSection
-            repoGPSRouteSection
+        Group {
+            if embedded {
+                VStack(alignment: .leading, spacing: 12) { repoGPSRouteSection }
+            } else {
+                Form { xcodeRouteSection; repoGPSRouteSection }.formStyle(.grouped)
+            }
         }
-        .formStyle(.grouped)
+        .onReceive(vm.providerCatalog.objectWillChange) { _ in vm.objectWillChange.send() }
+        .task(id: pendingProvider) {
+            if let pendingProvider { await vm.refreshBrowser(.builtIn(pendingProvider)) }
+        }
+        .onChange(of: pendingProvider) { old, new in
+            if old != nil, new?.rawValue != routeControl.status.provider { pendingModel = "" }
+        }
         .task {
             await vm.refreshRouteControlNow()
             loadPendingFromRouteIfNeeded()
@@ -101,8 +111,9 @@ struct RoutingView: View {
 
             case .ready:
                 Picker("Provider", selection: $pendingProvider) {
+                    Text("Choose a provider…").tag(Optional<UpstreamProvider>.none)
                     ForEach(UpstreamProvider.allCases) { provider in
-                        Text(provider.title).tag(provider)
+                        Text(provider.title).tag(Optional(provider))
                     }
                 }
                 .pickerStyle(.menu)
@@ -130,8 +141,10 @@ struct RoutingView: View {
                 }
 
                 HStack {
-                    Button("Restart & Apply Changes") {
+                    Button("Apply & Restart") {
+                        guard RouteInterruptionConfirmation.confirm(route: "the RepoGPS proxy") else { return }
                         Task {
+                            guard let pendingProvider else { return }
                             await routeControl.applyRoute(
                                 provider: pendingProvider.rawValue,
                                 model: pendingModel,
@@ -221,7 +234,9 @@ struct RoutingView: View {
     /// discovered. Keep the active model selectable so applying an unrelated
     /// change cannot silently retarget the route.
     private var modelChoices: [String] {
-        var choices = vm.xcodeAgentModelCandidates
+        let selection = pendingProvider.map(UpstreamSelection.builtIn) ?? .none
+        var choices = Array(Set(vm.browserModels(selection).map(\.id))
+            .union(vm.modelFavorites.favorites(providerID: selection.id))).sorted()
         if let current = routeControl.status.model, !current.isEmpty, !choices.contains(current) {
             choices.insert(current, at: 0)
         }
@@ -240,12 +255,12 @@ struct RoutingView: View {
     }
 
     private var hasPendingChange: Bool {
-        pendingProvider.rawValue != routeControl.status.provider
+        pendingProvider?.rawValue != routeControl.status.provider
             || pendingModel != (routeControl.status.model ?? "")
     }
 
     private var canApply: Bool {
-        !routeControl.isApplying && !pendingModel.isEmpty && hasPendingChange
+        pendingProvider != nil && !routeControl.isApplying && !pendingModel.isEmpty && hasPendingChange
     }
 
     /// Seed the pending selection once, so a background refresh cannot discard
@@ -260,6 +275,8 @@ struct RoutingView: View {
         if let provider = routeControl.status.provider,
            let match = UpstreamProvider(rawValue: provider) {
             pendingProvider = match
+        } else {
+            pendingProvider = nil
         }
         pendingModel = routeControl.status.model ?? ""
     }

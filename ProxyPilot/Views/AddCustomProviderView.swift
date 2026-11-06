@@ -34,7 +34,7 @@ struct AddCustomProviderView: View {
             SecureField("API Key", text: $apiKey)
                 .textFieldStyle(.roundedBorder)
 
-            Text("Custom providers use OpenAI-compatible endpoints without translation or parameter normalization. Compatibility with Xcode Agent is not guaranteed.")
+            Text("Custom providers use OpenAI-compatible Chat Completions. Xcode Agent Messages requests are translated to that format. Choose the built-in Cerebras or oMLX provider for provider-specific compatibility and native routing.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 

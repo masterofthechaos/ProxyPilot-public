@@ -268,12 +268,7 @@ final class ProxyLifecycleManager: ObservableObject {
             if let serverError = error as? LocalProxyServer.ServerError,
                case .bindFailed(let message) = serverError,
                message.lowercased().contains("address already in use") {
-                throw IssueError(issue: AppIssue(
-                    code: .portInUse,
-                    title: String(localized: "Proxy Port Already In Use"),
-                    message: String(localized: "Port") + " \(config.port) " + String(localized: "is already in use. Choose another port (for example 4001)."),
-                    actions: [.setProxyURLTo4001, .runPreflight]
-                ))
+                throw IssueError(issue: .portInUse(port: config.port))
             }
             throw error
         }
@@ -300,10 +295,8 @@ final class ProxyLifecycleManager: ObservableObject {
         // In particular, never report a failed bind as success just because a
         // different process answers the readiness request.
         if localProxyServer.state.lastStatus.lowercased().contains("address already in use") {
-            throw IssueError(issue: AppIssue(
-                code: .portInUse,
-                title: String(localized: "Proxy Port Already In Use"),
-                message: String(localized: "Another listener still holds the proxy port. Wait for it to stop, then try Start again."),
+            throw IssueError(issue: .portInUse(
+                port: baseURL.port.flatMap(UInt16.init(exactly:)),
                 actions: [.retryStart, .runPreflight]
             ))
         }
@@ -314,12 +307,7 @@ final class ProxyLifecycleManager: ObservableObject {
         } catch {
             let status = localProxyServer.state.lastStatus
             if status.lowercased().contains("address already in use") {
-                throw IssueError(issue: AppIssue(
-                    code: .portInUse,
-                    title: String(localized: "Proxy Port Already In Use"),
-                    message: String(localized: "Port appears to be in use. Switch to 4001 or stop the process using the current port."),
-                    actions: [.setProxyURLTo4001, .runPreflight]
-                ))
+                throw IssueError(issue: .portInUse(port: baseURL.port.flatMap(UInt16.init(exactly:))))
             }
 
             if status.isEmpty {
@@ -396,12 +384,7 @@ final class ProxyLifecycleManager: ObservableObject {
         if let serverError = error as? LocalProxyServer.ServerError,
            case .bindFailed(let message) = serverError,
            message.lowercased().contains("address already in use") {
-            return AppIssue(
-                code: .portInUse,
-                title: String(localized: "Proxy Port Already In Use"),
-                message: String(localized: "Another process is using this port. Switch to 4001 or free the current port."),
-                actions: [.setProxyURLTo4001, .runPreflight]
-            )
+            return .portInUse(port: (try? proxyURLValidator?(true))?.url.port.flatMap(UInt16.init(exactly:)))
         }
 
         let text = error.localizedDescription.lowercased()

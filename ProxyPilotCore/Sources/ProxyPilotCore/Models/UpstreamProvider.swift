@@ -8,6 +8,8 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     case xAI        = "xai"
     case chutes     = "chutes"
     case groq       = "groq"
+    case cerebras   = "cerebras"
+    case omlx       = "omlx"
     case google     = "google"
     case deepSeek   = "deepseek"
     case moonshot   = "moonshot"
@@ -30,6 +32,8 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .xAI:        return "xAI (Grok)"
         case .chutes:     return "Chutes"
         case .groq:       return "Groq"
+        case .cerebras:   return "Cerebras"
+        case .omlx:       return "oMLX"
         case .google:     return "Google (Gemini)"
         case .deepSeek:   return "DeepSeek"
         case .moonshot:   return "Moonshot.ai (Kimi)"
@@ -52,6 +56,8 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .xAI:        return "https://api.x.ai/v1"
         case .chutes:     return "https://llm.chutes.ai/v1"
         case .groq:       return "https://api.groq.com/openai/v1"
+        case .cerebras:   return "https://api.cerebras.ai/v1"
+        case .omlx:       return "http://localhost:8000/v1"
         case .google:     return "https://generativelanguage.googleapis.com/v1beta/openai"
         case .deepSeek:   return "https://api.deepseek.com/v1"
         case .moonshot:   return "https://api.moonshot.ai/v1"
@@ -232,7 +238,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// Whether this provider runs on the local machine (no cloud API).
     public var isLocal: Bool {
         switch self {
-        case .nineRouter, .ollama, .lmStudio: return true
+        case .nineRouter, .ollama, .lmStudio, .omlx: return true
         default: return false
         }
     }
@@ -240,7 +246,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// Whether every discovered model may be selected automatically.
     public var autoSelectDiscoveredModels: Bool {
         switch self {
-        case .nineRouter, .ollama, .lmStudio: return true
+        case .nineRouter, .ollama, .lmStudio, .omlx: return true
         default: return false
         }
     }
@@ -255,7 +261,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// true local-inference runtimes qualify.
     public var supportsContextCompaction: Bool {
         switch self {
-        case .ollama, .lmStudio: return true
+        case .ollama, .lmStudio, .omlx: return true
         default: return false
         }
     }
@@ -268,6 +274,8 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         case .xAI:        return SecretKey.xAIAPIKey
         case .chutes:     return SecretKey.chutesAPIKey
         case .groq:       return SecretKey.groqAPIKey
+        case .cerebras:   return SecretKey.cerebrasAPIKey
+        case .omlx:       return SecretKey.omlxAPIKey
         case .google:     return SecretKey.googleAPIKey
         case .deepSeek:   return SecretKey.deepSeekAPIKey
         case .moonshot:   return SecretKey.moonshotAPIKey
@@ -290,13 +298,13 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// Whether this provider has an official Anthropic-compatible endpoint that
     /// can receive `/v1/messages` requests directly.
     public var supportsAnthropicPassthrough: Bool {
-        isMiniMax || self == .deepSeek || self == .moonshot || self == .meta
+        isMiniMax || self == .deepSeek || self == .moonshot || self == .meta || self == .omlx
     }
 
     /// Whether `/v1/messages` should use the provider's Anthropic-compatible
     /// endpoint without requiring a user-facing routing-mode toggle.
     public var usesAnthropicPassthroughByDefault: Bool {
-        self == .deepSeek || self == .meta
+        self == .deepSeek || self == .meta || self == .omlx
     }
 
     /// Moonshot currently documents native Messages for K3 only.
@@ -313,7 +321,7 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         while base.hasSuffix("/") { base.removeLast() }
 
         guard supportsAnthropicPassthrough else { return nil }
-        if self == .meta {
+        if self == .meta || self == .omlx {
             return base.hasSuffix("/v1") ? String(base.dropLast(3)) : base
         }
         if base.hasSuffix("/anthropic") {

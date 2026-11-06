@@ -4,6 +4,22 @@ import Testing
 
 @Suite("UpstreamProvider")
 struct UpstreamProviderTests {
+    @Test func issue26ProviderContracts() {
+        #expect(UpstreamProvider.cerebras.defaultAPIBaseURL == "https://api.cerebras.ai/v1")
+        #expect(UpstreamProvider.cerebras.secretKey == "CEREBRAS_API_KEY")
+        #expect(UpstreamProvider.cerebras.requiresAPIKey)
+        #expect(!UpstreamProvider.cerebras.isLocal)
+        #expect(UpstreamProvider.omlx.defaultAPIBaseURL == "http://localhost:8000/v1")
+        #expect(UpstreamProvider.omlx.isLocal)
+        #expect(!UpstreamProvider.omlx.requiresAPIKey)
+        #expect(UpstreamProvider.omlx.secretKey == "OMLX_API_KEY")
+        #expect(UpstreamProvider.omlx.autoSelectDiscoveredModels)
+        #expect(UpstreamProvider.omlx.usesAnthropicPassthrough(for: "local-model"))
+        #expect(UpstreamProvider.omlx.anthropicPassthroughBaseURL(from: "http://localhost/v1/") == "http://localhost")
+        #expect(!UpstreamProvider.omlx.promptCacheCapabilities.supportsPromptCacheKey)
+        #expect(UpstreamProvider.omlx.promptCacheCapabilities.supportsAutomaticProviderCaching)
+    }
+
     @Test func metaNativeEndpointsCredentialsAndCatalog() {
         let provider = UpstreamProvider.meta
         #expect(provider.secretKey == "MODEL_API_KEY")

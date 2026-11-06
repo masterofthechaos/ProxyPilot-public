@@ -1,4 +1,5 @@
 import SwiftUI
+import ProxyPilotCore
 
 private struct SessionStatsView: View {
     @ObservedObject var state: LocalProxyState
@@ -130,10 +131,13 @@ struct MenuBarView: View {
                 get: { routeControl.status.model ?? "" },
                 set: { newModel in
                     guard !newModel.isEmpty, newModel != routeControl.status.model else { return }
+                    guard let provider = routeControl.status.provider
+                        ?? (vm.hasSelectedProvider && !vm.hasActiveCustomProvider ? vm.upstreamProvider.rawValue : nil)
+                    else { return }
+                    guard RouteInterruptionConfirmation.confirm(route: "the RepoGPS proxy") else { return }
                     Task {
                         await routeControl.applyRoute(
-                            provider: routeControl.status.provider
-                                ?? vm.upstreamProvider.rawValue,
+                            provider: provider,
                             model: newModel,
                             port: routeControl.status.port
                         )
@@ -154,7 +158,9 @@ struct MenuBarView: View {
     /// Keeps the route's current model selectable even when the GUI has not
     /// discovered it, so opening the menu cannot silently retarget the route.
     private var repoGPSModelChoices: [String] {
-        var choices = vm.xcodeAgentModelCandidates
+        let selection = routeControl.status.provider.flatMap(UpstreamProvider.init(rawValue:)).map(UpstreamSelection.builtIn) ?? .none
+        var choices = Array(Set(vm.browserModels(selection).map(\.id))
+            .union(vm.modelFavorites.favorites(providerID: selection.id))).sorted()
         if let current = routeControl.status.model, !current.isEmpty, !choices.contains(current) {
             choices.insert(current, at: 0)
         }
@@ -184,14 +190,7 @@ struct MenuBarView: View {
             // Named for its route. An unqualified "Model" read as though it
             // governed everything the proxy serves, when it only ever set the
             // Xcode / Claude Agent route — RepoGPS has its own, below.
-            Picker("Xcode Model", selection: Binding(
-                get: { vm.selectedXcodeAgentModel },
-                set: { vm.selectedXcodeAgentModel = $0 }
-            )) {
-                ForEach(vm.xcodeAgentModelCandidates, id: \.self) { model in
-                    Text(model).tag(model)
-                }
-            }
+            FavoriteModelPicker()
         case .repoGPSRoute:
             repoGPSRoutePicker
         case .sessionStats:
@@ -220,7 +219,8 @@ struct MenuBarView: View {
                 .accessibilityLabel("Stop proxy")
                 .accessibilityHint("Stops the local proxy server")
 
-                Button("Restart Proxy") {
+                Button("Apply & Restart") {
+                    guard RouteInterruptionConfirmation.confirm(route: "the Xcode proxy") else { return }
                     Task { await vm.restartProxy() }
                 }
                 .accessibilityLabel("Restart proxy")

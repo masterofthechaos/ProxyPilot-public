@@ -48,6 +48,7 @@ struct ProxyPilotBrandMark: View {
 /// against the dark base but washes out to grey against white, so light mode swaps it
 /// for the palette's violet.
 private struct ProxyPilotAmbientBackground: ViewModifier {
+    @EnvironmentObject private var vm: AppViewModel
     @Environment(\.colorScheme) private var colorScheme
 
     private var washOpacity: Double {
@@ -55,11 +56,11 @@ private struct ProxyPilotAmbientBackground: ViewModifier {
     }
 
     private var topTrailingTint: Color {
-        colorScheme == .dark ? ProxyPilotBrandPalette.pink : ProxyPilotBrandPalette.violet
+        colorScheme == .dark ? vm.gradientPreset.colors[0] : vm.gradientPreset.colors[1]
     }
 
     private var bottomLeadingTint: Color {
-        ProxyPilotBrandPalette.blueViolet
+        vm.gradientPreset.colors[2]
     }
 
     func body(content: Content) -> some View {

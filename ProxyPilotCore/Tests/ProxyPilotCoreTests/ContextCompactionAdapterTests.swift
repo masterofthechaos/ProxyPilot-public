@@ -43,7 +43,7 @@ struct ContextCompactionAdapterTests {
 
     @Test func supportsContextCompactionTruthTable() {
         for provider in UpstreamProvider.allCases {
-            let expected = provider == .ollama || provider == .lmStudio
+            let expected = provider == .ollama || provider == .lmStudio || provider == .omlx
             #expect(provider.supportsContextCompaction == expected, "\(provider.rawValue)")
         }
     }

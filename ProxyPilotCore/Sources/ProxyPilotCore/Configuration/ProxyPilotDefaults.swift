@@ -1,8 +1,6 @@
 import Foundation
 
 public enum ProxyPilotDefaults {
-    public static let defaultCLIProvider: UpstreamProvider = .openAI
-    public static let defaultXcodeProvider: UpstreamProvider = .zAI
     public static let defaultPort: UInt16 = 4000
 
     public static var providerOptionsDescription: String {

@@ -1,8 +1,46 @@
+import ArgumentParser
 import ProxyPilotCore
 import Testing
 @testable import proxypilot
 
 struct ProviderCredentialResolverTests {
+    @Test func discoveryAndSetupDoNotInventAProvider() throws {
+        #expect(try ModelsCommand.parse([]).provider == nil)
+        #expect(try SetupXcodeCommand.parse([]).provider == nil)
+        #expect(try ModelsCommand.parse(["--provider", "ollama"]).provider == "ollama")
+    }
+
+    @Test func unknownPreflightProviderDoesNotOfferStartOrAuthActions() async {
+        let (report, actions) = await AgentPreflightService.report(port: 4000, provider: "not-a-provider", model: nil)
+        #expect(!report.ready)
+        #expect(report.provider == "not-a-provider")
+        #expect(report.blockers.first?.code == "E001")
+        #expect(actions.isEmpty)
+    }
+
+    @Test func cerebrasRequiresItsOwnKeyAndOMLXAcceptsOptionalStoredKey() {
+        let empty = MemorySecretsProvider(values: [:])
+        let missing = ProviderCredentialResolver.resolve(rawProvider: "cerebras", explicitKey: nil,
+            upstreamURL: nil, secrets: empty, environment: [:])
+        guard case .missingAPIKey(let provider, let keyName) = missing else {
+            Issue.record("Cerebras must require its own credential")
+            return
+        }
+        #expect(provider == .cerebras)
+        #expect(keyName == SecretKey.cerebrasAPIKey)
+        for key in [nil, "omlx-fixture"] as [String?] {
+            let secrets = MemorySecretsProvider(values: key.map { [SecretKey.omlxAPIKey: $0] } ?? [:])
+            let result = ProviderCredentialResolver.resolve(rawProvider: "omlx", explicitKey: nil,
+                upstreamURL: nil, secrets: secrets, environment: [:])
+            guard case .resolved(let credential) = result else {
+                Issue.record("oMLX must allow keyless inference and optional authenticated inference")
+                return
+            }
+            #expect(credential.provider == .omlx)
+            #expect(credential.apiKey == key)
+        }
+    }
+
     @Test func dnsLoopbackLookalikeCannotBypassOfficialEndpointPolicy() {
         let secrets = MemorySecretsProvider(values: [SecretKey.openAIAPIKey: "fixture-only"])
         let resolution = ProviderCredentialResolver.resolve(

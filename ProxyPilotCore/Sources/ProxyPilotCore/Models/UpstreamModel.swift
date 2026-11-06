@@ -1,6 +1,9 @@
 import Foundation
 
 public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
+    public let displayName: String?
+    public let lab: String?
+    public let catalogAddedAt: Date?
     public let id: String
     public let contextLength: Int?
     public let promptPricePer1M: Double?
@@ -21,16 +24,45 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
         promptCacheHitPricePer1M: Double? = nil,
         promptCacheMissPricePer1M: Double? = nil,
         promptCacheWritePricePer1M: Double? = nil,
-        supportedParameters: Set<String> = []
+        supportedParameters: Set<String> = [],
+        displayName: String? = nil,
+        lab: String? = nil,
+        catalogAddedAt: Date? = nil
     ) {
+        self.displayName = displayName
+        self.lab = lab
+        self.catalogAddedAt = catalogAddedAt
         self.id = id
         self.contextLength = contextLength
-        self.promptPricePer1M = promptPricePer1M
-        self.completionPricePer1M = completionPricePer1M
-        self.promptCacheHitPricePer1M = promptCacheHitPricePer1M
-        self.promptCacheMissPricePer1M = promptCacheMissPricePer1M
-        self.promptCacheWritePricePer1M = promptCacheWritePricePer1M
+        self.promptPricePer1M = promptPricePer1M.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        self.completionPricePer1M = completionPricePer1M.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        self.promptCacheHitPricePer1M = promptCacheHitPricePer1M.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        self.promptCacheMissPricePer1M = promptCacheMissPricePer1M.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        self.promptCacheWritePricePer1M = promptCacheWritePricePer1M.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
         self.supportedParameters = supportedParameters
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, contextLength, promptPricePer1M, completionPricePer1M
+        case promptCacheHitPricePer1M, promptCacheMissPricePer1M, promptCacheWritePricePer1M
+        case supportedParameters, displayName, lab, catalogAddedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try c.decode(String.self, forKey: .id),
+            contextLength: try c.decodeIfPresent(Int.self, forKey: .contextLength),
+            promptPricePer1M: try c.decodeIfPresent(Double.self, forKey: .promptPricePer1M),
+            completionPricePer1M: try c.decodeIfPresent(Double.self, forKey: .completionPricePer1M),
+            promptCacheHitPricePer1M: try c.decodeIfPresent(Double.self, forKey: .promptCacheHitPricePer1M),
+            promptCacheMissPricePer1M: try c.decodeIfPresent(Double.self, forKey: .promptCacheMissPricePer1M),
+            promptCacheWritePricePer1M: try c.decodeIfPresent(Double.self, forKey: .promptCacheWritePricePer1M),
+            supportedParameters: try c.decodeIfPresent(Set<String>.self, forKey: .supportedParameters) ?? [],
+            displayName: try c.decodeIfPresent(String.self, forKey: .displayName),
+            lab: try c.decodeIfPresent(String.self, forKey: .lab),
+            catalogAddedAt: try c.decodeIfPresent(Date.self, forKey: .catalogAddedAt)
+        )
     }
 
     public static func idOnly(_ id: String) -> UpstreamModel {
@@ -62,7 +94,8 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
             promptCacheHitPricePer1M: promptCacheHitPricePer1M,
             promptCacheMissPricePer1M: promptCacheMissPricePer1M,
             promptCacheWritePricePer1M: promptCacheWritePricePer1M,
-            supportedParameters: supportedParameters
+            supportedParameters: supportedParameters,
+            displayName: displayName, lab: lab, catalogAddedAt: catalogAddedAt
         )
     }
 

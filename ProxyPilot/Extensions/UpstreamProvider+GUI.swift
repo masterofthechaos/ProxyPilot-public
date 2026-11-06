@@ -12,6 +12,8 @@ extension UpstreamProvider {
         case .xAI: return URL(string: "https://console.x.ai")
         case .chutes: return URL(string: "https://chutes.ai/app/api-keys")
         case .groq: return URL(string: "https://console.groq.com/keys")
+        case .cerebras: return URL(string: "https://cloud.cerebras.ai")
+        case .omlx: return nil
         case .google: return URL(string: "https://aistudio.google.com/apikey")
         case .meta: return URL(string: "https://dev.meta.ai/")
         case .moonshot: return URL(string: "https://platform.kimi.ai/console/api-keys")
@@ -52,6 +54,8 @@ extension UpstreamProvider {
         case .xAI: return .xAIAPIKey
         case .chutes: return .chutesAPIKey
         case .groq: return .groqAPIKey
+        case .cerebras: return .cerebrasAPIKey
+        case .omlx: return .omlxAPIKey
         case .google: return .googleAPIKey
         case .deepSeek: return .deepSeekAPIKey
         case .meta: return .metaAPIKey

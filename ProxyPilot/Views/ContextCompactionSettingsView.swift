@@ -41,7 +41,7 @@ struct ContextCompactionSettingsView: View {
     }
 
     private var currentProviderSupportsCompaction: Bool {
-        !vm.hasActiveCustomProvider && vm.upstreamProvider.supportsContextCompaction
+        vm.hasSelectedProvider && !vm.hasActiveCustomProvider && vm.upstreamProvider.supportsContextCompaction
     }
 
     private func helperText(_ text: String, markdown: Bool = false) -> some View {
