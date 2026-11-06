@@ -1656,6 +1656,78 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertTrue(config.isAnthropicPassthroughActive)
     }
 
+    func testBuiltInProxyOpenRouterAttributionAndCacheReceipt() async throws {
+        for streaming in [false, true] {
+            let json = #"{"id":"cache-test","model":"anthropic/claude-test","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":5,"cache_write_tokens":3}}}"#
+            let upstream = LocalHTTPStubServer(body: streaming ? "data: " + json + "\n\ndata: [DONE]\n\n" : json,
+                contentType: streaming ? "text/event-stream" : "application/json")
+            let upstreamPort = try await upstream.start()
+            defer { upstream.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let reportURL = directory.appendingPathComponent("session-report.jsonl")
+            let server = LocalProxyServer(sessionReportURL: reportURL)
+            let port = try unusedLoopbackPort()
+            let config = LocalProxyServer.Config(host: "127.0.0.1", port: port, sessionID: "daemon", masterKey: "test",
+                upstreamProvider: .openRouter, upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!, upstreamAPIKey: nil,
+                allowedModels: [], requiresAuth: false, anthropicTranslatorMode: .hardened, miniMaxRoutingMode: .standard,
+                preferredAnthropicUpstreamModel: "", googleThoughtSignatureStore: nil,
+                promptCaching: .init(isEnabled: true, mode: .computeCacheHints))
+            try server.start(config: config)
+            defer { try? server.stop() }
+            await waitForLocalProxyToRun(server)
+            let logicalID = UUID().uuidString.lowercased()
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("repogps", forHTTPHeaderField: "X-ProxyPilot-Client")
+            request.setValue(logicalID, forHTTPHeaderField: "X-ProxyPilot-Session-ID")
+            request.setValue("lead", forHTTPHeaderField: "X-ProxyPilot-Role")
+            let imageURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jA9sAAAAASUVORK5CYII="
+            let messages: [[String: Any]] = [["role": "user", "content": [
+                ["type": "text", "text": "Describe this tiny image."],
+                ["type": "image_url", "image_url": ["url": imageURL, "detail": "low"]]
+            ]]]
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["model": "anthropic/claude-test", "stream": streaming, "messages": messages])
+            let (_, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            let didRecord = await waitForReportCard(server, requestCount: 1)
+            XCTAssertTrue(didRecord)
+            let sent = try XCTUnwrap(upstream.requests().first)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(sent.body.utf8)) as? [String: Any])
+            let expected = "pp_" + PromptCacheSessionKey.make(provider: UpstreamProvider.openRouter.rawValue,
+                model: "anthropic/claude-test", sessionID: logicalID, route: UpstreamProvider.openRouter.chatCompletionsPath)
+            XCTAssertEqual(body["session_id"] as? String, expected)
+            let sentMessages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            XCTAssertEqual(try JSONSerialization.data(withJSONObject: sentMessages, options: [.sortedKeys]),
+                try JSONSerialization.data(withJSONObject: messages, options: [.sortedKeys]))
+            let content = try XCTUnwrap(sentMessages.first?["content"] as? [[String: Any]])
+            XCTAssertEqual(content.count, 2)
+            XCTAssertEqual(content.last?["image_url"] as? [String: String], ["url": imageURL, "detail": "low"])
+            XCTAssertEqual((body["cache_control"] as? [String: String])?["type"], "ephemeral")
+            XCTAssertNil(sent.headerValue("X-ProxyPilot-Session-ID"))
+            XCTAssertNil(sent.headerValue("X-ProxyPilot-Client"))
+            XCTAssertNil(sent.headerValue("X-ProxyPilot-Role"))
+            let record = try await MainActor.run { try XCTUnwrap(server.reportCard.requests.first) }
+            XCTAssertEqual(record.promptCacheStrategy, "openrouter_session_affinity+anthropic_auto_cache_control")
+            XCTAssertEqual(record.promptCacheApplied, true)
+            XCTAssertEqual(record.promptCacheWriteTokens, 3)
+            var events = try SessionReportStore.readEvents(from: reportURL)
+            for _ in 0..<100 where events.isEmpty {
+                try await Task.sleep(for: .milliseconds(10))
+                events = try SessionReportStore.readEvents(from: reportURL)
+            }
+            let event = try XCTUnwrap(events.first)
+            XCTAssertEqual(event.id, record.id)
+            XCTAssertEqual(event.record.promptCacheStrategy, record.promptCacheStrategy)
+            XCTAssertEqual(event.sessionID, logicalID)
+            await MainActor.run {
+                server.reportCard.record(event)
+                XCTAssertEqual(server.reportCard.totalRequests, 1)
+            }
+        }
+    }
+
     func testBuiltInProxyAppliesOpenAIComputeCacheHint() async throws {
         let upstream = LocalHTTPStubServer(body: """
         {"id":"chatcmpl-cache","model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}

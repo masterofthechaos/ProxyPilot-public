@@ -1,26 +1,41 @@
 {
-  "behavior_pack_version" : "2",
+  "behavior_pack_version" : "9",
   "engine_version" : "1.18.4",
   "files" : [
     {
       "executable" : false,
       "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Info.plist",
-      "sha256" : "8468f39236036f095cf32d94c861b9d931e6f4e993e4d93b25821f1859ddc4c3"
+      "sha256" : "7e18cfa7da70ce2121287ce5a7e4f55bd7968f57e955c0803efda2ba4e69636e"
     },
     {
       "executable" : false,
       "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/plugins\/bearings-server.js",
-      "sha256" : "c0b45e62d04520565d02f8190d84b6b2fc9eb62d3936d445bfea63739c5908d6"
+      "sha256" : "74e775dc80922161106073033839b6afb397c621718b2cb21ed1af54b1e3516f"
     },
     {
       "executable" : false,
       "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/plugins\/bearings-tui.tsx",
-      "sha256" : "86dc3055e9ca014f24a94b4a4f76a7baf36179c0c4f307ea2cfe05218dd33490"
+      "sha256" : "6fefaeeab5e2372e96215e15bf07705ee90f41d68a892f73c7b41f8f235680c6"
     },
     {
       "executable" : false,
       "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/plugins\/support\/continuity.mjs",
-      "sha256" : "9bf1061fe864679f74425c7c5932b7375fb31da28ac468ea51ef8020e76e7389"
+      "sha256" : "1988c9e597eef3941b38ac8e6b0649fe3f134e48d3155e200bfb53568f923d01"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/plugins\/support\/lean-tools.mjs",
+      "sha256" : "dd3cc568856a410c2e2022cd94e93413c49e9122ca0f9fce181731a588050321"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/plugins\/support\/prompt-context.mjs",
+      "sha256" : "57af8f8b61edba58b6b64cc55fae65093b465e900db62be606e567c2ba78976f"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/plugins\/support\/route-guard.mjs",
+      "sha256" : "72b1ec3a218baa4bc3e0513e08eab9e5ae70697e861f24c769675f1c39062d4b"
     },
     {
       "executable" : false,
@@ -95,17 +110,20 @@
     {
       "executable" : true,
       "path" : "bin\/rgps",
-      "sha256" : "f7a232320b61db901dc582d44743627899c975c90603bdc026d1a4429b913dc2"
+      "sha256" : "ef262041d012755bc1385975efc5accea8dc12e1b07f3909a8ee4a302d092d93"
     }
   ],
   "minimum_proxypilot_capabilities" : {
     "active_model_aliasing" : 1,
-    "request_attribution" : 1,
-    "route_control" : 1,
-    "session_storage" : 1
+    "attributed_usage" : 2,
+    "independent_request" : 1,
+    "request_attribution" : 2,
+    "route_control" : 2,
+    "route_metadata" : 2,
+    "session_storage" : 2
   },
-  "payload_version" : "0.5.0",
-  "repogps_version" : "0.5.0",
+  "payload_version" : "0.8.4",
+  "repogps_version" : "0.8.4",
   "schema_version" : 1,
-  "source_release" : "606d0c615e625bff01c8f0f1201c89c43f142429"
+  "source_release" : "0f00bcd6acbfa943b07b6f599dcd1b5e2164b207"
 }

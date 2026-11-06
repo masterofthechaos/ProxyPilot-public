@@ -10,10 +10,13 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
     public let completionPricePer1M: Double?
     public let promptCacheHitPricePer1M: Double?
     public let promptCacheMissPricePer1M: Double?
-    /// Price of *writing* tokens into the provider's prompt cache. Distinct from the
-    /// hit/miss pair: providers that charge a premium for cache creation bill these
-    /// tokens once, on top of the uncached input they also count.
+    /// Full price of cache creation, not an added surcharge. Normalized cache
+    /// misses include these tokens; priced writes replace their ordinary input
+    /// charge rather than being billed a second time.
     public let promptCacheWritePricePer1M: Double?
+    public let inputModalities: [String]?
+    public let outputModalities: [String]?
+    public let maximumOutputTokens: Int?
     public let supportedParameters: Set<String>
 
     public init(
@@ -27,8 +30,14 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
         supportedParameters: Set<String> = [],
         displayName: String? = nil,
         lab: String? = nil,
-        catalogAddedAt: Date? = nil
+        catalogAddedAt: Date? = nil,
+        inputModalities: [String]? = nil,
+        outputModalities: [String]? = nil,
+        maximumOutputTokens: Int? = nil
     ) {
+        self.inputModalities = inputModalities
+        self.outputModalities = outputModalities
+        self.maximumOutputTokens = maximumOutputTokens
         self.displayName = displayName
         self.lab = lab
         self.catalogAddedAt = catalogAddedAt
@@ -45,7 +54,7 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
     private enum CodingKeys: String, CodingKey {
         case id, contextLength, promptPricePer1M, completionPricePer1M
         case promptCacheHitPricePer1M, promptCacheMissPricePer1M, promptCacheWritePricePer1M
-        case supportedParameters, displayName, lab, catalogAddedAt
+        case supportedParameters, displayName, lab, catalogAddedAt, inputModalities, outputModalities, maximumOutputTokens
     }
 
     public init(from decoder: Decoder) throws {
@@ -61,7 +70,10 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
             supportedParameters: try c.decodeIfPresent(Set<String>.self, forKey: .supportedParameters) ?? [],
             displayName: try c.decodeIfPresent(String.self, forKey: .displayName),
             lab: try c.decodeIfPresent(String.self, forKey: .lab),
-            catalogAddedAt: try c.decodeIfPresent(Date.self, forKey: .catalogAddedAt)
+            catalogAddedAt: try c.decodeIfPresent(Date.self, forKey: .catalogAddedAt),
+            inputModalities: try c.decodeIfPresent([String].self, forKey: .inputModalities),
+            outputModalities: try c.decodeIfPresent([String].self, forKey: .outputModalities),
+            maximumOutputTokens: try c.decodeIfPresent(Int.self, forKey: .maximumOutputTokens)
         )
     }
 
@@ -95,7 +107,8 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
             promptCacheMissPricePer1M: promptCacheMissPricePer1M,
             promptCacheWritePricePer1M: promptCacheWritePricePer1M,
             supportedParameters: supportedParameters,
-            displayName: displayName, lab: lab, catalogAddedAt: catalogAddedAt
+            displayName: displayName, lab: lab, catalogAddedAt: catalogAddedAt,
+            inputModalities: inputModalities, outputModalities: outputModalities, maximumOutputTokens: maximumOutputTokens
         )
     }
 
@@ -135,8 +148,7 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
             caps.insert(.reasoning)
         }
 
-        let visionKeywords = ["vision", "vl", "4o", "gpt-4-turbo", "gemini"]
-        if visionKeywords.contains(where: { lower.contains($0) }) {
+        if inputModalities?.contains("image") == true {
             caps.insert(.vision)
         }
 
@@ -169,18 +181,19 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
         promptCacheWriteTokens: Int? = nil
     ) -> Double? {
         if let promptCacheHitTokens, let promptCacheMissTokens,
-           promptCacheHitPricePer1M != nil || promptCacheMissPricePer1M != nil {
+           promptCacheHitPricePer1M != nil || promptCacheMissPricePer1M != nil || promptCacheWritePricePer1M != nil {
             let sanitizedHitTokens = max(promptCacheHitTokens, 0)
             let sanitizedMissTokens = max(promptCacheMissTokens, 0)
-            let sanitizedWriteTokens = max(promptCacheWriteTokens ?? 0, 0)
+            // Writes are a subset of normalized misses in both OpenAI-compatible
+            // (prompt minus reads) and native Anthropic (input plus writes) usage.
+            // Without a write price, retain the standard input estimate instead
+            // of treating missing price metadata as a free cache write.
+            let pricedWriteTokens = promptCacheWritePricePer1M == nil
+                ? 0 : min(max(promptCacheWriteTokens ?? 0, 0), sanitizedMissTokens)
             let sanitizedCompletionTokens = max(completionTokens, 0)
-            let hitCost = (Double(sanitizedHitTokens) / 1_000_000) * (promptCacheHitPricePer1M ?? 0)
-            let missCost = (Double(sanitizedMissTokens) / 1_000_000) * (promptCacheMissPricePer1M ?? promptPricePer1M ?? 0)
-            // Cache creation is billed on top of the uncached input it accompanies, so
-            // this is an additional term rather than a substitute for the miss cost.
-            // Providers that do not charge for cache writes report no price and it
-            // contributes nothing.
-            let writeCost = (Double(sanitizedWriteTokens) / 1_000_000) * (promptCacheWritePricePer1M ?? 0)
+            let hitCost = (Double(sanitizedHitTokens) / 1_000_000) * (promptCacheHitPricePer1M ?? promptPricePer1M ?? 0)
+            let missCost = (Double(sanitizedMissTokens - pricedWriteTokens) / 1_000_000) * (promptCacheMissPricePer1M ?? promptPricePer1M ?? 0)
+            let writeCost = (Double(pricedWriteTokens) / 1_000_000) * (promptCacheWritePricePer1M ?? 0)
             let completionCost = (Double(sanitizedCompletionTokens) / 1_000_000) * (completionPricePer1M ?? 0)
             return hitCost + missCost + writeCost + completionCost
         }

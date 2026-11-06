@@ -3,6 +3,14 @@ import Foundation
 extension UpstreamProvider {
     public var promptCacheCapabilities: PromptCacheCapabilities {
         switch self {
+        case .openRouter:
+            return PromptCacheCapabilities(
+                supportsAutomaticProviderCaching: true,
+                supportsPromptCacheKey: false,
+                supportsAnthropicCacheControl: true,
+                supportsExplicitCacheObjects: false,
+                supportsProviderCacheTelemetry: true
+            )
         case .openAI:
             return PromptCacheCapabilities(
                 supportsAutomaticProviderCaching: true,

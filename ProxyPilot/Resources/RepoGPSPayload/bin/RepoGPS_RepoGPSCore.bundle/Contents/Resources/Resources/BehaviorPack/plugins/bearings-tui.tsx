@@ -3,7 +3,7 @@ import { createSignal } from 'solid-js'
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
-import { readJSON } from './support/continuity.mjs'
+import { readJSON, provenanceBadge, harnessName } from './support/continuity.mjs'
 
 export default {id:'repogps.bearings.tui',tui:async(api)=>{
   if(!process.env.RGPS_CONTINUITY_DIR) return
@@ -34,9 +34,11 @@ export default {id:'repogps.bearings.tui',tui:async(api)=>{
     api.ui.dialog.replace(()=><Alert title={title} message={typeof value==='string'?value:JSON.stringify(value,null,2)} />)
   }
   const details=()=>{
+    if(!matchesSession(api.route.current.params?.sessionID)) return detail('Thread provenance','OpenCode · origin unknown. This session is not the continuity record loaded by this launch.')
     const Select=api.ui.DialogSelect
     const s=state()
     api.ui.dialog.replace(()=><Select title="RepoGPS Bearings" options={[
+      {title:'Thread origin and current harness',value:s?.thread_provenance || 'Origin unknown; legacy records do not prove where the thread began.'},
       {title:'Current repository observations',value:observation()},
       {title:'Human intent and corrections',value:s?.intent},
       {title:'Navigator interpretations (advisory)',value:s?.notes},
@@ -44,6 +46,17 @@ export default {id:'repogps.bearings.tui',tui:async(api)=>{
       {title:'Lead route and launch limits',value:{current:route(),launch:launchRoute || 'unavailable'}},
       {title:'Attributed usage',value:{lead:usage(),navigator:s?.usage?.navigator,notice:'Active-agent recordkeeping is included in lead usage. Unknown accounting is unavailable, never zero.'}},
     ]} onSelect={item=>detail(item.title,item.value ?? 'Unavailable')} />)
+  }
+  const threads=()=>{
+    execFile(process.env.RGPS_EXECUTABLE,['threads','--json'],{timeout:10000,maxBuffer:1024*1024},(error,stdout)=>{
+      if(error)return detail('Threads unavailable','Unable to read the local RepoGPS thread inventory.')
+      try {
+        const rows=JSON.parse(stdout)
+        const Select=api.ui.DialogSelect
+        if(!rows.length)return detail('RepoGPS threads','No RepoGPS-tracked threads yet.')
+        api.ui.dialog.replace(()=><Select title="RepoGPS threads · provenance" options={rows.map(row=>({title:`[${row.badge}] ${row.title}`,value:row}))} onSelect={item=>{const row=item.value;detail('Thread provenance',`${row.title}\n\nRecorded origin: ${row.badge}\nCurrent harness: ${row.running}\nRepository: ${row.repository}\nLast recorded: ${row.updated_at || 'Unknown'}\nRepoGPS thread ID: ${row.id}\n\nThis inventory shows RepoGPS-tracked work. Use the matching harness to resume its native conversation.`)}} />)
+      }catch{detail('Threads unavailable','Invalid local thread inventory.')}
+    })
   }
   const routeChooser=async()=>{
     try {
@@ -82,6 +95,7 @@ export default {id:'repogps.bearings.tui',tui:async(api)=>{
     }} />)
   }
   api.keymap.registerLayer({commands:[
+    {name:'repogps.threads',title:'Threads and provenance',namespace:'palette',category:'RepoGPS',slashName:'threads',run:threads},
     {name:'repogps.bearings',title:'Bearings',namespace:'palette',category:'RepoGPS',slashName:'bearings',run:details},
     {name:'repogps.navigator.settings',title:'Navigator settings',namespace:'palette',category:'RepoGPS',slashName:'settings',run:settings},
     {name:'repogps.route',title:'Switch lead route',namespace:'palette',category:'RepoGPS',slashName:'route-choose',run:routeChooser},
@@ -105,10 +119,14 @@ export default {id:'repogps.bearings.tui',tui:async(api)=>{
     if(cost.estimated_usd != null)return `$${Number(cost.estimated_usd).toFixed(6)} estimated`
     return 'unavailable'
   }
-  const Panel=()=> <box flexDirection="column" gap={1} onMouseUp={details}>
+  const matchesSession=id=>!id || !state()?.engine_session_id || state().engine_session_id===id
+  const Panel=(props)=> <box flexDirection="column" gap={1} onMouseUp={()=>matchesSession(props.session_id)?details():detail('Thread provenance','OpenCode · origin unknown. This session is not the continuity record loaded by this launch.')}>
+
     <text fg={api.theme.current.primary}><b>RepoGPS Bearings</b></text>
+    <text>[{matchesSession(props.session_id)?provenanceBadge(state()):'OpenCode · origin unknown'}]</text>
+    <text>Running: {harnessName(state()?.thread_provenance?.current?.harness || 'opencode')}</text>
     <text>{path.basename(state()?.repository || process.cwd())} · {observation()?.branch || 'no Git branch'}</text>
-    {!collapsed() && <box flexDirection="column" gap={1}>
+    {!collapsed() && matchesSession(props.session_id) && <box flexDirection="column" gap={1}>
       <text>{note()?.understanding || 'Establishing current work from repository evidence.'}</text>
       <text>Constraints: {observation()?.sources?.filter(x=>x.path.endsWith('AGENTS.md')).map(x=>path.basename(path.dirname(x.path))).join(', ') || 'Discover local conventions; no setup required'}</text>
       <text>{note()?.next_action || 'Read applicable instructions; clarify the requested outcome.'}</text>
@@ -122,5 +140,5 @@ export default {id:'repogps.bearings.tui',tui:async(api)=>{
       <text fg={api.theme.current.textMuted}>/bearings for details · /route-choose</text>
     </box>}
   </box>
-  api.slots.register({order:50,slots:{sidebar_content:Panel,session_prompt_right:()=> <text>Bearings · {state()?.navigator?.status || 'starting'} · /bearings</text>,home_bottom:()=> <text>RepoGPS · local bearings ready when work begins</text>}})
+  api.slots.register({order:50,slots:{sidebar_content:Panel,session_prompt_right:()=> <text>[OC] · Bearings · {state()?.navigator?.status || 'starting'} · /bearings</text>,home_prompt_right:()=> <text>[OC] /threads</text>}})
 }}

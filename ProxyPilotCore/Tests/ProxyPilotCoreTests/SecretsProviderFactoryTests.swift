@@ -82,7 +82,7 @@ private func withEnvironmentValue<T>(_ name: String, value: String?, _ body: () 
     #expect(provider.lastResolvedBackendLabel == "file")
 }
 
-@Test func fallbackSecretsProvider_writesToFileWhenPrimaryFails() throws {
+@Test func fallbackSecretsProvider_unavailablePrimaryDoesNotClaimVerifiedReplacement() throws {
     let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     defer { try? FileManager.default.removeItem(at: tmpDir) }
 
@@ -96,9 +96,7 @@ private func withEnvironmentValue<T>(_ name: String, value: String?, _ body: () 
 
     let fallback = FileSecretsProvider(directory: tmpDir)
     let provider = FallbackSecretsProvider(primary: AlwaysFailProvider(), fallback: fallback)
-    try provider.set(key: SecretKey.openAIAPIKey, value: "saved")
-
-    #expect(try fallback.get(key: SecretKey.openAIAPIKey) == "saved")
-    #expect(provider.lastResolvedBackendLabel == "file")
+    #expect(throws: (any Error).self) { try provider.set(key: SecretKey.openAIAPIKey, value: "saved") }
+    #expect(try fallback.get(key: SecretKey.openAIAPIKey) == nil)
 }
 #endif

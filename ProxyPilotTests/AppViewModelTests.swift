@@ -2602,6 +2602,47 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(message.contains("not_set"))
     }
 
+    func testAttributedLiveRecordIsNotCountedAgainByJournalImporter() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let reportURL = directory.appendingPathComponent("session-report.jsonl")
+        let vm = AppViewModel(defaults: defaults, sessionReportURL: reportURL)
+        let event = SessionReportEvent(source: "repogps", sessionID: "logical", record: RequestRecord(
+            model: "returned", promptTokens: 80, completionTokens: 20, durationSeconds: 1,
+            path: "/v1/chat/completions", wasStreaming: false))
+        vm.sessionReportCard.record(event)
+        try SessionReportStore.append(event, to: reportURL)
+        let task = vm.importExternalSessionReportEvents()
+        XCTAssertNotNil(task)
+        await task?.value
+        XCTAssertEqual(vm.sessionReportCard.totalRequests, 1)
+        XCTAssertEqual(vm.sessionReportCard.totalPromptTokens, 80)
+    }
+
+    func testArchiveOnlyAdditionTriggersJournalImportWithoutActiveFileChange() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let reportURL = directory.appendingPathComponent("session-report.jsonl")
+        let first = SessionReportEvent(source: "repogps", sessionID: "logical", record: RequestRecord(
+            timestamp: Date(timeIntervalSince1970: 100), model: "first", promptTokens: 10, completionTokens: 2,
+            durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: false))
+        try SessionReportStore.append(first, to: reportURL)
+        let vm = AppViewModel(defaults: defaults, sessionReportURL: reportURL)
+        await vm.importExternalSessionReportEvents()?.value
+        XCTAssertEqual(vm.sessionReportCard.totalRequests, 1)
+        let before = try Data(contentsOf: reportURL)
+        let second = SessionReportEvent(source: "repogps", sessionID: "logical", record: RequestRecord(
+            timestamp: Date(timeIntervalSince1970: 101), model: "second", promptTokens: 20, completionTokens: 2,
+            durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: false))
+        let archive = reportURL.deletingPathExtension().appendingPathExtension("archive.fixture.jsonl")
+        try SessionReportStore.append(second, to: archive)
+        let task = vm.importExternalSessionReportEvents()
+        XCTAssertNotNil(task, "New immutable archive must invalidate the active-journal-only fingerprint")
+        await task?.value
+        XCTAssertEqual(vm.sessionReportCard.totalRequests, 2)
+        XCTAssertEqual(try Data(contentsOf: reportURL), before)
+    }
+
     func testImportsCLISessionReportEventsIntoSessionReportCard() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

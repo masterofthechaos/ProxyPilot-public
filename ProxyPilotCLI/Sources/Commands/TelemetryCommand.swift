@@ -59,6 +59,8 @@ struct TelemetryCommand: ParsableCommand {
             ],
             "legacy_role_breakdown_available": !events.contains { $0.role == nil },
             "cache_accounting_available": telemetry.cacheAccountingAvailable,
+            "cache_observed_requests": telemetry.cacheObservedRequests,
+            "cache_telemetry_coverage": telemetry.requests > 0 ? Double(telemetry.cacheObservedRequests) / Double(telemetry.requests) : 0,
             "cost": [
                 "provider_reported_usd": providerCostValue,
                 "estimated_usd": estimatedCostValue,

@@ -17,20 +17,23 @@ public struct AttributedSessionTelemetry: Equatable, Sendable {
     public let promptCacheHitTokens: Int
     public let promptCacheMissTokens: Int
     public let promptCacheWriteTokens: Int
+    public let cacheObservedRequests: Int
+    private let rateHitTokens: Int
+    private let rateMissTokens: Int
     public let firstRequestAt: Date?
     public let lastRequestAt: Date?
 
     public var totalTokens: Int { promptTokens + completionTokens }
 
     public var cacheHitRate: Double? {
-        let total = promptCacheHitTokens + promptCacheMissTokens
-        return total > 0 ? Double(promptCacheHitTokens) / Double(total) : nil
+        let total = rateHitTokens + rateMissTokens
+        return total > 0 ? Double(rateHitTokens) / Double(total) : nil
     }
 
     /// Mirrors `SessionStats.Snapshot`: absent accounting is reported as "unavailable" rather
     /// than as a zero hit rate, so a caller cannot read silence as a cache miss.
     public var cacheAccountingAvailable: Bool {
-        promptCacheHitTokens > 0 || promptCacheMissTokens > 0 || promptCacheWriteTokens > 0
+        cacheObservedRequests > 0 || promptCacheHitTokens > 0 || promptCacheMissTokens > 0 || promptCacheWriteTokens > 0
     }
 
     public static let empty = AttributedSessionTelemetry(
@@ -56,8 +59,14 @@ public struct AttributedSessionTelemetry: Equatable, Sendable {
         promptCacheMissTokens: Int,
         promptCacheWriteTokens: Int,
         firstRequestAt: Date?,
-        lastRequestAt: Date?
+        lastRequestAt: Date?,
+        cacheObservedRequests: Int = 0,
+        rateHitTokens: Int? = nil,
+        rateMissTokens: Int? = nil
     ) {
+        self.cacheObservedRequests = cacheObservedRequests
+        self.rateHitTokens = rateHitTokens ?? promptCacheHitTokens
+        self.rateMissTokens = rateMissTokens ?? promptCacheMissTokens
         self.requests = requests
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
@@ -119,7 +128,10 @@ public struct AttributedSessionTelemetry: Equatable, Sendable {
             promptCacheMissTokens: cacheMiss,
             promptCacheWriteTokens: cacheWrite,
             firstRequestAt: earliest,
-            lastRequestAt: latest
+            lastRequestAt: latest,
+            cacheObservedRequests: records.filter { $0.promptCacheHitTokens != nil || $0.promptCacheMissTokens != nil || $0.promptCacheWriteTokens != nil }.count,
+            rateHitTokens: records.filter { $0.promptCacheHitTokens != nil && $0.promptCacheMissTokens != nil }.reduce(0) { $0 + ($1.promptCacheHitTokens ?? 0) },
+            rateMissTokens: records.filter { $0.promptCacheHitTokens != nil && $0.promptCacheMissTokens != nil }.reduce(0) { $0 + ($1.promptCacheMissTokens ?? 0) }
         )
     }
 }

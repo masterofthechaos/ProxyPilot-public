@@ -21,7 +21,7 @@ public final class FileSecretsProvider: SecretsProvider, @unchecked Sendable {
     public func set(key: String, value: String) throws {
         lock.lock()
         defer { lock.unlock() }
-        var store = (try? load()) ?? [:]
+        var store = try load()
         store[key] = value
         try save(store)
     }
@@ -29,7 +29,7 @@ public final class FileSecretsProvider: SecretsProvider, @unchecked Sendable {
     public func delete(key: String) throws {
         lock.lock()
         defer { lock.unlock() }
-        var store = (try? load()) ?? [:]
+        var store = try load()
         store.removeValue(forKey: key)
         try save(store)
     }

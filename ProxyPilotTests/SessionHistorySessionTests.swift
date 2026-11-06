@@ -3,6 +3,41 @@ import ProxyPilotCore
 @testable import ProxyPilot
 
 final class SessionHistorySessionTests: XCTestCase {
+    func testCacheRateExcludesPartialReportsAndKeepsReportedZero() throws {
+        func request(hit: Int?, miss: Int?) -> ProxyPilotCore.RequestRecord {
+            .init(model: "fixture", promptTokens: 100, completionTokens: 1,
+                  promptCacheHitTokens: hit, promptCacheMissTokens: miss,
+                  durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: false)
+        }
+        let mixed = SessionHistorySession(id: "mixed", source: "repogps", requests: [
+            request(hit: 25, miss: 75), request(hit: 900, miss: nil), request(hit: nil, miss: nil)
+        ])
+        XCTAssertEqual(try XCTUnwrap(mixed.cacheHitRate), 0.25, accuracy: 0.00001)
+        let zero = SessionHistorySession(id: "zero", source: "repogps", requests: [request(hit: 0, miss: 0)])
+        XCTAssertTrue(zero.cacheAccountingAvailable)
+        XCTAssertNil(zero.cacheHitRate)
+        let absent = SessionHistorySession(id: "absent", source: "repogps", requests: [request(hit: nil, miss: nil)])
+        XCTAssertFalse(absent.cacheAccountingAvailable)
+    }
+
+    func testFileExportsPreserveObservedCacheOutcomeAndLegacyAbsence() throws {
+        let observed = ProxyPilotCore.RequestRecord(model: "fixture", promptTokens: 10, completionTokens: 1,
+            durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: false,
+            promptCachingMode: "computeCacheHints", promptCacheStrategy: "unsupported", promptCacheApplied: false)
+        let legacy = ProxyPilotCore.RequestRecord(model: "legacy", promptTokens: 10, completionTokens: 1,
+            durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: false)
+        let session = SessionHistorySession(id: "outcomes", source: "cli", requests: [observed, legacy])
+        let csv = SessionHistoryFileExport.csv(for: session).components(separatedBy: "\r\n")
+        XCTAssertTrue(csv[1].hasSuffix(",computeCacheHints,unsupported,false"))
+        XCTAssertTrue(csv[2].hasSuffix(",,,"))
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let data = Data(try SessionHistoryFileExport.json(for: session).utf8)
+        let decoded = try decoder.decode(SessionHistorySessionExport.self, from: data)
+        XCTAssertEqual(decoded.requests[0].promptCacheApplied, false)
+        XCTAssertEqual(decoded.requests[0].promptCacheStrategy, "unsupported")
+        XCTAssertNil(decoded.requests[1].promptCacheApplied)
+    }
+
     func testRepoGPSSourceUsesProductLabel() {
         let session = SessionHistorySession(id: "repogps-run", source: "repogps", requests: [])
         XCTAssertEqual(session.sourceLabel, "RepoGPS")

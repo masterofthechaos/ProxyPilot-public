@@ -488,6 +488,29 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func exportSessionHistory(to destination: URL) async throws -> Int {
+        let journal = sessionReportURL
+        return try await Task.detached(priority: .userInitiated) {
+            try SessionHistoryArchive.export(to: destination, from: journal)
+        }.value
+    }
+
+    func previewSessionHistoryImport(from backup: URL) async throws -> SessionHistoryImportPreview {
+        let journal = sessionReportURL
+        return try await Task.detached(priority: .userInitiated) {
+            try SessionHistoryArchive.previewImport(from: backup, into: journal)
+        }.value
+    }
+
+    func importSessionHistory(from backup: URL) async throws -> SessionHistoryImportPreview {
+        let journal = sessionReportURL
+        let result = try await Task.detached(priority: .userInitiated) {
+            try SessionHistoryArchive.merge(from: backup, into: journal)
+        }.value
+        await refreshSessionHistory()
+        return result
+    }
+
     @Published var xcodeInstallations: [XcodeInstallation] = []
     var hasCompatibleXcode: Bool { xcodeInstallations.contains { $0.supportsAgenticCoding } }
     @Published private(set) var agentModesCapability = XcodeDetectionService.agentModesCapability(for: [])
@@ -3318,21 +3341,27 @@ final class AppViewModel: ObservableObject {
     }
 
     private struct SessionReportImportFingerprint: Sendable, Equatable {
-        let fileSize: Int64?
-        let modificationDate: Date?
+        struct File: Sendable, Equatable {
+            let path: String
+            let fileSize: Int64?
+            let modificationDate: Date?
+        }
+        let files: [File]
     }
 
     private func currentSessionReportFingerprint() -> SessionReportImportFingerprint? {
-        guard FileManager.default.fileExists(atPath: sessionReportURL.path) else { return nil }
-        guard let resourceValues = try? sessionReportURL.resourceValues(forKeys: [
-            .fileSizeKey,
-            .contentModificationDateKey
-        ]) else { return nil }
-
-        return SessionReportImportFingerprint(
-            fileSize: resourceValues.fileSize.map(Int64.init),
-            modificationDate: resourceValues.contentModificationDate
-        )
+        let urls = SessionReportStore.archiveURLs(for: sessionReportURL)
+            + [sessionReportURL].filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard !urls.isEmpty else { return nil }
+        let files = urls.sorted { $0.path < $1.path }.map { url in
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            return SessionReportImportFingerprint.File(
+                path: url.path,
+                fileSize: values?.fileSize.map(Int64.init),
+                modificationDate: values?.contentModificationDate
+            )
+        }
+        return SessionReportImportFingerprint(files: files)
     }
 
     private func applyExternalSessionReportEvents(_ events: [SessionReportEvent]) {
@@ -3361,7 +3390,7 @@ final class AppViewModel: ObservableObject {
             importedExternalSessionIDs.insert(event.sessionID)
         }
 
-        localProxyServer.reportCard.record(newSessionEvents.map(\.record))
+        localProxyServer.reportCard.record(events: newSessionEvents)
         let lastModel = newSessionEvents.last(where: { !$0.record.model.isEmpty })?.record.model
         localProxyServer.state.importCompletedRequests(
             count: localProxyServer.reportCard.totalRequests,

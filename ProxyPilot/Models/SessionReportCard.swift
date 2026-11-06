@@ -21,6 +21,11 @@ final class SessionReportCard: ObservableObject {
         let path: String
         let wasStreaming: Bool
         var providerIdentifier: String?
+        var promptCachingMode: String?
+        var contextCompactionEnabled: Bool?
+        var translationMode: String?
+        var promptCacheStrategy: String?
+        var promptCacheApplied: Bool?
 
         var totalTokens: Int { promptTokens + completionTokens }
 
@@ -47,7 +52,12 @@ final class SessionReportCard: ObservableObject {
             providerIdentifier: String? = nil,
             requestedModel: String? = nil,
             providerReportedCostUSD: Double? = nil,
-            serverToolCalls: [TutorServerToolReceipt]? = nil
+            serverToolCalls: [TutorServerToolReceipt]? = nil,
+            promptCachingMode: String? = nil,
+            contextCompactionEnabled: Bool? = nil,
+            translationMode: String? = nil,
+            promptCacheStrategy: String? = nil,
+            promptCacheApplied: Bool? = nil
         ) {
             self.id = id
             self.timestamp = timestamp
@@ -64,7 +74,28 @@ final class SessionReportCard: ObservableObject {
             self.path = path
             self.wasStreaming = wasStreaming
             self.providerIdentifier = providerIdentifier
+            self.promptCachingMode = promptCachingMode
+            self.contextCompactionEnabled = contextCompactionEnabled
+            self.translationMode = translationMode
+            self.promptCacheStrategy = promptCacheStrategy
+            self.promptCacheApplied = promptCacheApplied
         }
+    }
+
+    private static func guiRecord(_ entry: ProxyPilotCore.RequestRecord, id: UUID = UUID()) -> RequestRecord {
+        RequestRecord(
+            id: id, timestamp: entry.timestamp, model: entry.model,
+            promptTokens: entry.promptTokens, completionTokens: entry.completionTokens,
+            promptCacheHitTokens: entry.promptCacheHitTokens,
+            promptCacheMissTokens: entry.promptCacheMissTokens,
+            promptCacheWriteTokens: entry.promptCacheWriteTokens,
+            durationSeconds: entry.durationSeconds, path: entry.path,
+            wasStreaming: entry.wasStreaming, providerIdentifier: entry.providerIdentifier,
+            requestedModel: entry.requestedModel, providerReportedCostUSD: entry.providerReportedCostUSD,
+            serverToolCalls: entry.serverToolCalls, promptCachingMode: entry.promptCachingMode,
+            contextCompactionEnabled: entry.contextCompactionEnabled, translationMode: entry.translationMode,
+            promptCacheStrategy: entry.promptCacheStrategy, promptCacheApplied: entry.promptCacheApplied
+        )
     }
 
     struct LatencySummary: Sendable {
@@ -125,15 +156,18 @@ final class SessionReportCard: ObservableObject {
     }
 
     var cacheHitRate: Double? {
-        let total = totalPromptCacheHitTokens + totalPromptCacheMissTokens
+        let paired = requests.compactMap { record -> (hit: Int, miss: Int)? in
+            guard let hit = record.promptCacheHitTokens, let miss = record.promptCacheMissTokens else { return nil }
+            return (max(0, hit), max(0, miss))
+        }
+        let hit = paired.reduce(0) { $0 + $1.hit }
+        let total = paired.reduce(0) { $0 + $1.hit + $1.miss }
         guard total > 0 else { return nil }
-        return Double(totalPromptCacheHitTokens) / Double(total)
+        return Double(hit) / Double(total)
     }
 
     var cacheAccountingAvailable: Bool {
-        totalPromptCacheHitTokens > 0
-            || totalPromptCacheMissTokens > 0
-            || totalPromptCacheWriteTokens > 0
+        requests.contains { $0.promptCacheHitTokens != nil || $0.promptCacheMissTokens != nil || $0.promptCacheWriteTokens != nil }
     }
 
     var tokenAccountingAvailable: Bool {
@@ -198,62 +232,43 @@ final class SessionReportCard: ObservableObject {
         return "\(totalTokens)"
     }
 
+    // Event IDs outlive the retained display rows so a later journal reread cannot
+    // count a GUI-served request twice after the 500-row display window rolls.
+    private var recordedRequestIDs = Set<UUID>()
+
+    private func recordEntries(_ entries: [RequestRecord]) {
+        let fresh = entries.filter { recordedRequestIDs.insert($0.id).inserted }
+        guard !fresh.isEmpty else { return }
+        if firstRequestTimestamp == nil { firstRequestTimestamp = fresh.first?.timestamp }
+        totalRequestCount += fresh.count
+        // Publish once per import batch, retaining the original UI performance
+        // contract even when an archive contains hundreds of records.
+        requests = Array((requests + fresh).suffix(Self.maxRetainedRequests))
+    }
+
     func record(_ entry: RequestRecord) {
-        if firstRequestTimestamp == nil {
-            firstRequestTimestamp = entry.timestamp
-        }
-        totalRequestCount += 1
-        requests.append(entry)
-        let overflow = requests.count - Self.maxRetainedRequests
-        if overflow > 0 {
-            requests.removeFirst(overflow)
-        }
+        recordEntries([entry])
     }
 
     func record(_ entry: ProxyPilotCore.RequestRecord) {
-        record(RequestRecord(
-            timestamp: entry.timestamp,
-            model: entry.model,
-            promptTokens: entry.promptTokens,
-            completionTokens: entry.completionTokens,
-            promptCacheHitTokens: entry.promptCacheHitTokens,
-            promptCacheMissTokens: entry.promptCacheMissTokens,
-            promptCacheWriteTokens: entry.promptCacheWriteTokens,
-            durationSeconds: entry.durationSeconds,
-            path: entry.path,
-            wasStreaming: entry.wasStreaming,
-            providerIdentifier: entry.providerIdentifier
-        ))
+        recordEntries([Self.guiRecord(entry)])
     }
 
     func record(_ entries: [ProxyPilotCore.RequestRecord]) {
-        guard !entries.isEmpty else { return }
-        if firstRequestTimestamp == nil {
-            firstRequestTimestamp = entries.first?.timestamp
-        }
+        recordEntries(entries.map { Self.guiRecord($0) })
+    }
 
-        totalRequestCount += entries.count
+    func record(_ event: SessionReportEvent) {
+        record(events: [event])
+    }
 
-        let mapped = entries.map { entry in
-            RequestRecord(
-                timestamp: entry.timestamp,
-                model: entry.model,
-                promptTokens: entry.promptTokens,
-                completionTokens: entry.completionTokens,
-                promptCacheHitTokens: entry.promptCacheHitTokens,
-                promptCacheMissTokens: entry.promptCacheMissTokens,
-                promptCacheWriteTokens: entry.promptCacheWriteTokens,
-                durationSeconds: entry.durationSeconds,
-                path: entry.path,
-                wasStreaming: entry.wasStreaming,
-                providerIdentifier: entry.providerIdentifier
-            )
-        }
-        requests = Array((requests + mapped).suffix(Self.maxRetainedRequests))
+    func record(events: [SessionReportEvent]) {
+        recordEntries(events.map { Self.guiRecord($0.record, id: $0.id) })
     }
 
     func reset() {
         requests.removeAll()
+        recordedRequestIDs.removeAll()
         firstRequestTimestamp = nil
         totalRequestCount = 0
     }

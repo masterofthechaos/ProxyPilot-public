@@ -55,6 +55,7 @@ struct AllTimeUsage: Equatable, Sendable {
     let totalPromptCacheWriteTokens: Int
     let cacheAccountingAvailable: Bool
     let cacheHitRate: Double?
+    var cacheObservedRequests: Int = 0
 
     let modelDistribution: [SessionHistorySession.ModelCount]
     let sourceShares: [SourceShare]
@@ -162,9 +163,11 @@ struct AllTimeUsage: Equatable, Sendable {
         }
 
         let totalTokens = totalPromptTokens + totalCompletionTokens
-        let cacheHitTotal = totalPromptCacheHitTokens + totalPromptCacheMissTokens
+        let measured = requests.filter { $0.promptCacheHitTokens != nil && $0.promptCacheMissTokens != nil }
+        let measuredHits = measured.reduce(0) { $0 + ($1.promptCacheHitTokens ?? 0) }
+        let cacheHitTotal = measuredHits + measured.reduce(0) { $0 + ($1.promptCacheMissTokens ?? 0) }
         let cacheHitRate = cacheHitTotal > 0
-            ? Double(totalPromptCacheHitTokens) / Double(cacheHitTotal)
+            ? Double(measuredHits) / Double(cacheHitTotal)
             : nil
 
         let modelDistribution = modelCounts
@@ -234,10 +237,9 @@ struct AllTimeUsage: Equatable, Sendable {
             totalPromptCacheHitTokens: totalPromptCacheHitTokens,
             totalPromptCacheMissTokens: totalPromptCacheMissTokens,
             totalPromptCacheWriteTokens: totalPromptCacheWriteTokens,
-            cacheAccountingAvailable: totalPromptCacheHitTokens > 0
-                || totalPromptCacheMissTokens > 0
-                || totalPromptCacheWriteTokens > 0,
+            cacheAccountingAvailable: requests.contains { $0.promptCacheHitTokens != nil || $0.promptCacheMissTokens != nil || $0.promptCacheWriteTokens != nil },
             cacheHitRate: cacheHitRate,
+            cacheObservedRequests: requests.filter { $0.promptCacheHitTokens != nil || $0.promptCacheMissTokens != nil || $0.promptCacheWriteTokens != nil }.count,
             modelDistribution: modelDistribution,
             sourceShares: sourceShares,
             p50Latency: percentile(durations, percentile: 0.5),

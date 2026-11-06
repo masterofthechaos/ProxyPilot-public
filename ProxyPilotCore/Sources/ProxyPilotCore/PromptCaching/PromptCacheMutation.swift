@@ -25,3 +25,32 @@ public struct PromptCacheMutation: Sendable {
         PromptCacheMutation(body: body, headers: headers, applied: false, strategy: "none")
     }
 }
+
+/// Request-scoped observation shared by the forwarding and accounting paths.
+/// Holds only adapter metadata, never prompt bodies or credentials.
+public final class PromptCacheRequestContext: @unchecked Sendable {
+    @TaskLocal public static var current: PromptCacheRequestContext?
+    public let incomingSessionHeader: String?
+    private let lock = NSLock()
+    private var recordedOutcome: (strategy: String, applied: Bool)?
+
+    public init(incomingSessionHeader: String? = nil) {
+        self.incomingSessionHeader = incomingSessionHeader
+    }
+
+    public var outcome: (strategy: String, applied: Bool)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedOutcome
+    }
+
+    public func record(_ mutation: PromptCacheMutation) {
+        lock.lock()
+        defer { lock.unlock() }
+        recordedOutcome = (mutation.strategy, mutation.applied)
+    }
+
+    public static func sessionID(fallback: String) -> String {
+        RequestAttributionContext.current?.sessionID ?? fallback
+    }
+}

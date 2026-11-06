@@ -21,6 +21,9 @@ public struct RequestRecord: Sendable, Codable, Equatable {
     public let promptCachingMode: String?
     public let contextCompactionEnabled: Bool?
     public let translationMode: String?
+    /// Observed adapter decision, distinct from the configured mode or a cache hit.
+    public let promptCacheStrategy: String?
+    public let promptCacheApplied: Bool?
     /// Actual provider server-tool receipts. These are children of the outer
     /// request, never additional requests or amounts to add to outer usage.
     /// Nil is legacy/unobserved; an empty array is an observed request with no
@@ -44,7 +47,9 @@ public struct RequestRecord: Sendable, Codable, Equatable {
         promptCachingMode: String? = nil,
         contextCompactionEnabled: Bool? = nil,
         translationMode: String? = nil,
-        serverToolCalls: [TutorServerToolReceipt]? = nil
+        serverToolCalls: [TutorServerToolReceipt]? = nil,
+        promptCacheStrategy: String? = nil,
+        promptCacheApplied: Bool? = nil
     ) {
         self.timestamp = timestamp
         self.model = model
@@ -63,5 +68,7 @@ public struct RequestRecord: Sendable, Codable, Equatable {
         self.contextCompactionEnabled = contextCompactionEnabled
         self.translationMode = translationMode
         self.serverToolCalls = serverToolCalls
+        self.promptCacheStrategy = promptCacheStrategy
+        self.promptCacheApplied = promptCacheApplied
     }
 }

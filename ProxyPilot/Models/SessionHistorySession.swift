@@ -106,8 +106,10 @@ struct SessionHistorySession: Identifiable, Equatable, Sendable {
         }
 
         let totalTokens = totalPromptTokens + totalCompletionTokens
-        let cacheHitTotal = totalPromptCacheHitTokens + totalPromptCacheMissTokens
-        let cacheHitRate = cacheHitTotal > 0 ? Double(totalPromptCacheHitTokens) / Double(cacheHitTotal) : nil
+        let measured = requests.filter { $0.promptCacheHitTokens != nil && $0.promptCacheMissTokens != nil }
+        let measuredHits = measured.reduce(0) { $0 + ($1.promptCacheHitTokens ?? 0) }
+        let cacheHitTotal = measuredHits + measured.reduce(0) { $0 + ($1.promptCacheMissTokens ?? 0) }
+        let cacheHitRate = cacheHitTotal > 0 ? Double(measuredHits) / Double(cacheHitTotal) : nil
 
         return Summary(
             startedAt: startedAt,
@@ -120,9 +122,7 @@ struct SessionHistorySession: Identifiable, Equatable, Sendable {
             totalPromptCacheMissTokens: totalPromptCacheMissTokens,
             totalPromptCacheWriteTokens: totalPromptCacheWriteTokens,
             tokenAccountingAvailable: tokenAccountingAvailable,
-            cacheAccountingAvailable: totalPromptCacheHitTokens > 0
-                || totalPromptCacheMissTokens > 0
-                || totalPromptCacheWriteTokens > 0,
+            cacheAccountingAvailable: requests.contains { $0.promptCacheHitTokens != nil || $0.promptCacheMissTokens != nil || $0.promptCacheWriteTokens != nil },
             cacheHitRate: cacheHitRate,
             totalTokensFormatted: Self.formatTokens(totalTokens),
             modelDistribution: modelCounts
@@ -395,7 +395,7 @@ enum SessionHistoryFileExport {
         return String(decoding: try encoder.encode(SessionHistorySessionExport(session: session)), as: UTF8.self)
     }
 
-    static let csvHeader = "sessionID,source,timestamp,model,promptTokens,completionTokens,promptCacheHitTokens,promptCacheMissTokens,promptCacheWriteTokens,durationSeconds,path,wasStreaming"
+    static let csvHeader = "sessionID,source,timestamp,model,promptTokens,completionTokens,promptCacheHitTokens,promptCacheMissTokens,promptCacheWriteTokens,durationSeconds,path,wasStreaming,promptCachingMode,promptCacheStrategy,promptCacheApplied"
 
     static func csv(for session: SessionHistorySession) -> String {
         let formatter = ISO8601DateFormatter()
@@ -413,7 +413,10 @@ enum SessionHistoryFileExport {
                 request.promptCacheWriteTokens.map(String.init) ?? "",
                 String(request.durationSeconds),
                 request.path,
-                String(request.wasStreaming)
+                String(request.wasStreaming),
+                request.promptCachingMode ?? "",
+                request.promptCacheStrategy ?? "",
+                request.promptCacheApplied.map { String($0) } ?? ""
             ]
             lines.append(fields.map(csvEscapedField).joined(separator: ","))
         }

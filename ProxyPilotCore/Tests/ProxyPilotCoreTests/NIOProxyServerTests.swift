@@ -724,6 +724,55 @@ struct NIOProxyServerTests {
         try await stub.stop()
     }
 
+    @Test(arguments: [false, true])
+    func openRouterAttributedCacheDecisionReachesWireAndJournal(streaming: Bool) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let reportURL = directory.appendingPathComponent("session-report.jsonl")
+        let stats = SessionStats(sessionReportURL: reportURL)
+        let json = #"{"id":"cache-test","model":"qwen/test","choices":[{"index":0,"message":{"content":"ok"},"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":5,"cache_write_tokens":3}}}"#
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(statusCode: 200, body: streaming ? "data: " + json + "\n\ndata: [DONE]\n\n" : json)
+        let config = ProxyConfiguration(port: 0, upstreamProvider: .openRouter,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)", requiresAuth: false,
+            sessionStats: stats, promptCaching: .init(isEnabled: true, mode: .computeCacheHints), sessionID: "daemon")
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+        let logicalID = UUID().uuidString.lowercased()
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("repogps", forHTTPHeaderField: "X-ProxyPilot-Client")
+        request.setValue(logicalID, forHTTPHeaderField: "X-ProxyPilot-Session-ID")
+        request.setValue("lead", forHTTPHeaderField: "X-ProxyPilot-Role")
+        let imageURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jA9sAAAAASUVORK5CYII="
+        let messages: [[String: Any]] = [["role": "user", "content": [
+            ["type": "text", "text": "Describe this tiny image."],
+            ["type": "image_url", "image_url": ["url": imageURL, "detail": "low"]]
+        ]]]
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["model": "qwen/test", "stream": streaming, "messages": messages])
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let sent = try #require(stub.requests().first)
+        let body = try #require(JSONSerialization.jsonObject(with: Data(sent.body.utf8)) as? [String: Any])
+        let expected = "pp_" + PromptCacheSessionKey.make(provider: UpstreamProvider.openRouter.rawValue, model: "qwen/test", sessionID: logicalID, route: UpstreamProvider.openRouter.chatCompletionsPath)
+        #expect(body["session_id"] as? String == expected)
+        let sentMessages = try #require(body["messages"] as? [[String: Any]])
+        #expect(try JSONSerialization.data(withJSONObject: sentMessages, options: [.sortedKeys])
+            == JSONSerialization.data(withJSONObject: messages, options: [.sortedKeys]))
+        let content = try #require(sentMessages.first?["content"] as? [[String: Any]])
+        #expect(content.count == 2)
+        #expect(content.last?["image_url"] as? [String: String] == ["url": imageURL, "detail": "low"])
+        #expect(sent.headerValue("X-ProxyPilot-Session-ID") == nil)
+        let event = try #require(SessionReportStore.readEvents(from: reportURL).first)
+        #expect(event.sessionID == logicalID)
+        #expect(event.record.promptCacheStrategy == "openrouter_session_affinity")
+        #expect(event.record.promptCacheApplied == true)
+        #expect(event.record.promptCacheWriteTokens == 3)
+        try await server.stop()
+        try await stub.stop()
+    }
+
     @Test func openAIComputeCacheHintsReachUpstreamBody() async throws {
         let stub = StubUpstream()
         let upstreamPort = try await stub.start(

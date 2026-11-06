@@ -47,9 +47,15 @@ enum RouteStatusReporter {
         let selected = RouteState.load(); let selectedPort = selected?.port ?? 4000; let probe = await CLIProxyRuntime.probeProxy(on: selectedPort); let pid = PidFile.read()
         let applied = if let selected { await RouteReadiness.selected(port: selected.port, model: selected.model) } else { false }
         let verificationState = applied ? "models_ready" : (probe.reachable ? "mismatched" : "stopped")
+        let catalog = selected.flatMap { selection -> ModelCatalogStore.Snapshot? in
+            guard let provider = UpstreamProvider(rawValue: selection.provider) else { return nil }
+            let snapshot = ModelCatalogStore.load(provider: provider.rawValue, endpoint: provider.defaultAPIBaseURL)
+            let baseID = selection.model.hasSuffix(":exacto") ? String(selection.model.dropLast(7)) : selection.model
+            return snapshot?.models.contains { $0.id == selection.model || $0.id == baseID } == true ? snapshot : nil
+        }
         let metadata = selected.flatMap { selection -> UpstreamModel? in
             guard let provider = UpstreamProvider(rawValue: selection.provider) else { return nil }
-            return provider.knownModelMetadata(for: selection.model)
+            return ModelCatalogStore.model(id: selection.model, provider: provider, snapshot: catalog)
         }
         let contextValue: Any = (metadata?.contextLength as Any?) ?? NSNull()
         let inputPriceValue: Any = (metadata?.promptPricePer1M as Any?) ?? NSNull()
@@ -80,7 +86,12 @@ enum RouteStatusReporter {
             "applied_model": applied ? (selected?.model ?? NSNull()) : NSNull(),
             "port": Int(selectedPort),
             "verification_state": verificationState,
-            "limits": ["context": contextValue, "output": NSNull()],
+            "limits": ["context": contextValue, "output": (metadata?.maximumOutputTokens as Any?) ?? NSNull()],
+            "modalities": ["input": (metadata?.inputModalities as Any?) ?? NSNull(),
+                           "output": (metadata?.outputModalities as Any?) ?? NSNull(),
+                           "image_support": metadata?.inputModalities.map { $0.contains("image") ? "supported" : "unsupported" } ?? "unknown"],
+            "metadata_fetched_at": catalog.map { ISO8601DateFormatter().string(from: $0.fetchedAt) } as Any? ?? NSNull(),
+            "metadata_stale": catalog?.isStale ?? false,
             "pricing": [
                 "input_per_million": inputPriceValue,
                 "output_per_million": outputPriceValue,
@@ -89,7 +100,7 @@ enum RouteStatusReporter {
                 "cache_write_per_million": cacheWritePriceValue,
                 "currency": currencyValue,
             ],
-            "metadata_provenance": metadata == nil ? "unavailable" : "provider_known_catalog",
+            "metadata_provenance": metadata == nil ? "unavailable" : (catalog == nil ? "provider_known_catalog" : (selected.flatMap { UpstreamProvider(rawValue: $0.provider)?.knownModelMetadata(for: $0.model) } == nil ? "provider_catalog" : "provider_catalog_with_known_fallback")),
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]); print(String(decoding: data, as: UTF8.self))
     }

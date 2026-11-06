@@ -81,7 +81,7 @@ public enum SessionReportStore {
     /// The sidecar inode survives rotation and reset. Every process opens its
     /// own descriptor, so flock serializes both independent processes and
     /// independent writers in one process. Never unlink the lock after use.
-    private static func withJournalLock<T>(at url: URL, _ body: () throws -> T) throws -> T {
+    static func withJournalLock<T>(at url: URL, _ body: () throws -> T) throws -> T {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let descriptor = open(url.appendingPathExtension("lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw journalError() }
@@ -112,38 +112,26 @@ public enum SessionReportStore {
     }
 
     private static func readOne(_ url: URL) throws -> [SessionReportEvent] {
-
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        let size = try handle.seekToEnd()
-        let start = size > UInt64(maximumFileBytes) ? size - UInt64(maximumFileBytes) : 0
-        try handle.seek(toOffset: start)
-        var data = try handle.readToEnd() ?? Data()
-        if start > 0, let newline = data.firstIndex(of: 0x0A) {
-            data.removeSubrange(data.startIndex...newline)
-        }
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-
-        return text
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .compactMap { line in
-                guard line.utf8.count <= maximumEventBytes else { return nil }
-                guard let data = line.data(using: .utf8) else { return nil }
-                return try? decoder.decode(SessionReportEvent.self, from: data)
-            }
+        var events: [SessionReportEvent] = []
+        try SessionHistoryArchive.forEachLine(in: url) { line in
+            guard let line, !line.isEmpty,
+                  let event = try? decoder.decode(SessionReportEvent.self, from: line) else { return }
+            events.append(event)
+        }
+        return events
     }
 
     private static func archiveURL(for url: URL) -> URL {
         url.deletingPathExtension().appendingPathExtension("archive.jsonl")
     }
 
-    private static func freshArchiveURL(for url: URL) -> URL {
+    static func freshArchiveURL(for url: URL) -> URL {
         url.deletingPathExtension().appendingPathExtension("archive.\(UUID().uuidString.lowercased()).jsonl")
     }
 
-    private static func archiveURLs(for url: URL) -> [URL] {
+    public static func archiveURLs(for url: URL) -> [URL] {
         let directory = url.deletingLastPathComponent()
         let base = url.deletingPathExtension().lastPathComponent + ".archive"
         return ((try? FileManager.default.contentsOfDirectory(

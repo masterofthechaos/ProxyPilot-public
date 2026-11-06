@@ -137,7 +137,9 @@ final class ProxyService {
 
         do {
             let decoded = try JSONDecoder().decode(OpenAIModelsResponse.self, from: normalized.data)
-            return Self.upstreamModels(from: decoded, provider: provider)
+            let models = Self.upstreamModels(from: decoded, provider: provider)
+            try? ModelCatalogStore.save(models, provider: provider.rawValue, endpoint: Self.normalizedUpstreamAPIBase(apiBase).absoluteString)
+            return models
         } catch {
             if let fallback = provider.fallbackModelIDs {
                 return fallback.map(UpstreamModel.idOnly)
@@ -184,7 +186,10 @@ final class ProxyService {
                 supportedParameters: Set(model.supportedParameters ?? []),
                 displayName: model.name,
                 lab: provider == .openRouter ? model.id.split(separator: "/").dropLast().first.map(String.init) : nil,
-                catalogAddedAt: model.created.map { Date(timeIntervalSince1970: $0) }
+                catalogAddedAt: model.created.map { Date(timeIntervalSince1970: $0) },
+                inputModalities: model.architecture?.input_modalities,
+                outputModalities: model.architecture?.output_modalities,
+                maximumOutputTokens: model.topProvider?.max_completion_tokens
             )
             guard discovered.promptPricePer1M == nil,
                   discovered.completionPricePer1M == nil,
@@ -198,7 +203,9 @@ final class ProxyService {
                 promptCacheMissPricePer1M: known.promptCacheMissPricePer1M,
                 promptCacheWritePricePer1M: known.promptCacheWritePricePer1M,
                 supportedParameters: discovered.supportedParameters.union(known.supportedParameters),
-                displayName: discovered.displayName, lab: discovered.lab, catalogAddedAt: discovered.catalogAddedAt
+                displayName: discovered.displayName, lab: discovered.lab, catalogAddedAt: discovered.catalogAddedAt,
+                inputModalities: discovered.inputModalities, outputModalities: discovered.outputModalities,
+                maximumOutputTokens: discovered.maximumOutputTokens
             )
         }.sorted { $0.id < $1.id }
     }
@@ -290,6 +297,13 @@ struct OpenAIModelsResponse: Decodable {
         let contextLength: Int?
         let pricing: Pricing?
         let supportedParameters: [String]?
+        let architecture: Architecture?
+        let topProvider: TopProvider?
+        struct Architecture: Decodable {
+            let input_modalities: [String]?
+            let output_modalities: [String]?
+        }
+        struct TopProvider: Decodable { let max_completion_tokens: Int? }
 
         /// Prices arrive as decimal strings in USD **per single token**
         /// (e.g. `"0.000002"`); `UpstreamModel` stores them per million.
@@ -308,7 +322,8 @@ struct OpenAIModelsResponse: Decodable {
         }
 
         enum CodingKeys: String, CodingKey {
-            case id, name, created
+            case id, name, created, architecture
+            case topProvider = "top_provider"
             case contextLength = "context_length"
             case pricing
             case supportedParameters = "supported_parameters"

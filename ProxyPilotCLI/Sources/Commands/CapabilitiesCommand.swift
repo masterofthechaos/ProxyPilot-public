@@ -11,7 +11,7 @@ struct CapabilitiesCommand: ParsableCommand {
             "request_attribution": 2,
             "session_storage": 2,
             "independent_request": 1,
-            "route_metadata": 1,
+            "route_metadata": 2,
             "attributed_usage": 2,
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])

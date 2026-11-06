@@ -1515,3 +1515,28 @@ private func assertGoogleSchemaSanitized(provider: UpstreamProvider, model: Stri
     #expect(streamed.promptCacheHitTokens == 400)
     #expect(streamed.promptCacheMissTokens == 600)
 }
+
+@Test func openRouterNestedCacheWriteUsagePreservesReadsAndMisses() throws {
+    let json = #"{"model":"anthropic/claude-test","usage":{"prompt_tokens":1000,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":400,"cache_write_tokens":125}}}"#
+    let buffered = try #require(AnthropicTranslator.anthropicPassthroughUsage(from: Data(json.utf8)))
+    let streamed = try #require(AnthropicTranslator.anthropicPassthroughUsage(fromStreamingLine: "data: " + json))
+    for snapshot in [buffered, streamed] {
+        #expect(snapshot.promptTokens == 1000)
+        #expect(snapshot.promptCacheHitTokens == 400)
+        #expect(snapshot.promptCacheMissTokens == 600)
+        #expect(snapshot.promptCacheWriteTokens == 125)
+    }
+    var state = AnthropicTranslator.StreamingState(requestID: "req_write", messageID: "msg_write")
+    let chunk = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+    _ = AnthropicTranslator.processStreamingChunk(chunk, state: &state, model: "anthropic/claude-test")
+    #expect(state.lastSeenPromptCacheWriteTokens == 125)
+    _ = AnthropicTranslator.processStreamingChunk(["usage": ["completion_tokens": 30]], state: &state, model: "anthropic/claude-test")
+    #expect(state.lastSeenPromptCacheWriteTokens == 125)
+}
+
+@Test func absentCacheWriteTelemetryStaysUnknown() throws {
+    let snapshot = try #require(AnthropicTranslator.anthropicPassthroughUsage(from: Data(#"{"usage":{"prompt_tokens":100,"completion_tokens":5}}"#.utf8)))
+    #expect(snapshot.promptCacheHitTokens == nil)
+    #expect(snapshot.promptCacheMissTokens == nil)
+    #expect(snapshot.promptCacheWriteTokens == nil)
+}

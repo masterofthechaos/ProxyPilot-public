@@ -6,6 +6,61 @@ import XCTest
 @MainActor
 final class SessionReportCardTests: XCTestCase {
 
+    func testJournalEventAndLiveRecordShareIdentityBeyondRetainedRows() {
+        let card = SessionReportCard()
+        let id = UUID()
+        let date = Date()
+        let core = ProxyPilotCore.RequestRecord(timestamp: date, model: "model", promptTokens: 10, completionTokens: 2,
+            durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: false)
+        card.record(SessionReportCard.RequestRecord(id: id, timestamp: date, model: "model", promptTokens: 10, completionTokens: 2,
+            durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: false))
+        for _ in 0..<501 { card.record(core) }
+        let count = card.totalRequests
+        card.record(SessionReportEvent(id: id, source: "repogps", sessionID: "logical", record: core))
+        XCTAssertEqual(card.totalRequests, count)
+        card.reset()
+        card.record(SessionReportEvent(id: id, source: "repogps", sessionID: "logical", record: core))
+        XCTAssertEqual(card.totalRequests, 1)
+    }
+
+    func testCoreConversionsPreserveOptionalRequestMetadata() {
+        let core = ProxyPilotCore.RequestRecord(model: "returned", requestedModel: "alias", providerReportedCostUSD: 0,
+            promptTokens: 10, completionTokens: 2, durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: true,
+            providerIdentifier: "openrouter", promptCachingMode: "computeCacheHints", contextCompactionEnabled: false,
+            translationMode: "hardened", serverToolCalls: [], promptCacheStrategy: "existing_openrouter_cache_hints", promptCacheApplied: false)
+        let card = SessionReportCard()
+        card.record(core)
+        card.record([core])
+        for record in card.requests {
+            XCTAssertEqual(record.requestedModel, "alias")
+            XCTAssertEqual(record.providerReportedCostUSD, 0)
+            XCTAssertEqual(record.serverToolCalls, [])
+            XCTAssertEqual(record.promptCachingMode, "computeCacheHints")
+            XCTAssertEqual(record.contextCompactionEnabled, false)
+            XCTAssertEqual(record.translationMode, "hardened")
+            XCTAssertEqual(record.promptCacheStrategy, "existing_openrouter_cache_hints")
+            XCTAssertEqual(record.promptCacheApplied, false)
+            XCTAssertNil(record.promptCacheHitTokens)
+        }
+    }
+
+    func testCacheRateUsesPairedReportsAndObservedZeroRemainsAvailable() {
+        let card = SessionReportCard()
+        func record(hit: Int?, miss: Int?) {
+            card.record(SessionReportCard.RequestRecord(timestamp: Date(), model: "m", promptTokens: 100, completionTokens: 1,
+                promptCacheHitTokens: hit, promptCacheMissTokens: miss, durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: false))
+        }
+        record(hit: nil, miss: nil)
+        XCTAssertFalse(card.cacheAccountingAvailable)
+        record(hit: 0, miss: 0)
+        XCTAssertTrue(card.cacheAccountingAvailable)
+        XCTAssertNil(card.cacheHitRate)
+        record(hit: 20, miss: 80)
+        record(hit: 900, miss: nil)
+        record(hit: nil, miss: 900)
+        XCTAssertEqual(card.cacheHitRate, 0.2)
+    }
+
     func testEmptyReportCard() {
         let card = SessionReportCard()
         XCTAssertEqual(card.totalRequests, 0)

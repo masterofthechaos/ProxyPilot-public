@@ -1,7 +1,7 @@
 import Foundation
 
-/// macOS-friendly secrets provider that prefers Keychain but silently falls back
-/// to the default file-backed store when Keychain is unavailable.
+/// Prefers Keychain and reads the file-backed store when Keychain is unavailable.
+/// Writes fall back only when primary absence is verified; partial mutations throw.
 public final class FallbackSecretsProvider: SecretsProvider, @unchecked Sendable {
     private let primary: any SecretsProvider
     private let fallback: FileSecretsProvider
@@ -50,32 +50,47 @@ public final class FallbackSecretsProvider: SecretsProvider, @unchecked Sendable
     }
 
     public func set(key: String, value: String) throws {
-        if (try? primary.set(key: key, value: value)) != nil {
-            try? fallback.delete(key: key)
+        let primaryWritten = (try? primary.set(key: key, value: value)) != nil
+        if primaryWritten {
             recordBackend(primaryLabel)
+            do { try fallback.delete(key: key) }
+            catch {
+                throw SecretsError.fileError("Credential saved to primary storage, but the old fallback could not be removed. Repair fallback storage and retry.")
+            }
             return
         }
 
+        // A failed primary update can leave an older readable credential that
+        // would shadow a newly saved fallback. Never report that as success.
+        let existing: String?
+        do { existing = try primary.get(key: key) }
+        catch {
+            throw SecretsError.fileError("Primary credential storage is unavailable; replacement could not be verified. Unlock or repair primary storage and retry.")
+        }
+        if let existing {
+            guard existing == value else {
+                throw SecretsError.fileError("Primary storage retained the previous credential. Unlock or repair primary storage and retry; fallback was not changed.")
+            }
+            recordBackend(primaryLabel)
+            do { try fallback.delete(key: key) }
+            catch {
+                throw SecretsError.fileError("Primary storage already has this credential, but fallback cleanup failed. Repair fallback storage and retry.")
+            }
+            return
+        }
         try fallback.set(key: key, value: value)
         recordBackend("file")
     }
 
     public func delete(key: String) throws {
-        var removed = false
-
-        if (try? primary.delete(key: key)) != nil {
-            removed = true
-            recordBackend(primaryLabel)
-        }
-
-        if (try? fallback.delete(key: key)) != nil {
-            removed = true
-            recordBackend("file")
-        }
-
-        if !removed {
-            recordBackend(nil)
-            throw SecretsError.fileError("No accessible secrets backend was available for delete.")
+        // Attempt both removals even after a failure, but do not mistake an
+        // absent/successful fallback for removal of a retained primary key.
+        var failed = false
+        do { try primary.delete(key: key) } catch { failed = true }
+        do { try fallback.delete(key: key) } catch { failed = true }
+        recordBackend(nil)
+        if failed {
+            throw SecretsError.fileError("Credential removal was incomplete. Unlock or repair both credential stores and retry; a stored credential may remain.")
         }
     }
 

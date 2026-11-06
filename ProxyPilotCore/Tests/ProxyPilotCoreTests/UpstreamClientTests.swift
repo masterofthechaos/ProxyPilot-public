@@ -37,6 +37,10 @@ final class UpstreamClientTests: XCTestCase {
                 ("X-Api-Key", "local-master-key"),
                 ("Api-Key", "local-master-key"),
                 (TutorRequestAdapter.headerName, "local-tutor-envelope"),
+                ("X-ProxyPilot-Client", "repogps"),
+                ("X-ProxyPilot-Session-ID", "private-logical-session"),
+                ("X-ProxyPilot-Role", "navigator"),
+                ("X-Session-ID", "caller-affinity"),
                 ("Content-Type", "application/json")
             ],
             body: Data(#"{"model":"allowed-model"}"#.utf8),
@@ -48,6 +52,10 @@ final class UpstreamClientTests: XCTestCase {
         XCTAssertNil(request.value(forHTTPHeaderField: "Api-Key"))
         XCTAssertNil(request.value(forHTTPHeaderField: TutorRequestAdapter.headerName))
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        XCTAssertNil(request.value(forHTTPHeaderField: "X-ProxyPilot-Client"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "X-ProxyPilot-Session-ID"))
+        XCTAssertNil(request.value(forHTTPHeaderField: "X-ProxyPilot-Role"))
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Session-ID"), "caller-affinity")
     }
     func testConfiguredTutorTimeoutReachesActualUpstreamRequest() throws {
         let base = ProxyConfiguration(upstreamAPIBaseURL: "https://api.example.com/v1/")
@@ -68,7 +76,7 @@ final class UpstreamClientTests: XCTestCase {
             body: Data(#"{"model":"m"}"#.utf8),
             config: config
         )
-        XCTAssertEqual(request.value(forHTTPHeaderField: "HTTP-Referer"), "https://micah.chat/proxypilot")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "HTTP-Referer"), "https://slicewrite.com/proxypilot")
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-OpenRouter-Title"), "ProxyPilot")
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-Title"), "ProxyPilot")
     }

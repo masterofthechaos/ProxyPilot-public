@@ -164,15 +164,17 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             role: head.headers["X-ProxyPilot-Role"].first
         )
         RequestAttributionContext.$current.withValue(attribution) {
-            switch (head.method, path) {
-            case (.GET, "/v1/models"), (.GET, "/models"):
-                handleModels(context: context)
-            case (.POST, "/v1/chat/completions"), (.POST, "/chat/completions"):
-                handleChatCompletions(context: context, head: head, body: body, path: path)
-            case (.POST, "/v1/messages"):
-                handleAnthropicMessages(context: context, head: head, body: body)
-            default:
-                sendErrorResponse(context: context, status: .notFound, message: "Not found")
+            PromptCacheRequestContext.$current.withValue(PromptCacheRequestContext()) {
+                switch (head.method, path) {
+                case (.GET, "/v1/models"), (.GET, "/models"):
+                    handleModels(context: context)
+                case (.POST, "/v1/chat/completions"), (.POST, "/chat/completions"):
+                    handleChatCompletions(context: context, head: head, body: body, path: path)
+                case (.POST, "/v1/messages"):
+                    handleAnthropicMessages(context: context, head: head, body: body)
+                default:
+                    sendErrorResponse(context: context, status: .notFound, message: "Not found")
+                }
             }
         }
     }
@@ -1320,15 +1322,17 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         model: String?,
         config: ProxyConfiguration
     ) -> PromptCacheMutation {
-        PromptCacheAdapter.mutate(
+        let mutation = PromptCacheAdapter.mutate(
             path: path,
             headers: headers,
             body: body,
             provider: config.upstreamProvider,
             model: model,
-            sessionID: config.sessionID,
+            sessionID: PromptCacheRequestContext.sessionID(fallback: config.sessionID),
             configuration: config.promptCaching
         )
+        PromptCacheRequestContext.current?.record(mutation)
+        return mutation
     }
 
     private func sanitizedChatRequestBody(_ body: Data) -> Data {
@@ -1392,7 +1396,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             translationMode: config.isAnthropicPassthroughActive
                 ? "anthropic_passthrough"
                 : config.anthropicTranslatorMode.rawValue,
-            serverToolCalls: serverToolCalls
+            serverToolCalls: serverToolCalls,
+            promptCacheStrategy: PromptCacheRequestContext.current?.outcome?.strategy,
+            promptCacheApplied: PromptCacheRequestContext.current?.outcome?.applied
         ))
     }
 

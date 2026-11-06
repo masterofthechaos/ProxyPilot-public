@@ -643,6 +643,7 @@ public enum AnthropicTranslator {
             ?? openAICompatibleCacheHitTokens
             ?? intValue(from: usage?["cache_read_input_tokens"])
         let promptCacheWriteTokens = intValue(from: usage?["cache_creation_input_tokens"])
+            ?? intValue(from: promptTokenDetails?["cache_write_tokens"])
         // Anthropic-format DeepSeek usage reports uncached input as input_tokens,
         // cache writes as cache_creation_input_tokens, and cache hits separately.
         let anthropicCacheMissTokens = intValue(from: usage?["input_tokens"]).map {
@@ -1257,6 +1258,7 @@ public enum AnthropicTranslator {
                 ?? openAICompatibleCacheHitTokens
                 ?? intValue(from: usage["cache_read_input_tokens"])
             let writeTokens = intValue(from: usage["cache_creation_input_tokens"])
+                ?? intValue(from: details?["cache_write_tokens"])
             let anthropicMissTokens = intValue(from: usage["input_tokens"]).map {
                 $0 + (writeTokens ?? 0)
             }

@@ -490,3 +490,98 @@ struct PromptCacheAdapterTests {
         return try #require(request["messages"] as? [[String: Any]])
     }
 }
+
+@Suite("OpenRouter cache policy")
+struct OpenRouterCachePolicyTests {
+    private func mutate(_ json: String, session: String = "session-a", headers: [(String, String)] = [], mode: PromptCachingMode = .computeCacheHints) -> PromptCacheMutation {
+        PromptCacheAdapter.mutate(path: "/v1/chat/completions", headers: headers, body: Data(json.utf8), provider: .openRouter, model: nil, sessionID: session, configuration: .init(isEnabled: true, mode: mode))
+    }
+
+    @Test func automaticAffinityIsOpaqueStableAndSessionScoped() throws {
+        let input = #"{"model":"qwen/model","messages":[{"role":"user","content":"hi"}]}"#
+        let a = mutate(input)
+        let repeatA = mutate(input)
+        let b = mutate(input, session: "session-b")
+        let root = try #require(JSONSerialization.jsonObject(with: a.body) as? [String: Any])
+        let key = try #require(root["session_id"] as? String)
+        #expect(a.body == repeatA.body)
+        #expect(a.body != b.body)
+        #expect(key.hasPrefix("pp_"))
+        #expect(!key.contains("session-a"))
+        #expect(key.count <= 256)
+        #expect(root["cache_control"] == nil)
+        #expect(root["prompt_cache_key"] == nil)
+        #expect(a.strategy == "openrouter_session_affinity")
+    }
+
+    @Test func anthropicAddsAutomaticPolicyWithoutChangingMessages() throws {
+        let input = #"{"model":"anthropic/claude-test","messages":[{"role":"user","content":"hi"}]}"#
+        let result = mutate(input)
+        let root = try #require(JSONSerialization.jsonObject(with: result.body) as? [String: Any])
+        #expect((root["cache_control"] as? [String: String]) == ["type": "ephemeral"])
+        #expect((root["messages"] as? [[String: String]]) == [["role": "user", "content": "hi"]])
+        #expect(result.strategy == "openrouter_session_affinity+anthropic_auto_cache_control")
+        #expect(result.applied)
+    }
+
+    @Test func callerSessionAndExplicitBreakpointsRemainUnchanged() throws {
+        let input = #"{"model":"anthropic/claude-test","session_id":"caller","prompt_cache_key":"caller-key","messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}"#
+        let result = mutate(input)
+        #expect(result.body == Data(input.utf8))
+        #expect(!result.applied)
+        #expect(result.strategy == "existing_openrouter_cache_hints")
+    }
+
+    @Test func callerSessionHeaderAndBodyPrecedenceRemainUnchanged() throws {
+        let input = #"{"model":"qwen/model","session_id":"body-wins"}"#
+        let result = mutate(input, headers: [("X-Session-ID", "header")])
+        #expect(result.body == Data(input.utf8))
+        #expect(result.headers.first?.1 == "header")
+        let headerOnly = #"{"model":"qwen/model"}"#
+        #expect(mutate(headerOnly, headers: [("X-Session-ID", "header")]).body == Data(headerOnly.utf8))
+    }
+
+    @Test func offAndObserveDoNotAlterCallerBytes() {
+        let input = #"{ "model": "anthropic/claude-test", "cache_control": null }"#
+        for mode in [PromptCachingMode.off, .observeOnly] {
+            let result = mutate(input, mode: mode)
+            #expect(result.body == Data(input.utf8))
+            #expect(!result.applied)
+        }
+    }
+
+    @Test func attributedSessionIdentityAndOutcomeAreRequestScoped() async {
+        let firstID = UUID().uuidString.lowercased()
+        let secondID = UUID().uuidString.lowercased()
+        let results = await withTaskGroup(of: String.self, returning: Set<String>.self) { group in
+            for id in [firstID, secondID] {
+                group.addTask {
+                    await RequestAttributionContext.$current.withValue(.validated(client: "repogps", sessionID: id)) {
+                        await PromptCacheRequestContext.$current.withValue(PromptCacheRequestContext()) {
+                            let identity = PromptCacheRequestContext.sessionID(fallback: "daemon")
+                            PromptCacheRequestContext.current?.record(.init(body: Data(), applied: true, strategy: id))
+                            await Task.yield()
+                            #expect(PromptCacheRequestContext.current?.outcome?.strategy == id)
+                            return identity
+                        }
+                    }
+                }
+            }
+            var identities = Set<String>()
+            for await result in group { identities.insert(result) }
+            return identities
+        }
+        #expect(results == [firstID, secondID])
+        #expect(PromptCacheRequestContext.sessionID(fallback: "daemon") == "daemon")
+        #expect(PromptCacheRequestContext.current == nil)
+    }
+
+    @Test func legacyRecordKeepsUnknownAdapterOutcome() throws {
+        let old = Data(#"{"timestamp":0,"model":"old","promptTokens":10,"completionTokens":1,"durationSeconds":1,"path":"/v1/chat/completions","wasStreaming":false}"#.utf8)
+        let decoded = try JSONDecoder().decode(RequestRecord.self, from: old)
+        #expect(decoded.promptCacheStrategy == nil)
+        #expect(decoded.promptCacheApplied == nil)
+        let encoded = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as? [String: Any])
+        #expect(encoded["promptCacheApplied"] == nil)
+    }
+}

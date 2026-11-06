@@ -665,13 +665,15 @@ final class LocalProxyServer: @unchecked Sendable {
                 startRequestTask(on: connection, trackingID: trackingID) { [weak self] in
                     guard let self else { return }
                     await RequestAttributionContext.$current.withValue(attribution) {
-                        await self.beginTrackedRequest(
-                            id: trackingID,
-                            modelName: modelName,
-                            providerIdentifier: config.analyticsProviderIdentifier,
-                            pathCategory: "anthropic_messages"
-                        )
-                        await self.handleAnthropicMessages(body: body, headers: headers, connection: connection, config: config, trackingID: trackingID)
+                        await PromptCacheRequestContext.$current.withValue(PromptCacheRequestContext(incomingSessionHeader: headers["x-session-id"])) {
+                            await self.beginTrackedRequest(
+                                id: trackingID,
+                                modelName: modelName,
+                                providerIdentifier: config.analyticsProviderIdentifier,
+                                pathCategory: "anthropic_messages"
+                            )
+                            await self.handleAnthropicMessages(body: body, headers: headers, connection: connection, config: config, trackingID: trackingID)
+                        }
                     }
                 }
                 return
@@ -681,17 +683,19 @@ final class LocalProxyServer: @unchecked Sendable {
             startRequestTask(on: connection, trackingID: trackingID) { [weak self] in
                 guard let self else { return }
                 await RequestAttributionContext.$current.withValue(attribution) {
-                    await self.beginTrackedRequest(
-                        id: trackingID,
-                        modelName: modelName,
-                        providerIdentifier: config.analyticsProviderIdentifier,
-                        pathCategory: "chat_completions",
-                        clearsUpstreamModelAttribution: true
-                    )
-                    if isStreaming {
-                        await self.handleStreamingChatCompletions(body: body, tutorEnvelope: headers["x-repogps-tutor"], connection: connection, config: config, trackingID: trackingID)
-                    } else {
-                        await self.handleChatCompletions(body: body, tutorEnvelope: headers["x-repogps-tutor"], connection: connection, config: config, trackingID: trackingID)
+                    await PromptCacheRequestContext.$current.withValue(PromptCacheRequestContext(incomingSessionHeader: headers["x-session-id"])) {
+                        await self.beginTrackedRequest(
+                            id: trackingID,
+                            modelName: modelName,
+                            providerIdentifier: config.analyticsProviderIdentifier,
+                            pathCategory: "chat_completions",
+                            clearsUpstreamModelAttribution: true
+                        )
+                        if isStreaming {
+                            await self.handleStreamingChatCompletions(body: body, tutorEnvelope: headers["x-repogps-tutor"], connection: connection, config: config, trackingID: trackingID)
+                        } else {
+                            await self.handleChatCompletions(body: body, tutorEnvelope: headers["x-repogps-tutor"], connection: connection, config: config, trackingID: trackingID)
+                        }
                     }
                 }
             }
@@ -1985,6 +1989,11 @@ final class LocalProxyServer: @unchecked Sendable {
         guard !Task.isCancelled else { return }
         var record = recordWithAllowedCacheTelemetry(record, promptCaching: config.promptCaching)
         record.providerIdentifier = config.analyticsProviderIdentifier
+        record.promptCachingMode = config.promptCaching.mode.rawValue
+        record.contextCompactionEnabled = config.contextCompaction.isEnabled
+        record.translationMode = config.isAnthropicPassthroughActive ? "anthropic_passthrough" : config.anthropicTranslatorMode.rawValue
+        record.promptCacheStrategy = PromptCacheRequestContext.current?.outcome?.strategy
+        record.promptCacheApplied = PromptCacheRequestContext.current?.outcome?.applied
         let attribution = RequestAttributionContext.current
         let currentSessionID = attribution?.sessionID ?? config.sessionID
         let shouldRecord = await MainActor.run { [weak self] in
@@ -2014,10 +2023,13 @@ final class LocalProxyServer: @unchecked Sendable {
             translationMode: config.isAnthropicPassthroughActive
                 ? "anthropic_passthrough"
                 : config.anthropicTranslatorMode.rawValue,
-            serverToolCalls: record.serverToolCalls
+            serverToolCalls: record.serverToolCalls,
+            promptCacheStrategy: record.promptCacheStrategy,
+            promptCacheApplied: record.promptCacheApplied
         )
         try? SessionReportStore.append(
             SessionReportEvent(
+                id: record.id,
                 source: attribution?.client ?? "gui",
                 sessionID: currentSessionID,
                 role: attribution?.role,
@@ -2046,7 +2058,12 @@ final class LocalProxyServer: @unchecked Sendable {
                 wasStreaming: record.wasStreaming,
                 requestedModel: record.requestedModel,
                 providerReportedCostUSD: record.providerReportedCostUSD,
-                serverToolCalls: record.serverToolCalls
+                serverToolCalls: record.serverToolCalls,
+                promptCachingMode: record.promptCachingMode,
+                contextCompactionEnabled: record.contextCompactionEnabled,
+                translationMode: record.translationMode,
+                promptCacheStrategy: record.promptCacheStrategy,
+                promptCacheApplied: record.promptCacheApplied
             )
         }
         return record
@@ -2325,16 +2342,22 @@ final class LocalProxyServer: @unchecked Sendable {
         let body = path.hasSuffix("/chat/completions")
             ? AnthropicTranslator.normalizeStrictChatRequest(originalBody, provider: config.upstreamProvider, baseURL: config.upstreamAPIBase.absoluteString)
             : originalBody
-        let headers = (request.allHTTPHeaderFields ?? [:]).map { ($0.key, $0.value) }
+        var headers = (request.allHTTPHeaderFields ?? [:]).map { ($0.key, $0.value) }
+        if config.upstreamProvider == .openRouter,
+           let sessionHeader = PromptCacheRequestContext.current?.incomingSessionHeader,
+           !headers.contains(where: { $0.0.lowercased() == "x-session-id" }) {
+            headers.append(("x-session-id", sessionHeader))
+        }
         let mutation = PromptCacheAdapter.mutate(
             path: path,
             headers: headers,
             body: body,
             provider: config.upstreamProvider,
             model: model,
-            sessionID: config.sessionID,
+            sessionID: PromptCacheRequestContext.sessionID(fallback: config.sessionID),
             configuration: config.promptCaching
         )
+        PromptCacheRequestContext.current?.record(mutation)
         request.httpBody = mutation.body
         for (name, value) in mutation.headers {
             request.setValue(value, forHTTPHeaderField: name)

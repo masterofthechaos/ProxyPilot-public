@@ -237,6 +237,9 @@ enum UpstreamClient {
             "x-api-key",
             "api-key",
             TutorRequestAdapter.headerName.lowercased(),
+            "x-proxypilot-client",
+            "x-proxypilot-session-id",
+            "x-proxypilot-role",
         ]
         for (name, value) in headers {
             if skipHeaders.contains(name.lowercased()) { continue }

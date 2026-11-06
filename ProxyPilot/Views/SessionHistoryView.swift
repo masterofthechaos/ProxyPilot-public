@@ -43,6 +43,11 @@ struct SessionHistoryView: View {
     @State private var selectedSessionLogLoadError: String?
     @State private var isLoadingSelectedSessionLogs = false
     @State private var fileExportStatus: String?
+    @State private var historyBackupStatus: String?
+    @State private var historyBackupBusy = false
+    @State private var historyImportURL: URL?
+    @State private var historyImportPreview: SessionHistoryImportPreview?
+    @State private var showingHistoryImportPreview = false
 
     private var selectedSession: SessionHistorySession? {
         if let selectedSessionID,
@@ -82,6 +87,17 @@ struct SessionHistoryView: View {
         .onDisappear {
             selectedSessionLogLoadTask?.cancel()
         }
+        .alert("History Backup Preview", isPresented: $showingHistoryImportPreview) {
+            if historyImportPreview?.canImport == true {
+                Button("Merge History") { mergeHistoryBackup() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if let preview = historyImportPreview {
+                Text("\(preview.newEvents) new records\n\(preview.duplicateEvents) duplicates\n\(preview.conflictingEvents) conflicts\n\(preview.invalidRecords) invalid records\n\n" +
+                    (preview.canImport ? "New records will be added to your current history. Existing records are preserved." : "This backup cannot be merged. No history has changed."))
+            }
+        }
     }
 
     private var header: some View {
@@ -106,6 +122,23 @@ struct SessionHistoryView: View {
             }
             .pickerStyle(.segmented)
             .frame(maxWidth: 360)
+
+            HStack(spacing: 12) {
+                Menu {
+                    Button("Export History Backup…", action: exportHistoryBackup)
+                    Button("Import History Backup…", action: previewHistoryBackup)
+                } label: {
+                    Label("History Backup", systemImage: "externaldrive")
+                }
+                .fixedSize()
+                .disabled(historyBackupBusy)
+                if historyBackupBusy { ProgressView().controlSize(.small) }
+                Text(historyBackupStatus ?? "All session metadata; excludes prompts, outputs, preferences and keys.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
         }
         .padding(24)
     }
@@ -135,6 +168,52 @@ struct SessionHistoryView: View {
             Task { await refreshHistory() }
         } label: {
             Label("Refresh", systemImage: "arrow.clockwise")
+        }
+    }
+
+    private func exportHistoryBackup() {
+        let panel = NSSavePanel()
+        panel.title = "Export History Backup"
+        panel.nameFieldStringValue = "ProxyPilot-History.pphistory"
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        historyBackupBusy = true
+        Task {
+            defer { historyBackupBusy = false }
+            do {
+                let count = try await vm.exportSessionHistory(to: destination)
+                historyBackupStatus = "Backed up \(count) metadata records to \(destination.lastPathComponent)."
+            } catch { historyBackupStatus = error.localizedDescription }
+        }
+    }
+
+    private func previewHistoryBackup() {
+        let panel = NSOpenPanel()
+        panel.title = "Import History Backup"
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let backup = panel.url else { return }
+        historyBackupBusy = true
+        Task {
+            defer { historyBackupBusy = false }
+            do {
+                historyImportPreview = try await vm.previewSessionHistoryImport(from: backup)
+                historyImportURL = backup
+                showingHistoryImportPreview = true
+            } catch { historyBackupStatus = error.localizedDescription }
+        }
+    }
+
+    private func mergeHistoryBackup() {
+        guard let backup = historyImportURL else { return }
+        historyBackupBusy = true
+        Task {
+            defer { historyBackupBusy = false }
+            do {
+                let result = try await vm.importSessionHistory(from: backup)
+                historyBackupStatus = "Imported \(result.newEvents) records; skipped \(result.duplicateEvents) duplicates."
+            } catch { historyBackupStatus = error.localizedDescription }
         }
     }
 
@@ -300,13 +379,13 @@ struct SessionHistoryView: View {
             ViewThatFits {
                 HStack(alignment: .top, spacing: 12) {
                     usageMetaBlock(title: "Range", value: usageTimeRange(usage))
-                    usageMetaBlock(title: "Cache", value: usage.cacheHitRate.map { "\(formatPercent($0)) hit rate" } ?? "No cache telemetry yet")
+                    usageCacheSummary(usage)
                     Spacer(minLength: 0)
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
                     usageMetaBlock(title: "Range", value: usageTimeRange(usage))
-                    usageMetaBlock(title: "Cache", value: usage.cacheHitRate.map { "\(formatPercent($0)) hit rate" } ?? "No cache telemetry yet")
+                    usageCacheSummary(usage)
                 }
             }
 
@@ -333,6 +412,19 @@ struct SessionHistoryView: View {
         }
         .padding(14)
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func usageCacheSummary(_ usage: AllTimeUsage) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            usageMetaBlock(title: "Cache", value: usage.cacheHitRate.map { "\(formatPercent($0)) hit rate" } ?? "Hit rate unavailable")
+            Text("Cache usage reported for \(usage.cacheObservedRequests) of \(usage.requestCount) requests")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Hit rate uses requests with both cached and uncached token counts.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private func usageHighlights(_ usage: AllTimeUsage) -> some View {
@@ -695,6 +787,14 @@ struct SessionHistoryView: View {
                         detailRow("Prompt", requestTokenValue(request, kind: .prompt))
                         detailRow("Completion", requestTokenValue(request, kind: .completion))
                         detailRow("Total", requestTokenValue(request, kind: .total))
+                        if let mode = request.promptCachingMode {
+                            detailRow("Caching preference", mode == "computeCacheHints" ? "Automatic" : mode)
+                        }
+                        detailRow("Cache strategy", request.promptCacheStrategy ?? "Not recorded")
+                        detailRow("Cache hints applied", request.promptCacheApplied.map { $0 ? "Yes" : "No" } ?? "Not recorded")
+                        if request.promptCacheHitTokens == nil && request.promptCacheMissTokens == nil && request.promptCacheWriteTokens == nil {
+                            detailRow("Cache usage", "Not reported by provider")
+                        }
                         if let hit = request.promptCacheHitTokens {
                             detailRow("Cached", "\(hit)")
                         }

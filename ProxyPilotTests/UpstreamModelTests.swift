@@ -130,9 +130,9 @@ final class UpstreamModelTests: XCTestCase {
         XCTAssertEqual(cost, 0.42, accuracy: 0.000001)
     }
 
-    func testEstimatedCostUSDBillsCacheWriteTokensOnTopOfTheCacheSplit() throws {
-        // Cache creation is charged in addition to the uncached input it accompanies,
-        // so the write term is additive rather than a substitute for the miss cost.
+    func testEstimatedCostUSDPricesCacheWritesOnceWithinTheMissSplit() throws {
+        // Normalized misses include creation tokens. The full cache-write rate
+        // replaces their ordinary input charge.
         let model = UpstreamModel(
             id: "m",
             contextLength: nil,
@@ -150,8 +150,8 @@ final class UpstreamModelTests: XCTestCase {
             promptCacheMissTokens: 600_000,
             promptCacheWriteTokens: 200_000
         ))
-        // hit 0.12 + miss 1.80 + write 0.75 + completion 15.00
-        XCTAssertEqual(cost, 17.67, accuracy: 0.000001)
+        // hit 0.12 + ordinary miss 1.20 + write 0.75 + completion 15.00
+        XCTAssertEqual(cost, 17.07, accuracy: 0.000001)
     }
 
     func testEstimatedCostUSDOmitsCacheWriteCostWhenWriteTokensAreMissing() throws {
@@ -175,6 +175,39 @@ final class UpstreamModelTests: XCTestCase {
         ))
         // hit 0.12 + miss 1.80 + completion 15.00, no write term
         XCTAssertEqual(cost, 16.92, accuracy: 0.000001)
+    }
+
+    func testEstimatedCostUSDMatchesOpenRouterColdAndWarmReceipts() throws {
+        let model = UpstreamModel(id: "fixture", contextLength: nil, promptPricePer1M: 1,
+            completionPricePer1M: 5, promptCacheHitPricePer1M: 0.05, promptCacheWritePricePer1M: 1.25)
+        let cold = try XCTUnwrap(model.estimatedCostUSD(promptTokens: 3867, completionTokens: 5,
+            promptCacheHitTokens: 0, promptCacheMissTokens: 3867, promptCacheWriteTokens: 3864))
+        XCTAssertEqual(cold, 0.004858, accuracy: 0.0000000001)
+        let warm = try XCTUnwrap(model.estimatedCostUSD(promptTokens: 3867, completionTokens: 5,
+            promptCacheHitTokens: 3864, promptCacheMissTokens: 3, promptCacheWriteTokens: 0))
+        XCTAssertEqual(warm, 0.0002212, accuracy: 0.0000000001)
+    }
+
+    func testEstimatedCostUSDUsesNormalizedNativeAnthropicMisses() throws {
+        let data = Data(#"{"usage":{"input_tokens":300,"cache_creation_input_tokens":75,"cache_read_input_tokens":200,"output_tokens":40}}"#.utf8)
+        let usage = try XCTUnwrap(AnthropicTranslator.anthropicPassthroughUsage(from: data))
+        XCTAssertEqual(usage.promptCacheMissTokens, 375)
+        let model = UpstreamModel(id: "fixture", contextLength: nil, promptPricePer1M: 3,
+            completionPricePer1M: 15, promptCacheHitPricePer1M: 0.3, promptCacheWritePricePer1M: 3.75)
+        let cost = try XCTUnwrap(model.estimatedCostUSD(promptTokens: try XCTUnwrap(usage.promptTokens),
+            completionTokens: try XCTUnwrap(usage.completionTokens), promptCacheHitTokens: usage.promptCacheHitTokens,
+            promptCacheMissTokens: usage.promptCacheMissTokens, promptCacheWriteTokens: usage.promptCacheWriteTokens))
+        XCTAssertEqual(cost, 0.00184125, accuracy: 0.0000000001)
+    }
+
+    func testEstimatedCostUSDDistinguishesMissingAndFreeWritePricing() throws {
+        for (writePrice, expected) in [(nil as Double?, 0.003892), (0.0, 0.000028), (1.25, 0.004858)] {
+            let model = UpstreamModel(id: "fixture", contextLength: nil, promptPricePer1M: 1,
+                completionPricePer1M: 5, promptCacheWritePricePer1M: writePrice)
+            let cost = try XCTUnwrap(model.estimatedCostUSD(promptTokens: 3867, completionTokens: 5,
+                promptCacheHitTokens: 0, promptCacheMissTokens: 3867, promptCacheWriteTokens: 3864))
+            XCTAssertEqual(cost, expected, accuracy: 0.0000000001)
+        }
     }
 
     func testExactoVariantCarriesCacheWritePricingForward() {
@@ -208,7 +241,7 @@ final class UpstreamModelTests: XCTestCase {
     }
 
     func testCapabilitiesVision() {
-        let model = UpstreamModel.idOnly("openai/gpt-4o")
+        let model = UpstreamModel(id: "opaque", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil, inputModalities: ["text", "image"])
         XCTAssertTrue(model.capabilities.contains(.vision))
     }
 
@@ -228,8 +261,8 @@ final class UpstreamModelTests: XCTestCase {
     }
 
     func testCapabilitiesMultiple() {
-        // "4o" triggers vision, model name doesn't trigger others
-        let model = UpstreamModel.idOnly("openai/gpt-4o")
+        // Vision comes from advertised input modalities.
+        let model = UpstreamModel(id: "opaque", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil, inputModalities: ["text", "image"])
         XCTAssertTrue(model.capabilities.contains(.vision))
         XCTAssertFalse(model.capabilities.contains(.coding))
     }

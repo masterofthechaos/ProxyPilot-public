@@ -3,8 +3,7 @@ import Foundation
 public enum PromptCacheAdapter {
     /// Applies provider-appropriate cache hints to an outbound request.
     /// Returns the (possibly mutated) body + any additional headers.
-    /// Phase A: observe-only mode always returns passThrough.
-    /// Phase B will add computeCacheHints mutations.
+    /// Off and observe-only preserve caller bytes and hints.
     public static func mutate(
         path: String,
         headers: [(String, String)],
@@ -15,7 +14,7 @@ public enum PromptCacheAdapter {
         configuration: PromptCachingConfiguration
     ) -> PromptCacheMutation {
         guard configuration.isEnabled, configuration.mode != .off else {
-            return .passThrough(body: body, headers: headers)
+            return PromptCacheMutation(body: body, headers: headers, applied: false, strategy: "off")
         }
 
         let capabilities = provider.promptCacheCapabilities
@@ -32,11 +31,16 @@ public enum PromptCacheAdapter {
 
         // Phase A: observe-only — never mutate
         guard configuration.mode != .observeOnly else {
-            return .passThrough(body: body, headers: headers)
+            return PromptCacheMutation(body: body, headers: headers, applied: false, strategy: "observe_only")
         }
 
         guard configuration.mode == .computeCacheHints else {
             return .passThrough(body: body, headers: headers)
+        }
+
+        if provider == .openRouter,
+           path.hasSuffix("/chat/completions") || path.hasSuffix("/messages") {
+            return mutateOpenRouter(body: body, headers: headers, model: model, sessionID: sessionID, path: path)
         }
 
         if path.hasSuffix("/chat/completions"),
@@ -80,6 +84,47 @@ public enum PromptCacheAdapter {
             route: path
         )
         return mutatePromptCacheKey(body: body, headers: headers, cacheKey: cacheKey)
+    }
+
+    private static func mutateOpenRouter(
+        body: Data, headers: [(String, String)], model: String?, sessionID: String, path: String
+    ) -> PromptCacheMutation {
+        guard var request = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            return PromptCacheMutation(body: body, headers: headers, applied: false, strategy: "invalid_json")
+        }
+        var strategies: [String] = []
+        // OpenRouter gives body session_id precedence over x-session-id. Keep
+        // either caller override, including invalid values for upstream validation.
+        if request["session_id"] == nil && !headers.contains(where: { $0.0.lowercased() == "x-session-id" }) {
+            request["session_id"] = "pp_" + PromptCacheSessionKey.make(
+                provider: UpstreamProvider.openRouter.rawValue,
+                model: request["model"] as? String ?? normalizedModel(model, body: body),
+                sessionID: sessionID,
+                route: path
+            )
+            strategies.append("openrouter_session_affinity")
+        }
+        let resolvedModel = (request["model"] as? String ?? normalizedModel(model, body: body)).lowercased()
+        if resolvedModel.hasPrefix("anthropic/"), !containsCacheControl(request) {
+            // Supported OpenRouter Anthropic automatic caching; default five
+            // minute lifetime. Never add breakpoints beside caller-owned policy.
+            request["cache_control"] = ["type": "ephemeral"]
+            strategies.append("anthropic_auto_cache_control")
+        }
+        guard !strategies.isEmpty else {
+            return PromptCacheMutation(body: body, headers: headers, applied: false, strategy: "existing_openrouter_cache_hints")
+        }
+        guard let mutated = try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]) else {
+            return .passThrough(body: body, headers: headers)
+        }
+        return PromptCacheMutation(body: mutated, headers: headers, applied: true, strategy: strategies.joined(separator: "+"))
+    }
+
+    private static func containsCacheControl(_ value: Any) -> Bool {
+        if let object = value as? [String: Any] {
+            return object["cache_control"] != nil || object.values.contains(where: containsCacheControl)
+        }
+        return (value as? [Any])?.contains(where: containsCacheControl) ?? false
     }
 
     private static func removeLeadingAnthropicBillingHeader(

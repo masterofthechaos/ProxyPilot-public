@@ -2,6 +2,57 @@ import XCTest
 @testable import ProxyPilotCore
 
 final class ModelDiscoveryTests: XCTestCase {
+    func testAdvertisedModalitiesRoundTripAndUnknownRemainDistinct() throws {
+        let data = Data(#"{"data":[{"id":"opaque","context_length":32000,"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},"top_provider":{"max_completion_tokens":2048}},{"id":"gemini-unknown"},{"id":"vision-text-only","architecture":{"input_modalities":["text"]}}]}"#.utf8)
+        let models = try ModelDiscovery.parseModelMetadata(from: data)
+        let opaque = try XCTUnwrap(models.first { $0.id == "opaque" })
+        XCTAssertTrue(opaque.capabilities.contains(.vision))
+        XCTAssertEqual(opaque.maximumOutputTokens, 2048)
+        XCTAssertEqual(opaque.exactoVariant.inputModalities, ["text", "image"])
+        XCTAssertEqual(try JSONDecoder().decode(UpstreamModel.self, from: JSONEncoder().encode(opaque)), opaque)
+        XCTAssertNil(models.first { $0.id == "gemini-unknown" }?.inputModalities)
+        XCTAssertFalse(models.first { $0.id == "vision-text-only" }!.capabilities.contains(.vision))
+    }
+
+    func testSharedCatalogSeparatesEndpointsAndPreservesFreshness() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let time = Date(timeIntervalSince1970: 100)
+        try ModelCatalogStore.save([.idOnly("one")], provider: "custom", endpoint: "https://one/v1/", now: time, root: root)
+        XCTAssertEqual(ModelCatalogStore.load(provider: "custom", endpoint: "https://one/v1", root: root)?.fetchedAt, time)
+        XCTAssertNil(ModelCatalogStore.load(provider: "custom", endpoint: "https://two/v1", root: root))
+    }
+
+    func testCacheCoverageKeepsUnknownAndPartialCountersOutOfRate() {
+        func record(_ hit: Int?, _ miss: Int?) -> RequestRecord {
+            RequestRecord(model: "fixture", promptTokens: 100, completionTokens: 0,
+                promptCacheHitTokens: hit, promptCacheMissTokens: miss,
+                durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: false)
+        }
+        let usage = AttributedSessionTelemetry.aggregate(records: [record(80,20), record(0,0), record(nil,nil), record(100,nil)])
+        XCTAssertEqual(usage.cacheObservedRequests, 3)
+        XCTAssertEqual(usage.promptCacheHitTokens, 180)
+        XCTAssertEqual(usage.cacheHitRate, 0.8)
+        XCTAssertTrue(AttributedSessionTelemetry.aggregate(records: [record(0,0)]).cacheAccountingAvailable)
+        XCTAssertNil(AttributedSessionTelemetry.aggregate(records: [record(100,nil)]).cacheHitRate)
+    }
+
+    func testCatalogResolutionPreservesExactoAndKnownFields() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let row = UpstreamModel(id: "opaque", contextLength: 32000, promptPricePer1M: nil, completionPricePer1M: nil, inputModalities: ["text", "image"])
+        try ModelCatalogStore.save([row], provider: "openrouter", endpoint: "fixture", root: root)
+        let snapshot = ModelCatalogStore.load(provider: "openrouter", endpoint: "fixture", root: root)
+        let variant = ModelCatalogStore.model(id: "opaque:exacto", provider: .openRouter, snapshot: snapshot)
+        XCTAssertEqual(variant?.id, "opaque:exacto")
+        XCTAssertEqual(variant?.inputModalities, ["text", "image"])
+        try ModelCatalogStore.save([.idOnly("deepseek-chat")], provider: "deepseek", endpoint: "fixture", root: root)
+        let deepseek = ModelCatalogStore.model(id: "deepseek-chat", provider: .deepSeek,
+            snapshot: ModelCatalogStore.load(provider: "deepseek", endpoint: "fixture", root: root))
+        XCTAssertEqual(deepseek?.contextLength, UpstreamProvider.deepSeek.knownModelMetadata(for: "deepseek-chat")?.contextLength)
+        XCTAssertNotNil(deepseek?.promptPricePer1M)
+    }
+
     func testParseModelsResponseExtractsIDs() throws {
         let json = """
         {

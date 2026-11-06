@@ -32,6 +32,32 @@ public enum ModelDiscovery {
         return models.compactMap { $0["id"] as? String }.sorted()
     }
 
+    /// Decode optional advertised capabilities without guessing from model names.
+    public static func parseModelMetadata(from data: Data) throws -> [UpstreamModel] {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = root["data"] as? [[String: Any]] else { throw Error.invalidJSON }
+        return rows.compactMap { row in
+            guard let id = row["id"] as? String else { return nil }
+            let architecture = row["architecture"] as? [String: Any]
+            let top = row["top_provider"] as? [String: Any]
+            let pricing = row["pricing"] as? [String: Any]
+            func price(_ key: String) -> Double? {
+                let value = (pricing?[key] as? String).flatMap(Double.init) ?? (pricing?[key] as? NSNumber)?.doubleValue
+                return value.flatMap { $0.isFinite && $0 >= 0 ? $0 * 1_000_000 : nil }
+            }
+            let read = price("input_cache_read")
+            return UpstreamModel(id: id, contextLength: row["context_length"] as? Int,
+                promptPricePer1M: price("prompt"), completionPricePer1M: price("completion"),
+                promptCacheHitPricePer1M: read, promptCacheMissPricePer1M: read == nil ? nil : price("prompt"),
+                promptCacheWritePricePer1M: price("input_cache_write"),
+                supportedParameters: Set(row["supported_parameters"] as? [String] ?? []),
+                displayName: row["name"] as? String,
+                inputModalities: architecture?["input_modalities"] as? [String],
+                outputModalities: architecture?["output_modalities"] as? [String],
+                maximumOutputTokens: top?["max_completion_tokens"] as? Int)
+        }.sorted { $0.id < $1.id }
+    }
+
     /// Fetch model IDs from an upstream provider.
     public static func fetchModels(baseURL: String, apiKey: String?) async throws -> [String] {
         try await fetchModels(provider: .openAI, baseURL: baseURL, apiKey: apiKey)
@@ -97,7 +123,9 @@ public enum ModelDiscovery {
         }
 
         do {
-            return try parseModelIDs(from: normalized.data).filter(provider.supportsChatModel)
+            let models = try parseModelMetadata(from: normalized.data).filter { provider.supportsChatModel($0.id) }
+            try? ModelCatalogStore.save(models, provider: provider.rawValue, endpoint: normalizedBaseURL)
+            return models.map(\.id)
         } catch Error.invalidJSON {
             if let fallback = provider.fallbackModelIDs {
                 return fallback

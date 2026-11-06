@@ -11,7 +11,7 @@ import FoundationNetworking
 /// Only applied to requests whose host is openrouter.ai, so other providers never
 /// receive them.
 public enum OpenRouterAppAttribution {
-    public static let referer = "https://micah.chat/proxypilot"
+    public static let referer = "https://slicewrite.com/proxypilot"
     public static let title = "ProxyPilot"
 
     public static let headers: [(name: String, value: String)] = [
