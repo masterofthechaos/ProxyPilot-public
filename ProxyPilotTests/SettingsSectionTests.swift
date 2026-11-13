@@ -61,11 +61,13 @@ final class SettingsSectionTests: XCTestCase {
     }
 
     func testSettingsSectionsExposeNativeSidebarMetadataInOrder() {
-        XCTAssertEqual(SettingsSection.allCases, [.home, .history, .harnesses, .proxy, .models, .routing, .keys, .advanced, .customization])
-        XCTAssertEqual(SettingsSection.sidebarSections, [.home, .models, .proxy, .history, .harnesses, .advanced])
+        XCTAssertEqual(SettingsSection.allCases, [.home, .history, .harnesses, .epiphyte, .proxy, .models, .routing, .keys, .advanced, .customization])
+        XCTAssertEqual(SettingsSection.sidebarSections, [.home, .models, .proxy, .history, .harnesses, .epiphyte, .advanced])
         XCTAssertEqual(SettingsSection.home.title, "Home")
         XCTAssertEqual(SettingsSection.history.title, "Sessions")
         XCTAssertEqual(SettingsSection.harnesses.title, "RepoGPS")
+        XCTAssertEqual(SettingsSection.epiphyte.title, "Epiphyte")
+        XCTAssertEqual(SettingsSection.epiphyte.systemImage, "leaf")
         XCTAssertEqual(SettingsSection.proxy.title, "Xcode")
         XCTAssertEqual(SettingsSection.routing.title, "Connections")
         XCTAssertEqual(SettingsSection.keys.title, "Keys & Providers")
@@ -82,8 +84,8 @@ final class SettingsSectionTests: XCTestCase {
     }
 
     func testSettingsSectionsExposeCompactTabTitlesForCollapsedSidebar() {
-        XCTAssertEqual(SettingsSection.collapsedTabSections, [.home, .models, .proxy, .history, .harnesses, .advanced])
-        XCTAssertEqual(SettingsSection.collapsedTabSections.map(\.compactTitle), ["Home", "Providers & Models", "Xcode", "History", "RepoGPS", "Settings"])
+        XCTAssertEqual(SettingsSection.collapsedTabSections, [.home, .models, .proxy, .history, .harnesses, .epiphyte, .advanced])
+        XCTAssertEqual(SettingsSection.collapsedTabSections.map(\.compactTitle), ["Home", "Providers & Models", "Xcode", "History", "RepoGPS", "Epiphyte", "Settings"])
         XCTAssertFalse(SettingsSection.collapsedTabSections.contains(.customization))
     }
 

@@ -175,7 +175,7 @@ enum MCPArgumentValidator {
         tool _: String
     ) -> MCPArgumentValidation<String> {
         guard let raw else {
-            return .success(provider.defaultAPIBaseURL)
+            return .success(provider.preferredAPIBaseURL)
         }
 
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)

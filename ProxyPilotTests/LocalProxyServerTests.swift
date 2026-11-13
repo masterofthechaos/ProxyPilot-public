@@ -1517,6 +1517,42 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertFalse(config.requiresAuthForProtectedRoutes)
     }
 
+    func testLocalProviderProbeReportsEffectiveAuthentication() async throws {
+        for provider in [UpstreamProvider.ollama, .lmStudio] {
+            for (explicitAuth, upstreamKey) in [(false, Optional<String>.none), (true, nil), (false, "upstream-fixture")] {
+                let port = try unusedLoopbackPort()
+                let server = makeIsolatedProxyServer()
+                defer { try? server.stop() }
+                let config = LocalProxyServer.Config(
+                    host: "127.0.0.1", port: port, masterKey: "local-fixture",
+                    upstreamProvider: provider,
+                    upstreamAPIBase: URL(string: provider.defaultAPIBaseURL)!,
+                    upstreamAPIKey: upstreamKey, allowedModels: ["fixture"], requiresAuth: explicitAuth,
+                    anthropicTranslatorMode: .hardened, miniMaxRoutingMode: .standard,
+                    preferredAnthropicUpstreamModel: "fixture", googleThoughtSignatureStore: nil
+                )
+                try server.start(config: config)
+                await waitForLocalProxyToRun(server)
+                let probe = await LocalProxyProbe.probe(on: port)
+                let requiresAuth = explicitAuth || upstreamKey != nil
+                XCTAssertTrue(probe.reachable)
+                XCTAssertEqual(probe.authenticationRequired, requiresAuth)
+                if requiresAuth {
+                    for path in ["v1/chat/completions", "v1/messages"] {
+                        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/\(path)")!)
+                        request.httpMethod = "POST"
+                        request.httpBody = Data("{}".utf8)
+                        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                        request.setValue("Bearer \(LocalProxyCredential.unauthenticatedClientToken)", forHTTPHeaderField: "Authorization")
+                        let (_, response) = try await URLSession.shared.data(for: request)
+                        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 401)
+                    }
+                }
+                try server.stop()
+            }
+        }
+    }
+
     func testCredentialBackedBuiltInProxyFailsClosedAndKeepsUpstreamKeySeparated() async throws {
         let upstream = LocalHTTPStubServer(body: """
         {"id":"chatcmpl-auth","model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}]}

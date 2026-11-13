@@ -93,9 +93,11 @@ struct ContentView: View {
                 selectedSection = target.section
                 if let category = target.category { settingsCategory = category }
             }
-            if selectedSection == .routing && !vm.repoGPSRoutingFeatureEnabled {
+            if ([SettingsSection.routing, .harnesses].contains(selectedSection) && !vm.repoGPSRoutingFeatureEnabled)
+                || (selectedSection == .epiphyte && !vm.epiphyteFeatureEnabled) {
                 selectedSection = .home
             }
+            consumeSettingsRequest()
             vm.refreshStatus()
             vm.runPreflightChecks()
             vm.startLogUpdates()
@@ -103,6 +105,7 @@ struct ContentView: View {
             vm.maybeShowAnalyticsPrompt()
             vm.maybeShowHarnessOnboarding()
         }
+        .onChange(of: vm.settingsRequested) { _, _ in consumeSettingsRequest() }
         .onChange(of: selectedSection) { _, section in
             let target = AppNavigationTarget.migrated(section)
             if target.section != section {
@@ -209,7 +212,8 @@ struct ContentView: View {
                             SettingsSidebarView(
                                 selection: $selectedSection,
                                 sections: SettingsSection.availableSidebarSections(
-                                    repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled
+                                    repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled,
+                                    epiphyteInstalled: vm.epiphyteFeatureEnabled
                                 ),
                                 versionText: appVersionText,
                                 buildText: appBuildText,
@@ -327,7 +331,8 @@ struct ContentView: View {
 
     var availableCollapsedTabSections: [SettingsSection] {
         SettingsSection.availableCollapsedTabSections(
-            repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled
+            repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled,
+            epiphyteInstalled: vm.epiphyteFeatureEnabled
         )
     }
 
@@ -411,7 +416,9 @@ struct ContentView: View {
                     preflightExpanded = true
                     vm.runPreflightChecks()
                 },
-                onOpenSessionHistory: { selectedSection = .history }
+                onOpenSessionHistory: { selectedSection = .history },
+                onOpenEpiphyte: { selectedSection = .epiphyte },
+                onOpenRepoGPS: { selectedSection = .harnesses }
             )
             .environmentObject(vm)
         case .history:
@@ -420,6 +427,8 @@ struct ContentView: View {
                 onOpenAdvancedLogging: { openSettings(.privacy) }
             )
                 .environmentObject(vm)
+        case .epiphyte:
+            EpiphyteSettingsView(onOpenModels: { selectedSection = .models }).environmentObject(vm)
         case .harnesses:
             CodingHarnessesView(onOpenHome: { selectedSection = .home }, onOpenModels: { selectedSection = .models })
                 .environmentObject(vm)
@@ -634,7 +643,7 @@ struct ContentView: View {
         }
     }
 
-    var modelsTab: some View { ProviderWorkspaceView() }
+    var modelsTab: some View { ProviderWorkspaceView(compact: usesCollapsedTopNavigation) }
 
     // MARK: - Proxy Tab
 
@@ -1479,6 +1488,8 @@ struct StatusToolbarLabel: View {
             return .green
         case .cli:
             return .blue
+        case .epiphyte, .independentClients:
+            return .green
         case .repoGPS:
             return .cyan
         case .issue:

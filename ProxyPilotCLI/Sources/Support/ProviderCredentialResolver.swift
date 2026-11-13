@@ -204,7 +204,7 @@ enum ProviderCredentialResolver {
             nil
         }
 
-        let effectiveBaseURL = upstreamURL ?? provider.defaultAPIBaseURL
+        let effectiveBaseURL = upstreamURL ?? provider.preferredAPIBaseURL
         if apiKey == nil && !provider.isLocal && !isLocalhostURL(effectiveBaseURL) {
             return .missingAPIKey(provider: provider, secretKeyName: secretKey)
         }

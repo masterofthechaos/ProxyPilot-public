@@ -305,8 +305,15 @@ enum UpstreamClient {
 
     // MARK: - Errors
 
-    enum UpstreamError: Error {
+    enum UpstreamError: LocalizedError {
         case invalidResponse
         case httpError(statusCode: Int, body: Data)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidResponse: return "The upstream returned an invalid HTTP response."
+            case .httpError(let status, _): return "Upstream HTTP \(status)"
+            }
+        }
     }
 }

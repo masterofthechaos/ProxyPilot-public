@@ -369,21 +369,20 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testAgentRouteScopeNoteWarnsAboutLaunchTimeHintOnlyInProxyPilotAgentMode() {
-        // The ProxyPilot Agent launcher bakes ANTHROPIC_MODEL at exec time, so a running
-        // agent session keeps its launch-time model even after the proxy moves on. The
-        // Claude path has no such session-scoped hint and must not claim one.
+        // OpenCode uses the active-route alias in the same Xcode conversation.
+        // The compatibility path retains its own explanation of route changes.
         let vm = AppViewModel(defaults: defaults)
 
         vm.selectedAgentMode = .claudeAgent
-        XCTAssertFalse(vm.xcodeAgentRouteScopeNote.contains("already running"))
+        XCTAssertFalse(vm.xcodeAgentRouteScopeNote.contains("same Xcode conversation"))
 
         vm.selectedAgentMode = .proxyPilotAgent
         if vm.showsAgentModeChoice {
-            XCTAssertTrue(vm.xcodeAgentRouteScopeNote.contains("already running"))
+            XCTAssertTrue(vm.xcodeAgentRouteScopeNote.contains("same Xcode conversation"))
         } else {
             // No qualifying Xcode on this host: the mode choice is hidden, so the note
             // correctly stays on the Claude wording regardless of the stored selection.
-            XCTAssertFalse(vm.xcodeAgentRouteScopeNote.contains("already running"))
+            XCTAssertFalse(vm.xcodeAgentRouteScopeNote.contains("same Xcode conversation"))
         }
     }
 
@@ -394,7 +393,7 @@ final class AppViewModelTests: XCTestCase {
         let runtime = AgentRuntimeManager(
             layout: ManagedAgentRuntimeLayout(
                 root: root.appendingPathComponent("runtime"),
-                claudeConfigDirectory: root.appendingPathComponent("claude-config")
+                configDirectory: root.appendingPathComponent("claude-config")
             )
         )
         let registration = ACPRegistrationManager(
@@ -433,6 +432,84 @@ final class AppViewModelTests: XCTestCase {
             vm.upstreamProvider = provider
             XCTAssertTrue(vm.promptCachingProviderStatusText.contains("removes volatile Claude billing metadata"))
         }
+    }
+
+    func testLocalModelChecksNeverReadCredentials() async throws {
+        for provider in [UpstreamProvider.ollama, .lmStudio] {
+            let server = NIOProxyServer()
+            let port = try await server.start(config: ProxyConfiguration(
+                port: 0, upstreamProvider: provider, allowedModels: ["local-fixture"], requiresAuth: false
+            ))
+            var credentialReads = 0
+            let vm = AppViewModel(defaults: defaults, localCredentialResolver: {
+                credentialReads += 1
+                throw CocoaError(.userCancelled)
+            })
+            vm.selectBuiltInUpstreamProvider(provider)
+            vm.useBuiltInProxy = true
+            vm.requireLocalAuth = false
+            vm.proxyURLString = "http://127.0.0.1:\(port)"
+            vm.isRunning = true
+            await vm.testModels()
+            XCTAssertTrue(vm.modelsJSON.contains("local-fixture"))
+            vm.isRunning = true
+            await vm.refreshXcodeVisibleModels()
+            XCTAssertTrue(vm.xcodeVisibleModelsSnapshot.modelIDs.contains("local-fixture"))
+            XCTAssertEqual(credentialReads, 0, provider.rawValue)
+            try await server.stop()
+        }
+    }
+
+    func testLocalXcodeConfigurationDoesNotReadDeniedCredential() throws {
+        for provider in [UpstreamProvider.ollama, .lmStudio] {
+            var credentialReads = 0
+            let vm = AppViewModel(defaults: defaults, localCredentialResolver: {
+                credentialReads += 1
+                throw CocoaError(.userCancelled)
+            })
+            vm.selectBuiltInUpstreamProvider(provider)
+            vm.useBuiltInProxy = true
+            vm.requireLocalAuth = false
+            let config = try vm.buildBuiltInProxyConfig()
+            XCTAssertFalse(config.requiresAuthForProtectedRoutes)
+            let data = try vm.xcodeAgentSettingsData()
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let env = try XCTUnwrap(root["env"] as? [String: String])
+            XCTAssertEqual(env["ANTHROPIC_AUTH_TOKEN"], "proxypilot-local-noauth")
+            XCTAssertTrue(vm.diyInstallCommands.contains("proxypilot-local-noauth"))
+            XCTAssertEqual(credentialReads, 0, provider.rawValue)
+        }
+    }
+
+    func testLocalXcodeConfigurationHonorsExplicitAuthentication() throws {
+        for provider in [UpstreamProvider.ollama, .lmStudio] {
+            var credentialReads = 0
+            let vm = AppViewModel(defaults: defaults, localCredentialResolver: {
+                credentialReads += 1
+                throw CocoaError(.userCancelled)
+            })
+            vm.selectBuiltInUpstreamProvider(provider)
+            vm.requireLocalAuth = true
+            XCTAssertThrowsError(try vm.xcodeAgentSettingsData())
+            XCTAssertThrowsError(try vm.buildBuiltInProxyConfig())
+            XCTAssertEqual(credentialReads, 2)
+        }
+    }
+
+    func testCredentialBackedXcodeConfigurationStillRequiresCredential() throws {
+        try KeychainService.set("upstream-fixture", forKey: .openRouterAPIKey)
+        defer { try? KeychainService.delete(key: .openRouterAPIKey) }
+        var credentialReads = 0
+        let vm = AppViewModel(defaults: defaults, localCredentialResolver: {
+            credentialReads += 1
+            throw CocoaError(.userCancelled)
+        })
+        vm.selectBuiltInUpstreamProvider(.openRouter)
+        vm.requireLocalAuth = false
+        XCTAssertThrowsError(try vm.xcodeAgentSettingsData())
+        XCTAssertThrowsError(try vm.buildBuiltInProxyConfig())
+        XCTAssertFalse(vm.diyInstallCommands.contains("proxypilot-local-noauth"))
+        XCTAssertEqual(credentialReads, 3)
     }
 
     func testBuiltInProxyConfigAutomaticallyProtectsStoredUpstreamKey() throws {
@@ -739,14 +816,14 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.shouldShowToolbarStatus)
     }
 
-    func testRepoGPSRoutingRemainsNavigableBeforeManagedInstallation() {
+    func testRepoGPSRoutingUsesExistingInstallationFlag() {
         let vm = AppViewModel(defaults: defaults)
 
-        XCTAssertTrue(vm.repoGPSRoutingFeatureEnabled)
-        XCTAssertTrue(
+        XCTAssertEqual(vm.repoGPSRoutingFeatureEnabled, RepoGPSRoutingFeatureFlag.current)
+        XCTAssertEqual(
             SettingsSection.availableSidebarSections(
                 repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled
-            ).contains(.harnesses)
+            ).contains(.harnesses), vm.repoGPSRoutingFeatureEnabled
         )
     }
 

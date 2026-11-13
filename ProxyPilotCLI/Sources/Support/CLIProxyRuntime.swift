@@ -28,6 +28,10 @@ struct DaemonSpawnConfiguration {
 }
 
 enum CLIProxyRuntime {
+    static func upstreamBaseURL(provider: UpstreamProvider, override: String?) -> String {
+        override ?? provider.preferredAPIBaseURL
+    }
+
     static let daemonLogFilePermissions: Int = 0o600
 
     enum InlineKeyError: LocalizedError {

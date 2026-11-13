@@ -138,7 +138,8 @@ struct CustomizationView: View {
                 set: { vm.defaultSettingsSection = $0 }
             )) {
                 ForEach(SettingsSection.availableSidebarSections(
-                    repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled
+                    repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled,
+                    epiphyteInstalled: vm.epiphyteFeatureEnabled
                 )) { section in
                     Text(section.title).tag(section)
                 }

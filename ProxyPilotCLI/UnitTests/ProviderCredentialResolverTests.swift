@@ -4,6 +4,20 @@ import Testing
 @testable import proxypilot
 
 struct ProviderCredentialResolverTests {
+    @Test func qwenTokenPlanEndpointsCanUseStoredQwenCredential() {
+        let secrets = MemorySecretsProvider(values: [SecretKey.qwenAPIKey: "sk-sp-fixture-not-a-real-key"])
+        for endpoint in UpstreamProvider.qwen.alternateAPIBaseURLs {
+            let resolution = ProviderCredentialResolver.resolve(rawProvider: "qwen", explicitKey: nil,
+                upstreamURL: endpoint, secrets: secrets, environment: [:])
+            guard case .resolved(let credential) = resolution else {
+                Issue.record("Official Qwen service rejected")
+                continue
+            }
+            #expect(credential.provider == .qwen)
+            #expect(credential.apiKey == "sk-sp-fixture-not-a-real-key")
+        }
+    }
+
     @Test func discoveryAndSetupDoNotInventAProvider() throws {
         #expect(try ModelsCommand.parse([]).provider == nil)
         #expect(try SetupXcodeCommand.parse([]).provider == nil)

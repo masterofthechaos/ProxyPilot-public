@@ -4,6 +4,17 @@ import Testing
 
 @Suite("UpstreamProvider")
 struct UpstreamProviderTests {
+    @Test func savedQwenServiceUsesOnlyExactOfficialEndpoints() {
+        let qwen = UpstreamProvider.qwen
+        for endpoint in qwen.alternateAPIBaseURLs {
+            #expect(qwen.apiBaseURL(savedPreference: " \(endpoint)/\n") == endpoint)
+        }
+        for endpoint in [nil, "https://token-plan.ap-southeast-1.maas.aliyuncs.com.evil.invalid/compatible-mode/v1", "http://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "https://user:secret@token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1?key=secret"] {
+            #expect(qwen.apiBaseURL(savedPreference: endpoint) == qwen.defaultAPIBaseURL)
+        }
+        #expect(UpstreamProvider.openAI.apiBaseURL(savedPreference: qwen.alternateAPIBaseURLs.first) == UpstreamProvider.openAI.defaultAPIBaseURL)
+    }
+
     @Test func issue26ProviderContracts() {
         #expect(UpstreamProvider.cerebras.defaultAPIBaseURL == "https://api.cerebras.ai/v1")
         #expect(UpstreamProvider.cerebras.secretKey == "CEREBRAS_API_KEY")

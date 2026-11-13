@@ -91,7 +91,7 @@ struct ModelsCommand: AsyncParsableCommand {
             nil
         }
 
-        let baseURL = url ?? upstream.defaultAPIBaseURL
+        let baseURL = url ?? upstream.preferredAPIBaseURL
 
         // Allow nil key for local providers
         if apiKey == nil && !upstream.isLocal && !isLocalhostURL(baseURL) {

@@ -167,7 +167,9 @@ struct SetupXcodeCommand: AsyncParsableCommand {
 
         let configStatus: XcodeConfigManager.Status
         do {
-            let localProxyCredential = try LocalProxyCredential.resolveOrCreate(
+            let probe = await LocalProxyProbe.probe(on: port)
+            let localProxyCredential = try LocalProxyCredential.resolveForClient(
+                authenticationRequired: probe.authenticationRequired,
                 using: SecretsProviderFactory.make()
             )
             configStatus = try XcodeConfigManager.install(

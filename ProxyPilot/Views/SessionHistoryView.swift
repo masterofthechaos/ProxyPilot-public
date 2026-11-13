@@ -664,7 +664,7 @@ struct SessionHistoryView: View {
                     .truncationMode(.middle)
 
                 HStack {
-                    Text(session.source.isEmpty ? "(unknown source)" : (session.source.caseInsensitiveCompare("repogps") == .orderedSame ? "RepoGPS" : session.source.uppercased()))
+                    Text(session.source.isEmpty ? "(unknown source)" : (session.source == "xcode-agent" ? "ProxyPilot Agent" : (session.source == "repogps" ? "RepoGPS" : session.source.uppercased())))
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(Color.accentColor)
                     Spacer()

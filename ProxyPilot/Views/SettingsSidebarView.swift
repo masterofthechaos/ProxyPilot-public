@@ -44,9 +44,17 @@ struct AppVersionFooter: View {
     /// sites (and previews) keep compiling unchanged.
     var showsNewFeaturesPill: Bool = false
     var onOpenNewFeatures: (() -> Void)?
+    @State private var showsBetaAccessRequest = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            Button("Request ProxyPilot Beta access") { showsBetaAccessRequest = true }
+                .buttonStyle(.link)
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+                .padding(.bottom, 6)
+                .accessibilityHint("Opens an e-mail invitation request form")
             HStack(spacing: 6) {
                 Text(AppVersionDisplay.text(version: versionText, build: buildText))
                     .font(.caption2)
@@ -88,6 +96,7 @@ struct AppVersionFooter: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .leading)))
             }
         }
+        .sheet(isPresented: $showsBetaAccessRequest) { BetaAccessRequestView() }
     }
 }
 

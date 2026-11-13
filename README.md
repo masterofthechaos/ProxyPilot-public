@@ -4,13 +4,13 @@ macOS utility that makes Xcode Intelligence and Agent Mode work with non-native 
 
 ## What It Does
 
-Xcode's built-in Intelligence features only support a handful of providers natively. ProxyPilot runs a local proxy on your Mac that translates requests, letting you use **any OpenAI-compatible provider** (or Anthropic's API) with Xcode Intelligence using the Claude Agent framework.
+Xcode's built-in Intelligence features only support a handful of providers natively. ProxyPilot runs a local proxy on your Mac that translates requests, letting you use **any OpenAI-compatible provider** (or Anthropic's API) with Xcode Intelligence. ProxyPilot Agent uses OpenCode for Xcode Agent conversations.
 
-## v1.18.0
+## v1.19.1
 
-Providers & Models brings provider keys, endpoints, live model browsing, comparison, and Favorite Models into one workspace. Home, Xcode, and the menu bar share the selected Xcode model; browsing does not change your running route. RepoGPS retains its independent selection. Six focused workspaces and categorized Settings keep related controls together.
+ProxyPilot Agent now uses OpenCode through your selected ProxyPilot route. Start a new Xcode Agent conversation after upgrading; previous Claude SDK conversations are not converted.
 
-This release also includes Cerebras and oMLX support, clearer setup and port-conflict messages, Violet and Coral appearance gradients, and a live Dock tile enabled by default for new preferences.
+Provider setup includes saved-key grouping, catalog response tests, Qwen Token Plan endpoints for Singapore and Beijing, and checks of the actual RepoGPS route. Xcode, RepoGPS, and Epiphyte keep independent model selections; Home lets you choose which connection to display. This release also fixes unnecessary Keychain access during credential-free Ollama and LM Studio setup and adds an email-only beta invitation request form.
 
 ## Prerequisites
 
@@ -79,9 +79,9 @@ The experimental GitHub Copilot integration was removed in v1.15.1. Independentl
 - **Watchdog auto-recovery** -- detects unexpected stops and retries startup with backoff
 - **Auto-start on login** -- register via SMAppService (toggle in Settings)
 - **SSE streaming** -- full `stream: true` support for `/v1/chat/completions`
-- **Multi-provider** -- 15 upstream providers including direct Google Gemini support
+- **Multi-provider** -- 19 upstream providers including direct Google Gemini support
 - **Anthropic API translation** -- `POST /v1/messages` translated to OpenAI format, supports both buffered and streaming responses
-- **Xcode Agent config** -- one-click install for Claude Agent in Xcode routing through ProxyPilot
+- **Xcode Agent config** -- one-click install for ProxyPilot Agent using OpenCode in Xcode, routing through ProxyPilot (macOS 27 and Xcode 27 or later)
 - **Safety limits** -- request/concurrency caps with explicit `413`/`429` responses
 
 ## Supported Providers
@@ -94,8 +94,11 @@ The experimental GitHub Copilot integration was removed in v1.15.1. Independentl
 | xAI (Grok) | Cloud | Yes |
 | Chutes | Cloud | Yes |
 | Groq | Cloud | Yes |
+| Cerebras | Cloud | Yes |
 | Google (Gemini) | Cloud | Yes |
 | DeepSeek | Cloud | Yes |
+| Moonshot | Cloud | Yes |
+| Meta | Cloud | Yes |
 | Mistral | Cloud | Yes |
 | MiniMax | Cloud | Yes |
 | MiniMax CN | Cloud | Yes |
@@ -103,6 +106,7 @@ The experimental GitHub Copilot integration was removed in v1.15.1. Independentl
 | 9Router | Local helper | No |
 | Ollama | Local | No |
 | LM Studio | Local | No |
+| oMLX | Local | No |
 
 ## Supported Routes
 

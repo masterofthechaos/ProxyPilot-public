@@ -12,11 +12,13 @@ public struct ProxyProbeResult: Equatable, Sendable {
     public let reachable: Bool
     public let modelCount: Int?
     public let errorMessage: String?
+    public let authenticationRequired: Bool?
 
-    public init(reachable: Bool, modelCount: Int?, errorMessage: String?) {
+    public init(reachable: Bool, modelCount: Int?, errorMessage: String?, authenticationRequired: Bool? = nil) {
         self.reachable = reachable
         self.modelCount = modelCount
         self.errorMessage = errorMessage
+        self.authenticationRequired = authenticationRequired
     }
 }
 
@@ -51,13 +53,19 @@ public enum LocalProxyProbe {
             }
 
             let modelCount: Int?
+            var authenticationRequired: Bool?
             if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let models = object["data"] as? [[String: Any]] {
                 modelCount = models.count
+                switch object[LocalProxyCredential.authenticationMetadataKey] as? String {
+                case "required": authenticationRequired = true
+                case "none": authenticationRequired = false
+                default: break
+                }
             } else {
                 modelCount = nil
             }
-            return ProxyProbeResult(reachable: true, modelCount: modelCount, errorMessage: nil)
+            return ProxyProbeResult(reachable: true, modelCount: modelCount, errorMessage: nil, authenticationRequired: authenticationRequired)
         } catch {
             return ProxyProbeResult(
                 reachable: false,
@@ -105,6 +113,7 @@ public struct ProxyDaemonBootstrapResult: Equatable, Sendable {
 
     public let outcome: Outcome
     public let modelCount: Int?
+    public let authenticationRequired: Bool?
 }
 
 public enum ProxyDaemonBootstrapError: LocalizedError, Equatable {
@@ -161,7 +170,8 @@ public enum ProxyDaemonBootstrapper {
         if initialProbe.reachable {
             return ProxyDaemonBootstrapResult(
                 outcome: .alreadyRunning,
-                modelCount: initialProbe.modelCount
+                modelCount: initialProbe.modelCount,
+                authenticationRequired: initialProbe.authenticationRequired
             )
         }
 
@@ -215,7 +225,7 @@ public enum ProxyDaemonBootstrapper {
         for _ in 0..<40 {
             lastProbe = await LocalProxyProbe.probe(on: settings.port, timeout: 0.3)
             if lastProbe.reachable {
-                return ProxyDaemonBootstrapResult(outcome: .started, modelCount: lastProbe.modelCount)
+                return ProxyDaemonBootstrapResult(outcome: .started, modelCount: lastProbe.modelCount, authenticationRequired: lastProbe.authenticationRequired)
             }
             try? await Task.sleep(for: .milliseconds(250))
         }
@@ -228,50 +238,29 @@ public enum ProxyDaemonBootstrapper {
 
 public struct ManagedAgentRuntimeLayout: Equatable, Sendable {
     public let root: URL
-    public let nodeExecutable: URL
-    public let adapterEntryPoint: URL
-    public let claudeConfigDirectory: URL
-
-    public init(root: URL, claudeConfigDirectory: URL) {
-        self.root = root
-        self.nodeExecutable = root.appendingPathComponent("bin/node")
-        self.adapterEntryPoint = root.appendingPathComponent(
-            "lib/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
-        )
-        self.claudeConfigDirectory = claudeConfigDirectory
-    }
-
-    public static func standard(
-        home: URL = FileManager.default.homeDirectoryForCurrentUser
-    ) -> ManagedAgentRuntimeLayout {
-        ManagedAgentRuntimeLayout(
-            root: home.appendingPathComponent(".proxypilot/runtime", isDirectory: true),
-            claudeConfigDirectory: home.appendingPathComponent(
-                ".proxypilot/claude-config", isDirectory: true
-            )
-        )
+    public let configDirectory: URL
+    public var engineExecutable: URL { root.appendingPathComponent("opencode") }
+    public init(root: URL, configDirectory: URL) { self.root = root; self.configDirectory = configDirectory }
+    public static func standard(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Self {
+        .init(root: home.appendingPathComponent(".proxypilot/runtime-opencode"),
+              configDirectory: home.appendingPathComponent(".proxypilot/xcode-agent"))
     }
 }
 
 public enum AgentAdapterLaunchError: LocalizedError, Equatable {
-    case nodeMissing(String)
-    case adapterMissing(String)
-    case claudeConfigUnavailable(String)
-
+    case engineMissing(String)
+    case configUnavailable(String)
     public var errorDescription: String? {
         switch self {
-        case .nodeMissing(let path):
-            return "Managed Node runtime is missing at \(path). Reinstall ProxyPilot Agent support."
-        case .adapterMissing(let path):
-            return "ProxyPilot Agent adapter is missing at \(path). Reinstall ProxyPilot Agent support."
-        case .claudeConfigUnavailable(let path):
-            return "Could not prepare the isolated Claude config directory at \(path)."
+        case .engineMissing(let path): "Managed OpenCode is missing at \(path). Install ProxyPilot Agent support."
+        case .configUnavailable(let path): "Could not prepare the Xcode agent configuration at \(path)."
         }
     }
 }
 
 public struct AgentAdapterLaunchPlan: Equatable, Sendable {
     public let executable: URL
+    /// Includes argv[0] for execve.
     public let arguments: [String]
     public let environment: [String: String]
 
@@ -283,44 +272,89 @@ public struct AgentAdapterLaunchPlan: Equatable, Sendable {
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default
     ) throws -> AgentAdapterLaunchPlan {
-        guard fileManager.isExecutableFile(atPath: layout.nodeExecutable.path) else {
-            throw AgentAdapterLaunchError.nodeMissing(layout.nodeExecutable.path)
+        guard fileManager.isExecutableFile(atPath: layout.engineExecutable.path) else {
+            throw AgentAdapterLaunchError.engineMissing(layout.engineExecutable.path)
         }
-        guard fileManager.fileExists(atPath: layout.adapterEntryPoint.path) else {
-            throw AgentAdapterLaunchError.adapterMissing(layout.adapterEntryPoint.path)
-        }
+        let profile = layout.configDirectory
+        let plugin = profile.appendingPathComponent("attribution.mjs")
+        let shell = profile.appendingPathComponent("agent-shell")
         do {
-            try fileManager.createDirectory(
-                at: layout.claudeConfigDirectory,
-                withIntermediateDirectories: true
-            )
-        } catch {
-            throw AgentAdapterLaunchError.claudeConfigUnavailable(layout.claudeConfigDirectory.path)
+            try fileManager.createDirectory(at: profile, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            // Stable native session -> UUID attribution, including across process restarts.
+            // Only headers change; the plugin never modifies prompts or tool schemas.
+            try attributionPlugin.write(to: plugin, atomically: true, encoding: .utf8)
+            try shellWrapper.write(to: shell, atomically: true, encoding: .utf8)
+            try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: shell.path)
+            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plugin.path)
+        } catch { throw AgentAdapterLaunchError.configUnavailable(profile.path) }
+        let metadata = settings.modelMetadata
+        let supported: Set<String> = ["text", "image", "audio", "video", "pdf"]
+        func modalities(_ values: [String]?) -> [String] {
+            let filtered = (values ?? ["text"]).filter { supported.contains($0) }
+            return filtered.isEmpty ? ["text"] : filtered
         }
-
-        var environment = [
-            "PATH": "\(layout.root.appendingPathComponent("bin").path):/usr/bin:/bin",
-            "HOME": home.path,
-            "ANTHROPIC_BASE_URL": "http://127.0.0.1:\(settings.port)",
-            "ANTHROPIC_AUTH_TOKEN": localProxyCredential,
-            "CLAUDE_CONFIG_DIR": layout.claudeConfigDirectory.path,
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        let context = max(1, metadata?.contextLength ?? 200_000)
+        let output = min(8_000, max(1, metadata?.maximumOutputTokens ?? 8_000))
+        let model: [String: Any] = ["name": "ProxyPilot Active Route", "limit": ["context": context, "output": output],
+            "modalities": ["input": modalities(metadata?.inputModalities), "output": modalities(metadata?.outputModalities)]]
+        let config: [String: Any] = [
+            "$schema": "https://opencode.ai/config.json",
+            "model": "proxypilot/\(ActiveModelAlias.id)", "small_model": "proxypilot/\(ActiveModelAlias.id)",
+            "autoupdate": false, "share": "disabled", "enabled_providers": ["proxypilot"],
+            "plugin": [plugin.absoluteString], "shell": shell.path,
+            "agent": ["title": ["disable": true]],
+            "provider": ["proxypilot": ["npm": "@ai-sdk/openai-compatible", "name": "ProxyPilot",
+                "options": ["baseURL": "http://127.0.0.1:\(settings.port)/v1", "apiKey": localProxyCredential],
+                "models": [ActiveModelAlias.id: model]]],
+            "permission": ["read": "allow", "edit": "ask", "bash": "ask", "external_directory": "ask"],
         ]
-        for key in ["TMPDIR", "LANG", "LC_ALL"] {
-            if let value = inheritedEnvironment[key], !value.isEmpty {
-                environment[key] = value
-            }
+        let content = String(decoding: try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys]), as: UTF8.self)
+        var environment = [
+            "PATH": "\(layout.root.path):/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home.path,
+            "XDG_CONFIG_HOME": profile.appendingPathComponent("config").path,
+            "XDG_DATA_HOME": profile.appendingPathComponent("data").path,
+            "XDG_CACHE_HOME": profile.appendingPathComponent("cache").path,
+            "XDG_STATE_HOME": profile.appendingPathComponent("state").path,
+            "OPENCODE_CONFIG_DIR": profile.appendingPathComponent("config/opencode").path,
+            "OPENCODE_CONFIG_CONTENT": content,
+            "OPENCODE_DISABLE_AUTOUPDATE": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1",
+            "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",
+            // Preserve the user's shell configuration locations inside approved commands.
+            "PROXYPILOT_AGENT_PROFILE": profile.path,
+        ]
+        for key in ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
+            environment["PP_AGENT_ORIGINAL_" + key] = inheritedEnvironment[key] ?? ""
         }
-        if let modelID = settings.modelID?.nonEmptyTrimmed {
-            environment["ANTHROPIC_MODEL"] = modelID
+        for key in ["TMPDIR", "LANG", "LC_ALL", "DEVELOPER_DIR"] {
+            if let value = inheritedEnvironment[key], !value.isEmpty { environment[key] = value }
         }
-
-        return AgentAdapterLaunchPlan(
-            executable: layout.nodeExecutable,
-            arguments: [layout.nodeExecutable.path, layout.adapterEntryPoint.path],
-            environment: environment
-        )
+        return .init(executable: layout.engineExecutable,
+            arguments: [layout.engineExecutable.path, "acp", "--hostname", "127.0.0.1"], environment: environment)
     }
+
+    private static let shellWrapper = #"""
+    #!/bin/zsh
+    restore_xdg() {
+      if [[ -n "$2" ]]; then export "$1=$2"; else unset "$1"; fi
+    }
+    restore_xdg XDG_CONFIG_HOME "$PP_AGENT_ORIGINAL_XDG_CONFIG_HOME"
+    restore_xdg XDG_DATA_HOME "$PP_AGENT_ORIGINAL_XDG_DATA_HOME"
+    restore_xdg XDG_CACHE_HOME "$PP_AGENT_ORIGINAL_XDG_CACHE_HOME"
+    restore_xdg XDG_STATE_HOME "$PP_AGENT_ORIGINAL_XDG_STATE_HOME"
+    exec /bin/zsh "$@"
+    """#
+
+    public static let attributionPlugin = #"""
+    import { createHash } from 'node:crypto';
+    export default async () => ({
+      'chat.headers': async (input, output) => {
+        const hex = createHash('sha256').update('proxypilot-xcode:' + input.sessionID).digest('hex');
+        const id = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
+        output.headers['X-ProxyPilot-Client'] = 'xcode-agent';
+        output.headers['X-ProxyPilot-Session-ID'] = id;
+      },
+    });
+    """#
 }
 
 public struct AgentLaunchTelemetryEvent: Codable, Equatable, Sendable {

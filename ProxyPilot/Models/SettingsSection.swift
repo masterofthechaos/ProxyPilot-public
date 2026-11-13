@@ -1,9 +1,11 @@
 import Foundation
+import AppKit
 
 enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     case home
     case history
     case harnesses
+    case epiphyte
     case proxy
     case models
     case routing
@@ -13,16 +15,22 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 
     var id: Self { self }
 
-    static let sidebarSections: [SettingsSection] = [.home, .models, .proxy, .history, .harnesses, .advanced]
+    static let sidebarSections: [SettingsSection] = [.home, .models, .proxy, .history, .harnesses, .epiphyte, .advanced]
 
-    static let collapsedTabSections: [SettingsSection] = [.home, .models, .proxy, .history, .harnesses, .advanced]
+    static let collapsedTabSections: [SettingsSection] = [.home, .models, .proxy, .history, .harnesses, .epiphyte, .advanced]
 
-    static func availableSidebarSections(repoGPSRoutingEnabled: Bool) -> [SettingsSection] {
-        sidebarSections.filter { repoGPSRoutingEnabled || $0 != .routing }
+    static func availableSidebarSections(repoGPSRoutingEnabled: Bool, epiphyteInstalled: Bool = false) -> [SettingsSection] {
+        sidebarSections.filter {
+            (repoGPSRoutingEnabled || ($0 != .routing && $0 != .harnesses))
+                && (epiphyteInstalled || $0 != .epiphyte)
+        }
     }
 
-    static func availableCollapsedTabSections(repoGPSRoutingEnabled: Bool) -> [SettingsSection] {
-        collapsedTabSections.filter { repoGPSRoutingEnabled || $0 != .routing }
+    static func availableCollapsedTabSections(repoGPSRoutingEnabled: Bool, epiphyteInstalled: Bool = false) -> [SettingsSection] {
+        collapsedTabSections.filter {
+            (repoGPSRoutingEnabled || ($0 != .routing && $0 != .harnesses))
+                && (epiphyteInstalled || $0 != .epiphyte)
+        }
     }
 
     var title: String {
@@ -31,6 +39,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
             return "Home"
         case .history:
             return "Sessions"
+        case .epiphyte:
+            return "Epiphyte"
         case .harnesses:
             return "RepoGPS"
         case .proxy:
@@ -54,6 +64,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
             return "Home"
         case .history:
             return "History"
+        case .epiphyte:
+            return "Epiphyte"
         case .harnesses:
             return "RepoGPS"
         case .proxy:
@@ -77,6 +89,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
             return "Session overview"
         case .history:
             return "Past sessions"
+        case .epiphyte:
+            return "Page agent model and activity"
         case .harnesses:
             return "Optional Terminal coding agent"
         case .proxy:
@@ -100,6 +114,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
             return "house"
         case .history:
             return "clock.arrow.circlepath"
+        case .epiphyte:
+            return "leaf"
         case .harnesses:
             return "terminal"
         case .proxy:
@@ -136,6 +152,24 @@ enum RepoGPSRoutingFeatureFlag {
         isExecutable: (String) -> Bool = FileManager.default.isExecutableFile(atPath:)
     ) -> Bool {
         isExecutable(candidateExecutable(home: home).path)
+    }
+}
+
+/// A registered app with a runnable executable counts, including a developer's
+/// app outside /Applications. Stale Launch Services records do not enable it.
+enum EpiphyteFeatureFlag {
+    static let bundleIdentifier = "chat.micah.epiphyte"
+
+    @MainActor static var current: Bool {
+        isEnabled(applicationURL: NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier))
+    }
+
+    static func isEnabled(
+        applicationURL: URL?,
+        isExecutable: (String) -> Bool = FileManager.default.isExecutableFile(atPath:)
+    ) -> Bool {
+        guard let applicationURL, applicationURL.pathExtension.lowercased() == "app" else { return false }
+        return isExecutable(applicationURL.appendingPathComponent("Contents/MacOS/Epiphyte").path)
     }
 }
 

@@ -40,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(Self.tooltipDelayMilliseconds, forKey: "NSInitialToolTipDelay")
 
         // Install from the persisted preference immediately, since `viewModel` isn't
-        // assigned until the settings WindowGroup's onAppear runs (which may be later,
+        // assigned until the dashboard window's onAppear runs (which may be later,
         // or never if the window doesn't auto-open). The $dockTileInteractiveEnabled
         // subscription above takes over for live toggling once viewModel is set.
         if UserDefaults.standard.bool(forKey: AppViewModel.dockTileInteractiveEnabledDefaultsKey) {
@@ -85,6 +85,7 @@ struct ProxyPilotApp: App {
     var body: some Scene {
         WindowGroup(id: "settings") {
             ContentView()
+                .background(DashboardWindowIdentity())
                 .environmentObject(viewModel)
                 .environmentObject(softwareUpdateService)
                 .preferredColorScheme(viewModel.appearancePreference.colorScheme)
@@ -96,6 +97,7 @@ struct ProxyPilotApp: App {
         }
         .windowStyle(.automatic)
         .commands {
+            ProxyPilotSettingsCommands(viewModel: viewModel)
             CommandGroup(replacing: .help) {
                 Button("ProxyPilot README") {
                     viewModel.openReadme()
@@ -127,4 +129,49 @@ struct ProxyPilotApp: App {
         }
         .menuBarExtraStyle(.menu)
     }
+}
+
+/// Use the existing dashboard and its Settings destination, including after its window closes.
+private struct ProxyPilotSettingsCommands: Commands {
+    @ObservedObject var viewModel: AppViewModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") {
+                DashboardNavigation.openSettings(viewModel: viewModel, openWindow: openWindow)
+            }
+            .keyboardShortcut(",", modifiers: .command)
+        }
+    }
+}
+
+@MainActor
+enum DashboardNavigation {
+    static let dashboardWindows = NSHashTable<NSWindow>.weakObjects()
+
+    static func openSettings(viewModel: AppViewModel, openWindow: OpenWindowAction) {
+        viewModel.settingsRequested = true
+        let candidates = dashboardWindows.allObjects.filter { $0.isVisible || $0.isMiniaturized }
+        if let window = candidates.first(where: { $0.isKeyWindow }) ?? candidates.first {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            openWindow(id: "settings")
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+/// Keep weak dashboard references without changing WindowGroup's close/background
+/// lifecycle. SwiftUI can overwrite NSWindow.identifier after this view attaches.
+private struct DashboardWindowIdentity: NSViewRepresentable {
+    final class MarkerView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { DashboardNavigation.dashboardWindows.add(window) }
+        }
+    }
+    func makeNSView(context: Context) -> MarkerView { MarkerView() }
+    func updateNSView(_ nsView: MarkerView, context: Context) {}
 }

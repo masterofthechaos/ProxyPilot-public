@@ -8,6 +8,21 @@ import Foundation
 /// available to every process that can reach loopback.
 public enum LocalProxyCredential {
     public static let generatedPrefix = "pp_local_"
+    /// Placeholder required by agent SDKs when the listener explicitly allows anonymous inference.
+    /// This is not a capability and must never authorize a protected route.
+    public static let unauthenticatedClientToken = "proxypilot-local-noauth"
+    public static let authenticationMetadataKey = "proxypilot_authentication"
+
+    /// Unknown/older listeners remain conservative: only an explicit anonymous
+    /// policy skips secret storage. The listener still enforces auth on inference.
+    public static func resolveForClient(
+        authenticationRequired: Bool?,
+        using secrets: any SecretsProvider
+    ) throws -> String {
+        guard authenticationRequired != false else { return unauthenticatedClientToken }
+        return try resolveOrCreate(using: secrets)
+    }
+
     public static let randomByteCount = 32
 
     public static func requiresAuthentication(

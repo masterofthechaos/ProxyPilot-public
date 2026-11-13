@@ -63,7 +63,7 @@ struct ServeCommand: AsyncParsableCommand {
         let config = ProxyConfiguration(
             port: port,
             upstreamProvider: upstreamProvider,
-            upstreamAPIBaseURL: upstreamUrl,
+            upstreamAPIBaseURL: CLIProxyRuntime.upstreamBaseURL(provider: upstreamProvider, override: upstreamUrl),
             upstreamAPIKey: resolvedCredential.apiKey,
             masterKey: localProxyCredential,
             requiresAuth: localProxyCredential != nil,

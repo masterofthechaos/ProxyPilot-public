@@ -14,6 +14,8 @@ struct HomeDashboardView: View {
     let onOpenManualAgentRegistration: () -> Void
     let onOpenPreflight: () -> Void
     let onOpenSessionHistory: () -> Void
+    var onOpenEpiphyte: () -> Void = {}
+    var onOpenRepoGPS: () -> Void = {}
 
     @State private var sessionCSVExportStatus: String = ""
     @State private var expandedSessionRequestIDs: Set<UUID> = []
@@ -36,13 +38,20 @@ struct HomeDashboardView: View {
                         DashboardCard {
                             VStack(alignment: .leading, spacing: 12) {
                                 HStack {
-                                    Text("Xcode").font(.headline)
+                                    Picker("Home connection", selection: $vm.homeConnectionTarget) {
+                                        ForEach(vm.availableHomeConnectionTargets) { Text($0.title).tag($0) }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .labelsHidden()
+                                    .font(.headline)
+                                    .fixedSize()
+                                    .accessibilityLabel("Home connection")
+                                    .help("Choose which connection this module controls. Switching does not apply model changes or restart a proxy.")
                                     Spacer()
-                                    Text(vm.proxyPilotAgentSetupLabel).font(.caption).foregroundStyle(.secondary)
-                                    Button("Setup", action: onOpenProxy)
+                                    connectionModuleNavigation
                                 }
-                                XcodeRouteControls()
-                                Button("Browse Providers & Models", action: onOpenKeys)
+                                connectionModuleControls
+                                    .id(vm.homeConnectionTarget)
                             }
                         }
                     }
@@ -61,6 +70,32 @@ struct HomeDashboardView: View {
             }
         } message: {
             Text("This clears the current dashboard metrics and temporarily excludes already imported CLI session records until ProxyPilot relaunches. Source logs and Session History are not deleted.")
+        }
+    }
+
+    @ViewBuilder
+    private var connectionModuleNavigation: some View {
+        switch vm.homeConnectionTarget {
+        case .xcode:
+            Text(vm.proxyPilotAgentSetupLabel).font(.caption).foregroundStyle(.secondary)
+            Button("Setup", action: onOpenProxy)
+        case .repoGPS:
+            Button("Open RepoGPS", action: onOpenRepoGPS)
+        case .epiphyte:
+            Button("Open Epiphyte", action: onOpenEpiphyte)
+        }
+    }
+
+    @ViewBuilder
+    private var connectionModuleControls: some View {
+        switch vm.homeConnectionTarget {
+        case .xcode:
+            XcodeRouteControls()
+            Button("Browse Providers & Models", action: onOpenKeys)
+        case .repoGPS:
+            RoutingView(embedded: true, onOpenModels: onOpenKeys)
+        case .epiphyte:
+            EpiphyteSettingsView(embedded: true, onOpenModels: onOpenKeys)
         }
     }
 
@@ -185,12 +220,12 @@ struct HomeDashboardView: View {
                     HStack(alignment: .top, spacing: 12) {
                         heroTitle
                         Spacer()
-                        currentSessionStatusBadge
+                        HStack(spacing: 6) { currentSessionStatusBadge; epiphyteStatusBadge }
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
                         heroTitle
-                        currentSessionStatusBadge
+                        HStack(spacing: 6) { currentSessionStatusBadge; epiphyteStatusBadge }
                     }
                 }
 
@@ -271,7 +306,7 @@ struct HomeDashboardView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Proxy Activity")
                 .font(.title2.weight(.semibold))
-            Text(vm.isRunning ? "Usage across clients using this proxy. Session History shows individual sessions." : "Start ProxyPilot when you begin coding.")
+            Text("Usage across clients. Xcode proxy and independent Epiphyte activity are shown separately; Session History shows individual sessions.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -279,7 +314,7 @@ struct HomeDashboardView: View {
 
     private var currentSessionStatusBadge: some View {
         statusBadge(
-            title: vm.isRunning ? "Running" : "Stopped",
+            title: vm.isRunning ? "Xcode proxy running" : "Xcode proxy stopped",
             systemImage: vm.isRunning ? "checkmark.circle.fill" : "circle.fill",
             color: vm.isRunning ? .green : .secondary
         )
@@ -987,6 +1022,16 @@ struct HomeDashboardView: View {
 
     private func statusBadge(title: String, systemImage: String, color: Color) -> some View {
         statusBadgeLabel(title: title, systemImage: systemImage, color: color)
+    }
+
+    @ViewBuilder private var epiphyteStatusBadge: some View {
+        if vm.epiphyteFeatureEnabled { Button(action: onOpenEpiphyte) {
+            statusBadgeLabel(title: vm.epiphyteControl.badgeTitle,
+                systemImage: vm.epiphyteControl.activeRequests.isEmpty ? "leaf" : "leaf.fill",
+                color: vm.epiphyteControl.activeRequests.isEmpty ? .secondary : .green)
+        }.buttonStyle(.plain)
+         .help("Epiphyte uses temporary independent requests. Open its model and activity settings.")
+        }
     }
 
     private var preflightStatusBadge: some View {

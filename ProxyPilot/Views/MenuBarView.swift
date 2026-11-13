@@ -81,9 +81,8 @@ struct MenuBarView: View {
                 Divider()
             }
 
-            Button("Open Settings...") {
-                openWindow(id: "settings")
-                NSApp.activate(ignoringOtherApps: true)
+            Button("Settings…") {
+                DashboardNavigation.openSettings(viewModel: vm, openWindow: openWindow)
             }
             .keyboardShortcut(",", modifiers: .command)
             .accessibilityLabel("Open ProxyPilot settings")

@@ -8,7 +8,7 @@ import Foundation
 import ProxyPilotCore
 
 struct RouteCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "route", abstract: "Manage the shared CLI-owned route.", subcommands: [RouteStatusCommand.self, RouteSetCommand.self, RouteEnsureCommand.self])
+    static let configuration = CommandConfiguration(commandName: "route", abstract: "Manage the shared CLI-owned route.", subcommands: [RouteStatusCommand.self, RouteSetCommand.self, RouteEnsureCommand.self, RouteTestCommand.self])
 }
 
 // `RouteSelection` and the route.json/route.lock accessors live in
@@ -34,8 +34,9 @@ private enum RouteReadiness {
 struct RouteStatusCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "status")
     @Flag(name: .long) var json = false
+    @Option(name: .long, help: "Route owner: repogps or epiphyte.") var client = "repogps"
     func run() async throws {
-        try await RouteStatusReporter.run(json: json)
+        try await RouteStatusReporter.run(json: json, client: client)
     }
 }
 
@@ -43,13 +44,18 @@ struct RouteStatusCommand: AsyncParsableCommand {
 /// Property-wrapper-backed commands are valid only after ArgumentParser parses
 /// them; direct initialization traps as soon as a wrapped property is read.
 enum RouteStatusReporter {
-    static func run(json: Bool) async throws {
-        let selected = RouteState.load(); let selectedPort = selected?.port ?? 4000; let probe = await CLIProxyRuntime.probeProxy(on: selectedPort); let pid = PidFile.read()
-        let applied = if let selected { await RouteReadiness.selected(port: selected.port, model: selected.model) } else { false }
-        let verificationState = applied ? "models_ready" : (probe.reachable ? "mismatched" : "stopped")
+    static func run(json: Bool, client: String = "repogps") async throws {
+        guard client == "repogps" || client == "epiphyte" else { throw ValidationError("Unknown route client: \(client)") }
+        let independent = client == "epiphyte"
+        let stored = RouteState.load()
+        let epiRoute = independent ? try EpiphyteRouteStore().loadOrSeed(stored.map { EpiphyteRoute(provider: $0.provider, model: $0.model) }) : nil
+        let selected = independent ? epiRoute.map { RouteSelection(provider: $0.provider, model: $0.model, port: 0, updatedAt: $0.updatedAt) } : stored; let selectedPort = selected?.port ?? 4000; let reachable = independent ? false : (await CLIProxyRuntime.probeProxy(on: selectedPort)).reachable; let pid = independent ? nil : PidFile.read()
+        let applied = if let selected, !independent { await RouteReadiness.selected(port: selected.port, model: selected.model) } else { false }
+        let active = independent ? EpiphyteRequestLease.active() : []
+        let verificationState = independent ? (active.isEmpty ? (selected == nil ? "unconfigured" : "ready") : "in_flight") : (applied ? "models_ready" : (reachable ? "mismatched" : "stopped"))
         let catalog = selected.flatMap { selection -> ModelCatalogStore.Snapshot? in
             guard let provider = UpstreamProvider(rawValue: selection.provider) else { return nil }
-            let snapshot = ModelCatalogStore.load(provider: provider.rawValue, endpoint: provider.defaultAPIBaseURL)
+            let snapshot = ModelCatalogStore.load(provider: provider.rawValue, endpoint: provider.preferredAPIBaseURL)
             let baseID = selection.model.hasSuffix(":exacto") ? String(selection.model.dropLast(7)) : selection.model
             return snapshot?.models.contains { $0.id == selection.model || $0.id == baseID } == true ? snapshot : nil
         }
@@ -65,26 +71,37 @@ enum RouteStatusReporter {
         let cacheWritePriceValue: Any = (metadata?.promptCacheWritePricePer1M as Any?) ?? NSNull()
         let currencyValue: Any = metadata == nil ? (NSNull() as Any) : ("USD" as Any)
         guard json else {
+            if independent {
+                if let selected { print("Epiphyte model: \(selected.provider) / \(selected.model)") }
+                else { print("Epiphyte model: none selected") }
+                print("Activity: \(active.isEmpty ? "idle" : "\(active.count) independent request(s) in flight")")
+                print("Transport: temporary independent requests; shared proxy unchanged")
+                return
+            }
             if let selected {
                 print("Route:   \(selected.provider) / \(selected.model) (port \(selected.port))")
             } else {
                 print("Route:   none selected (port \(selectedPort))")
             }
             print("Applied: \(applied ? "yes" : "no")")
-            print("Proxy:   \(probe.reachable ? "reachable" : "not reachable"), owner \(pid == nil ? "none" : "cli")")
+            print("Proxy:   \(reachable ? "reachable" : "not reachable"), owner \(pid == nil ? "none" : "cli")")
             print("State:   \(verificationState)")
             return
         }
         let payload: [String: Any] = [
+            "client": client,
+            "transport": independent ? "independent" : "shared_proxy",
+            "active_requests": try JSONSerialization.jsonObject(with: JSONEncoder().encode(active)),
             "selected": selected != nil,
             "applied": applied,
-            "reachable": probe.reachable,
+            "reachable": reachable,
             "owner": pid == nil ? "none" : "cli",
             "provider": selected?.provider ?? NSNull(),
             "model": selected?.model ?? NSNull(),
             "selected_model": selected?.model ?? NSNull(),
+            "configured_upstream_url": selected.flatMap { UpstreamProvider(rawValue: $0.provider)?.preferredAPIBaseURL } as Any? ?? NSNull(),
             "applied_model": applied ? (selected?.model ?? NSNull()) : NSNull(),
-            "port": Int(selectedPort),
+            "port": independent ? NSNull() : Int(selectedPort) as Any,
             "verification_state": verificationState,
             "limits": ["context": contextValue, "output": (metadata?.maximumOutputTokens as Any?) ?? NSNull()],
             "modalities": ["input": (metadata?.inputModalities as Any?) ?? NSNull(),
@@ -112,7 +129,14 @@ struct RouteSetCommand: AsyncParsableCommand {
     @Option(name: .long) var model: String
     @Option(name: .long) var port: UInt16 = 4000
     @Flag(name: .long) var json = false
+    @Option(name: .long, help: "Route owner: repogps or epiphyte.") var client = "repogps"
     func run() async throws {
+        guard client == "repogps" || client == "epiphyte" else { throw ValidationError("Unknown route client: \(client)") }
+        if client == "epiphyte" {
+            try EpiphyteRouteStore().save(.init(provider: provider, model: model))
+            try await RouteStatusReporter.run(json: json, client: client)
+            return
+        }
         do {
             try await RouteState.withExclusiveLock {
                 let previous = RouteState.load()

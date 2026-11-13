@@ -29,10 +29,7 @@ extension UpstreamProvider {
 
     func apiKeyPageURL(apiBaseURL: URL?) -> URL? {
         guard self == .qwen else { return apiKeyPageURL }
-        guard apiBaseURL?.host?.lowercased() == "dashscope.aliyuncs.com" else {
-            return Self.qwenInternationalAPIKeyPageURL
-        }
-        return Self.qwenChinaAPIKeyPageURL
+        return QwenAPIService(apiBaseURL: apiBaseURL).keyPageURL
     }
 
     func apiKeyRegionHint(apiBaseURL: URL?) -> String? {
@@ -40,10 +37,7 @@ extension UpstreamProvider {
             return "Meta Model API uses a separate pay-as-you-go API key. Muse Code subscriptions do not cover these requests. Contributor model IDs permit Meta to use content for training."
         }
         guard self == .qwen else { return nil }
-        if apiBaseURL?.host?.lowercased() == "dashscope.aliyuncs.com" {
-            return "China (Beijing) DashScope endpoint selected. Use a China-region Model Studio API key."
-        }
-        return "International DashScope endpoint selected. Use an Alibaba Cloud Model Studio key from Singapore or another matching non-China region."
+        return QwenAPIService(apiBaseURL: apiBaseURL).keyHint
     }
 
     var keychainKey: KeychainService.Key? {
@@ -70,5 +64,4 @@ extension UpstreamProvider {
     }
 
     private static let qwenInternationalAPIKeyPageURL = URL(string: "https://modelstudio.console.alibabacloud.com/?tab=api#/api-key")
-    private static let qwenChinaAPIKeyPageURL = URL(string: "https://dashscope.console.aliyun.com/apiKey")
 }

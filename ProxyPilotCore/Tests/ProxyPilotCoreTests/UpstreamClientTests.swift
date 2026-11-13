@@ -2,6 +2,12 @@ import XCTest
 @testable import ProxyPilotCore
 
 final class UpstreamClientTests: XCTestCase {
+    func testUpstreamHTTPErrorReportsStatusWithoutEchoingResponseSecrets() {
+        let error = UpstreamClient.UpstreamError.httpError(statusCode: 401, body: Data("secret-response".utf8))
+        XCTAssertEqual(error.localizedDescription, "Upstream HTTP 401")
+        XCTAssertFalse(error.localizedDescription.contains("secret-response"))
+    }
+
     func testBuildUpstreamURLPreservesValidBaseAndPath() throws {
         let config = ProxyConfiguration(upstreamAPIBaseURL: "https://api.example.com/v1/")
 

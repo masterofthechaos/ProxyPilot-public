@@ -3,10 +3,12 @@ import Testing
 @testable import ProxyPilotCore
 
 @Suite struct RequestAttributionTests {
-    @Test func acceptsOnlyRepoGPSWithUUID() {
+    @Test func acceptsKnownClientsWithUUID() {
         let id = "00000000-0000-0000-0000-000000000123"
         #expect(RequestAttribution.validated(client: "repogps", sessionID: id) == .init(client: "repogps", sessionID: id))
         #expect(RequestAttribution.validated(client: " RepoGPS ", sessionID: id)?.client == "repogps")
+        #expect(RequestAttribution.validated(client: "Xcode-Agent", sessionID: id)?.client == "xcode-agent")
+        #expect(RequestAttribution.validated(client: "epiphyte", sessionID: id)?.client == "epiphyte")
         #expect(RequestAttribution.validated(client: "unknown", sessionID: id) == nil)
         #expect(RequestAttribution.validated(client: "repogps", sessionID: "not-a-uuid") == nil)
         #expect(RequestAttribution.validated(client: nil, sessionID: id) == nil)

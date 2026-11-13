@@ -724,6 +724,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
         let payload: [String: Any] = [
             "object": "list",
+            LocalProxyCredential.authenticationMetadataKey: config.requiresAuthForProtectedRoutes ? "required" : "none",
             "data": data
         ]
 

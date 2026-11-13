@@ -142,14 +142,12 @@ struct RoutingView: View {
 
                 HStack {
                     Button("Apply & Restart") {
+                        guard let submittedProvider = pendingProvider else { return }
+                        let submission = ConnectionModelSubmission.repoGPS(provider: submittedProvider.rawValue,
+                            model: pendingModel, port: routeControl.status.port)
                         guard RouteInterruptionConfirmation.confirm(route: "the RepoGPS proxy") else { return }
                         Task {
-                            guard let pendingProvider else { return }
-                            await routeControl.applyRoute(
-                                provider: pendingProvider.rawValue,
-                                model: pendingModel,
-                                port: routeControl.status.port
-                            )
+                            await submission.apply(repoGPS: routeControl, epiphyte: vm.epiphyteControl)
                             loadPendingFromRoute()
                         }
                     }
@@ -173,7 +171,7 @@ struct RoutingView: View {
             Button("Browse Models", action: onOpenModels)
         } footer: {
             Text(
-                "Applying changes restarts the background proxy and interrupts requests using it, "
+                "Reapply the same selection to pick up a saved endpoint or CLI update. Applying changes restarts the background proxy and interrupts requests using it, "
                 + "including Xcode requests if it shares this proxy. Wait for the current response to finish first."
             )
             .font(.caption)
@@ -260,7 +258,7 @@ struct RoutingView: View {
     }
 
     private var canApply: Bool {
-        pendingProvider != nil && !routeControl.isApplying && !pendingModel.isEmpty && hasPendingChange
+        pendingProvider != nil && !routeControl.isApplying && !pendingModel.isEmpty
     }
 
     /// Seed the pending selection once, so a background refresh cannot discard

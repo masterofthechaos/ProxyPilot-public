@@ -104,7 +104,8 @@ final class ProxyService {
     func fetchUpstreamModels(
         apiBase: URL,
         apiKey: String,
-        provider: UpstreamProvider = .openAI
+        provider: UpstreamProvider = .openAI,
+        allowFallbackModels: Bool = true
     ) async throws -> [UpstreamModel] {
         let modelsURL = Self.buildUpstreamURL(
             base: Self.normalizedUpstreamAPIBase(apiBase),
@@ -118,7 +119,7 @@ final class ProxyService {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-            if let fallback = fallbackModels(for: provider, statusCode: http.statusCode) {
+            if allowFallbackModels, let fallback = fallbackModels(for: provider, statusCode: http.statusCode) {
                 return fallback
             }
             let body = String(data: data, encoding: .utf8) ?? ""
@@ -141,7 +142,7 @@ final class ProxyService {
             try? ModelCatalogStore.save(models, provider: provider.rawValue, endpoint: Self.normalizedUpstreamAPIBase(apiBase).absoluteString)
             return models
         } catch {
-            if let fallback = provider.fallbackModelIDs {
+            if allowFallbackModels, let fallback = provider.fallbackModelIDs {
                 return fallback.map(UpstreamModel.idOnly)
             }
             throw error

@@ -13,12 +13,16 @@ struct ProxyPilotAgent {
         record("launcher_started", settings: settings)
 
         do {
+            guard AgentRuntimeManager().status().isReady else {
+                throw AgentRuntimeManagerError.installedRuntimeInvalid("Install or repair ProxyPilot Agent from Xcode Setup before starting a new conversation.")
+            }
             let bootstrap = try await ProxyDaemonBootstrapper.ensureRunning(settings: settings)
             record(
                 bootstrap.outcome == .started ? "proxy_started" : "proxy_already_running",
                 settings: settings
             )
-            let localProxyCredential = try LocalProxyCredential.resolveOrCreate(
+            let localProxyCredential = try LocalProxyCredential.resolveForClient(
+                authenticationRequired: bootstrap.authenticationRequired,
                 using: SecretsProviderFactory.make()
             )
             let plan = try AgentAdapterLaunchPlan.make(
@@ -55,10 +59,8 @@ struct ProxyPilotAgent {
         switch error {
         case is ProxyDaemonBootstrapError:
             "E2-DAEMON"
-        case AgentAdapterLaunchError.nodeMissing:
+        case AgentAdapterLaunchError.engineMissing:
             "E4-RUNTIME"
-        case AgentAdapterLaunchError.adapterMissing:
-            "E4-ADAPTER"
         case is AgentAdapterLaunchError:
             "E4-RUNTIME"
         default:

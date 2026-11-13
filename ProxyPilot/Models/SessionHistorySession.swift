@@ -45,7 +45,7 @@ struct SessionHistorySession: Identifiable, Equatable, Sendable {
     var totalTokensFormatted: String { summary.totalTokensFormatted }
     var modelDistribution: [ModelCount] { summary.modelDistribution }
     var p95Latency: TimeInterval? { summary.p95Latency }
-    var sourceLabel: String { source.caseInsensitiveCompare("repogps") == .orderedSame ? "RepoGPS" : source.uppercased() }
+    var sourceLabel: String { source.caseInsensitiveCompare("repogps") == .orderedSame ? "RepoGPS" : (source == "xcode-agent" ? "ProxyPilot Agent" : source.uppercased()) }
     var isRepoGPS: Bool { source.caseInsensitiveCompare("repogps") == .orderedSame }
 
     init(id: String, source: String, requests: [ProxyPilotCore.RequestRecord]) {

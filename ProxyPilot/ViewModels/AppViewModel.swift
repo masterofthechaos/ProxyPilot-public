@@ -76,6 +76,7 @@ final class AppViewModel: ObservableObject {
     static let menuBarSectionOrderDefaultsKey = "proxypilot.customization.menuBarSectionOrder"
     static let visibleMenuBarSectionsDefaultsKey = "proxypilot.customization.visibleMenuBarSections"
     static let visibleHomeDashboardSectionsDefaultsKey = "proxypilot.customization.visibleHomeDashboardSections"
+    static let homeConnectionTargetDefaultsKey = "proxypilot.home.connectionTarget"
     static let defaultSettingsSectionDefaultsKey = "proxypilot.customization.defaultSettingsSection"
     static let keysProviderOrderDefaultsKey = "proxypilot.customization.keysProviderOrder"
     static let visibleKeysProvidersDefaultsKey = "proxypilot.customization.visibleKeysProviders"
@@ -117,6 +118,9 @@ final class AppViewModel: ObservableObject {
 
 
     @Published var providerWorkspaceShowsConfiguration = false
+    @Published var settingsRequested = false
+    let providerConnectionTests = ProviderConnectionTests()
+    let repoGPSRouteTest = RepoGPSRouteTestService()
     let providerCatalog: ProviderCatalogStore
     let modelFavorites: ModelFavoritesStore
     let providerManager: ProviderManager
@@ -131,10 +135,12 @@ final class AppViewModel: ObservableObject {
     /// independent readers of the same `route.json` is also just a second source
     /// of truth waiting to disagree with the first.
     let routeControl = RouteControlService()
+    let epiphyteControl = EpiphyteControlService()
     let repoGPS = RepoGPSService()
 
     private let defaults: UserDefaults
     private let proxyService: ProxyService
+    private let localCredentialResolver: () throws -> String
     private let localProxyServer: LocalProxyServer
     private let preflightService: PreflightService
     private let diagnosticsService: DiagnosticsService
@@ -204,6 +210,8 @@ final class AppViewModel: ObservableObject {
     private var providerManagerCancellable: AnyCancellable?
     private var lifecycleManagerCancellable: AnyCancellable?
     private var routeControlCancellable: AnyCancellable?
+    private var routeTestStatusCancellable: AnyCancellable?
+    private var epiphyteControlCancellable: AnyCancellable?
     private var repoGPSCancellable: AnyCancellable?
     /// Throttles the route poll. `RouteControlService.refresh()` spawns two
     /// short-lived processes, and the value it reads only changes when someone
@@ -514,10 +522,16 @@ final class AppViewModel: ObservableObject {
     @Published var xcodeInstallations: [XcodeInstallation] = []
     var hasCompatibleXcode: Bool { xcodeInstallations.contains { $0.supportsAgenticCoding } }
     @Published private(set) var agentModesCapability = XcodeDetectionService.agentModesCapability(for: [])
-    /// Routing is a permanent product surface. Managed, external, missing, and
-    /// incompatible RepoGPS states belong inside that surface as actionable
-    /// status; they must not make the navigation destination disappear.
-    var repoGPSRoutingFeatureEnabled: Bool { true }
+    /// Launch-time installation gates apply consistently to navigation surfaces.
+    let repoGPSRoutingFeatureEnabled: Bool
+    let epiphyteFeatureEnabled: Bool
+
+    var availableHomeConnectionTargets: [HomeConnectionTarget] {
+        HomeConnectionTarget.allCases.filter {
+            ($0 != .repoGPS || repoGPSRoutingFeatureEnabled)
+                && ($0 != .epiphyte || epiphyteFeatureEnabled)
+        }
+    }
     @Published private(set) var agentRuntimeStatus: AgentRuntimeStatus = .notInstalled
     @Published private(set) var proxyPilotAgentRegistrationStatus: ACPRegistrationManager.Status?
     @Published private(set) var proxyPilotAgentStatusText = "Not installed"
@@ -602,6 +616,8 @@ final class AppViewModel: ObservableObject {
         case gui
         case cli
         case repoGPS
+        case epiphyte
+        case independentClients
         case issue
     }
 
@@ -612,7 +628,7 @@ final class AppViewModel: ObservableObject {
 
         var isRunning: Bool {
             switch kind {
-            case .gui, .cli, .repoGPS:
+            case .gui, .cli, .repoGPS, .epiphyte, .independentClients:
                 return true
             case .stopped, .issue:
                 return false
@@ -623,8 +639,14 @@ final class AppViewModel: ObservableObject {
     static func toolbarProxyStatus(
         for runtimeStatus: ProxyRuntimeStatus,
         repoGPSActive: Bool,
-        repoGPSLeasePresent: Bool = false
+        repoGPSLeasePresent: Bool = false,
+        epiphyteActive: Bool = false
     ) -> ToolbarProxyStatus {
+        if epiphyteActive {
+            return .init(kind: repoGPSActive ? .independentClients : .epiphyte,
+                compactText: repoGPSActive ? "RepoGPS + Epiphyte" : "Epiphyte",
+                fullText: repoGPSActive ? "RepoGPS and Epiphyte in flight" : "Epiphyte in flight")
+        }
         if repoGPSActive {
             return ToolbarProxyStatus(
                 kind: .repoGPS,
@@ -666,7 +688,8 @@ final class AppViewModel: ObservableObject {
         Self.toolbarProxyStatus(
             for: proxyRuntimeStatus,
             repoGPSActive: repoGPS.session.active,
-            repoGPSLeasePresent: repoGPS.session.lease != nil
+            repoGPSLeasePresent: repoGPS.session.lease != nil,
+            epiphyteActive: !epiphyteControl.activeRequests.isEmpty
         )
     }
 
@@ -893,6 +916,7 @@ final class AppViewModel: ObservableObject {
         proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
         liquidGlassEnabled = true
         dockTileInteractiveEnabled = true
+        homeConnectionTarget = .xcode
         defaultSettingsSection = .home
         visibleHomeDashboardSections = Set(HomeDashboardSection.allCases)
         resetMenuBarCustomization()
@@ -1005,6 +1029,7 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.menuBarSectionOrderDefaultsKey)
         defaults.removeObject(forKey: Self.visibleMenuBarSectionsDefaultsKey)
         defaults.removeObject(forKey: Self.visibleHomeDashboardSectionsDefaultsKey)
+        defaults.removeObject(forKey: Self.homeConnectionTargetDefaultsKey)
         defaults.removeObject(forKey: Self.defaultSettingsSectionDefaultsKey)
         defaults.removeObject(forKey: Self.keysProviderOrderDefaultsKey)
         defaults.removeObject(forKey: Self.visibleKeysProvidersDefaultsKey)
@@ -1084,6 +1109,7 @@ final class AppViewModel: ObservableObject {
         menuBarSectionOrder = MenuBarSection.defaultOrder
         visibleMenuBarSections = Set(MenuBarSection.defaultOrder)
         visibleHomeDashboardSections = Set(HomeDashboardSection.allCases)
+        homeConnectionTarget = .xcode
         defaultSettingsSection = .home
         keysProviderOrder = KeysProviderViewItem.defaultOrder
         visibleKeysProviders = Set(KeysProviderViewItem.defaultOrder)
@@ -1688,6 +1714,13 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    @Published var homeConnectionTarget: HomeConnectionTarget = .xcode {
+        didSet {
+            if !availableHomeConnectionTargets.contains(homeConnectionTarget) { homeConnectionTarget = .xcode }
+            defaults.set(homeConnectionTarget.rawValue, forKey: Self.homeConnectionTargetDefaultsKey)
+        }
+    }
+
     @Published var defaultSettingsSection: SettingsSection = .home {
         didSet {
             defaults.set(defaultSettingsSection.rawValue, forKey: Self.defaultSettingsSectionDefaultsKey)
@@ -1836,14 +1869,7 @@ final class AppViewModel: ObservableObject {
         return String(localized: "Selected model") + " \(model) " + String(localized: "will apply the next time ProxyPilot starts or restarts the proxy.")
     }
 
-    /// Mode-aware caveat about *when* a model change reaches the agent. Both modes are
-    /// routed by the same proxy-side remap, so the proxy-restart rule is shared — but
-    /// the ProxyPilot Agent launcher additionally exports `ANTHROPIC_MODEL` as a hint
-    /// baked at agent-session exec time (`AgentLauncherRuntime.buildLaunchPlan`), so a
-    /// session already running in Xcode keeps the model it launched with even after the
-    /// proxy has moved on. Stale hints are harmless — the proxy still remaps — but the
-    /// distinction matters to anyone reading the route state and wondering why a
-    /// running session looks unchanged.
+    /// The active alias follows the proxy route; engine capabilities refresh at launch.
     var xcodeAgentRouteScopeNote: String {
         if showsAgentModeChoice && selectedAgentMode == .proxyPilotAgent {
             return String(localized: "Once the proxy is running the new model, your next request uses it in the same Xcode conversation. Xcode may keep displaying the original model hint; check the observed model in Home or Session History.")
@@ -2792,6 +2818,8 @@ final class AppViewModel: ObservableObject {
         guard let url = proxyService.normalizedUpstreamAPIBase(from: raw),
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               url.host != nil, url.user == nil, url.password == nil else { return false }
+        providerConnectionTests.invalidate(providerID: selection.id)
+        repoGPSRouteTest.invalidate()
         providerCatalog.invalidate(browserIdentity(selection))
         switch selection {
         case .none: return false
@@ -2820,7 +2848,11 @@ final class AppViewModel: ObservableObject {
             do { try KeychainService.set(key, forAccount: provider.keychainAccountName); success = true }
             catch { return false }
         }
-        if success { providerCatalog.invalidate(browserIdentity(selection)); objectWillChange.send() }
+        if success {
+            providerConnectionTests.invalidate(providerID: selection.id)
+            repoGPSRouteTest.invalidate()
+            providerCatalog.invalidate(browserIdentity(selection)); objectWillChange.send()
+        }
         return success
     }
 
@@ -2831,6 +2863,8 @@ final class AppViewModel: ObservableObject {
         case .custom(let id):
             if let custom = customProviders.first(where: { $0.id == id }) { deleteCustomProviderKey(for: custom) }
         }
+        providerConnectionTests.invalidate(providerID: selection.id)
+        repoGPSRouteTest.invalidate()
         providerCatalog.invalidate(browserIdentity(selection))
         objectWillChange.send()
     }
@@ -2860,6 +2894,43 @@ final class AppViewModel: ObservableObject {
         guard !browserRequiresKey(selection) || !key.isEmpty else { return }
         await providerCatalog.refresh(identity, force: force) { [proxyService] in
             try await proxyService.fetchUpstreamModels(apiBase: endpoint, apiKey: key, provider: provider)
+        }
+    }
+
+    /// Sends only the check explicitly requested by the user; never selects or starts a route.
+    func testBrowserConnection(_ selection: UpstreamSelection, model: String? = nil) async {
+        let identity = browserIdentity(selection)
+        guard selection != .none, let endpoint = URL(string: identity.endpoint) else { return }
+        let provider: UpstreamProvider
+        let key: String
+        switch selection {
+        case .none: return
+        case .builtIn(let selected):
+            provider = selected
+            key = selected.keychainKey.flatMap { KeychainService.get(key: $0) } ?? ""
+        case .custom(let id):
+            guard let custom = customProviders.first(where: { $0.id == id }) else { return }
+            provider = .openAI
+            key = KeychainService.get(account: custom.keychainAccountName) ?? ""
+        }
+        guard !browserRequiresKey(selection) || !key.isEmpty else { return }
+        await providerConnectionTests.run(identity) { [proxyService] in
+            do {
+                if let model {
+                    let response = try await proxyService.testUpstreamChat(apiBase: endpoint, apiKey: key, model: model, provider: provider)
+                    guard !response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw NSError(domain: "ProviderCheck", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                            "The endpoint returned no answer text. Model response is not verified; reasoning models may need a larger output budget."])
+                    }
+                    return "Direct response received for \(model). RepoGPS route has not been checked; use Test RepoGPS Route before a session."
+                }
+                let models = try await proxyService.fetchUpstreamModels(apiBase: endpoint, apiKey: key, provider: provider, allowFallbackModels: false)
+                return "Catalog reachable · \(models.count) models. Authentication and inference are not independently verified; some catalogs are public."
+            } catch {
+                // Never display a credential echoed by an upstream error response.
+                let message = key.isEmpty ? error.localizedDescription : error.localizedDescription.replacingOccurrences(of: key, with: "[redacted]")
+                throw NSError(domain: "ProviderCheck", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
+            }
         }
     }
 
@@ -2899,6 +2970,9 @@ final class AppViewModel: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         proxyService: ProxyService = ProxyService(),
+        localCredentialResolver: @escaping () throws -> String = {
+            try LocalProxyCredential.resolveOrCreate(using: SecretsProviderFactory.make())
+        },
         localProxyServer: LocalProxyServer = LocalProxyServer(),
         diagnosticsService: DiagnosticsService = DiagnosticsService(),
         telemetryService: TelemetryService = .shared,
@@ -2914,12 +2988,17 @@ final class AppViewModel: ObservableObject {
         agentRuntimeInstaller: @escaping AgentRuntimeInstaller = { try await $0.install() },
         agentHelperResolver: AgentHelperResolver? = nil,
         sessionReportURL: URL = SessionReportStore.defaultURL,
-        inputOutputLoggingPreferencesStore: InputOutputLoggingPreferencesStore? = nil
+        inputOutputLoggingPreferencesStore: InputOutputLoggingPreferencesStore? = nil,
+        repoGPSRoutingFeatureEnabled: Bool = RepoGPSRoutingFeatureFlag.current,
+        epiphyteFeatureEnabled: Bool? = nil
     ) {
+        self.repoGPSRoutingFeatureEnabled = repoGPSRoutingFeatureEnabled
+        self.epiphyteFeatureEnabled = epiphyteFeatureEnabled ?? EpiphyteFeatureFlag.current
         self.defaults = defaults
         self.providerCatalog = ProviderCatalogStore(defaults: defaults)
         self.modelFavorites = ModelFavoritesStore(defaults: defaults)
         self.proxyService = proxyService
+        self.localCredentialResolver = localCredentialResolver
         self.localProxyServer = localProxyServer
         self.preflightService = PreflightService(proxyService: proxyService)
         self.diagnosticsService = diagnosticsService
@@ -2999,6 +3078,8 @@ final class AppViewModel: ObservableObject {
         menuBarSectionOrder = storedMenuBarOrder
         visibleMenuBarSections = storedVisibleMenuBarSections
         visibleHomeDashboardSections = Self.decodedVisibleHomeDashboardSections(from: defaults)
+        homeConnectionTarget = HomeConnectionTarget(rawValue: defaults.string(forKey: Self.homeConnectionTargetDefaultsKey) ?? "") ?? .xcode
+        if !availableHomeConnectionTargets.contains(homeConnectionTarget) { homeConnectionTarget = .xcode }
         defaultSettingsSection = SettingsSection(
             rawValue: defaults.string(forKey: Self.defaultSettingsSectionDefaultsKey) ?? ""
         ) ?? .home
@@ -3089,6 +3170,18 @@ final class AppViewModel: ObservableObject {
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
+
+        routeTestStatusCancellable = routeControl.$status
+            .removeDuplicates { lhs, rhs in
+                lhs.provider == rhs.provider && lhs.model == rhs.model && lhs.port == rhs.port && lhs.applied == rhs.applied
+            }
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.repoGPSRouteTest.invalidate() }
+
+        epiphyteControlCancellable = epiphyteControl.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
 
         repoGPSCancellable = repoGPS.objectWillChange
             .receive(on: RunLoop.main)
@@ -3191,6 +3284,8 @@ final class AppViewModel: ObservableObject {
 
     func refreshStatus() {
         importExternalSessionReportEvents()
+        epiphyteControl.refreshActivity()
+        Task { await epiphyteControl.refreshIfNeeded() }
         refreshAgentConfigInstallationState()
         statusRefreshSequence += 1
         let sequence = statusRefreshSequence
@@ -3325,6 +3420,7 @@ final class AppViewModel: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.importExternalSessionReportEvents()
+                self.epiphyteControl.refreshActivity()
                 self.refreshLogText()
             }
         }
@@ -3742,9 +3838,8 @@ final class AppViewModel: ObservableObject {
 
         let masterKey: String?
         if useBuiltInProxy {
-            masterKey = try? LocalProxyCredential.resolveOrCreate(
-                using: SecretsProviderFactory.make()
-            )
+            // /v1/models is public in both engines, even on protected routes.
+            masterKey = nil
         } else if requiresMasterKey {
             guard let saved = KeychainService.get(key: .litellmMasterKey)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -3798,9 +3893,8 @@ final class AppViewModel: ObservableObject {
 
         let masterKey: String?
         if useBuiltInProxy {
-            masterKey = try? LocalProxyCredential.resolveOrCreate(
-                using: SecretsProviderFactory.make()
-            )
+            // /v1/models is public in both engines, even on protected routes.
+            masterKey = nil
         } else if requiresMasterKey {
             masterKey = KeychainService.get(key: .litellmMasterKey)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4625,9 +4719,7 @@ final class AppViewModel: ObservableObject {
         let masterKey: String
         if protectedRoutesRequireAuth {
             do {
-                masterKey = try LocalProxyCredential.resolveOrCreate(
-                    using: SecretsProviderFactory.make()
-                )
+                masterKey = try localCredentialResolver()
                 try synchronizeManagedXcodeAgentCredentialIfInstalled(masterKey)
             } catch {
                 throw IssueError(issue: AppIssue(
@@ -4638,7 +4730,7 @@ final class AppViewModel: ObservableObject {
                 ))
             }
         } else {
-            masterKey = "proxypilot-local-noauth"
+            masterKey = LocalProxyCredential.unauthenticatedClientToken
         }
 
         let hasFetchedModels = !upstreamModels.isEmpty
@@ -5316,7 +5408,8 @@ final class AppViewModel: ObservableObject {
             upstreamURL: hasSelectedProvider ? upstreamAPIBaseURLString : nil,
             credentialKey: activeCustomProvider?.keychainAccountName,
             promptCachingMode: cacheMode,
-            contextCompactionEnabled: contextCompactionEnabled
+            contextCompactionEnabled: contextCompactionEnabled,
+            modelMetadata: upstreamModels.first { $0.id == effectiveXcodeAgentModel }
         )
         try? settings.save()
     }
@@ -5364,11 +5457,30 @@ final class AppViewModel: ObservableObject {
         """
     }
 
+    private func localCredentialForXcodeConfiguration() throws -> String {
+        // These built-in providers have no upstream credential slot. Keep unknown,
+        // custom, external and explicitly authenticated routes on the protected path.
+        if useBuiltInProxy, !requireLocalAuth,
+           case let .builtIn(provider) = selectedUpstreamSelection,
+           provider == .ollama || provider == .lmStudio {
+            return LocalProxyCredential.unauthenticatedClientToken
+        }
+        return try localCredentialResolver()
+    }
+
+    func xcodeAgentSettingsData() throws -> Data {
+        let settingsObject: [String: Any] = [
+            "env": [
+                "ANTHROPIC_AUTH_TOKEN": try localCredentialForXcodeConfiguration(),
+                "ANTHROPIC_BASE_URL": proxyURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+            ]
+        ]
+        return try JSONSerialization.data(withJSONObject: settingsObject, options: [.prettyPrinted, .sortedKeys])
+    }
+
     var diyInstallCommands: String {
         let proxyBase = proxyURLString.trimmingCharacters(in: .whitespacesAndNewlines)
-        let localCredential = (try? LocalProxyCredential.resolveOrCreate(
-            using: SecretsProviderFactory.make()
-        )) ?? "LOCAL_CREDENTIAL_UNAVAILABLE"
+        let localCredential = (try? localCredentialForXcodeConfiguration()) ?? "LOCAL_CREDENTIAL_UNAVAILABLE"
         let settingsObject: [String: Any] = [
             "env": [
                 "ANTHROPIC_AUTH_TOKEN": localCredential,
@@ -5398,20 +5510,7 @@ final class AppViewModel: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: xcodeAgentConfigDirectoryURL, withIntermediateDirectories: true)
 
-            let proxyBase = proxyURLString.trimmingCharacters(in: .whitespacesAndNewlines)
-            let localCredential = try LocalProxyCredential.resolveOrCreate(
-                using: SecretsProviderFactory.make()
-            )
-            let settingsObject: [String: Any] = [
-                "env": [
-                    "ANTHROPIC_AUTH_TOKEN": localCredential,
-                    "ANTHROPIC_BASE_URL": proxyBase
-                ]
-            ]
-            let settingsData = try JSONSerialization.data(
-                withJSONObject: settingsObject,
-                options: [.prettyPrinted, .sortedKeys]
-            )
+            let settingsData = try xcodeAgentSettingsData()
             try settingsData.write(to: xcodeAgentConfigSettingsURL, options: .atomic)
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o600],

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import ProxyPilotCore
 
@@ -82,4 +85,66 @@ import Testing
 
     #expect(unmanagedResult == nil)
     #expect(currentResult == nil)
+}
+
+private struct DeniedClientSecrets: SecretsProvider {
+    func get(key: String) throws -> String? { throw SecretsError.fileError("denied") }
+    func set(key: String, value: String) throws { throw SecretsError.fileError("denied") }
+    func delete(key: String) throws { throw SecretsError.fileError("denied") }
+    func list() throws -> [String] { throw SecretsError.fileError("denied") }
+}
+
+@Test func anonymousClientNeverAccessesSecretsButRequiredAndUnknownPoliciesDo() throws {
+    let secrets = DeniedClientSecrets()
+    #expect(try LocalProxyCredential.resolveForClient(authenticationRequired: false, using: secrets)
+        == LocalProxyCredential.unauthenticatedClientToken)
+    #expect(throws: SecretsError.self) {
+        try LocalProxyCredential.resolveForClient(authenticationRequired: true, using: secrets)
+    }
+    #expect(throws: SecretsError.self) {
+        try LocalProxyCredential.resolveForClient(authenticationRequired: nil, using: secrets)
+    }
+}
+
+@Test(arguments: [UpstreamProvider.ollama, .lmStudio, .openRouter])
+func clientProbeUsesEffectiveListenerAuthentication(provider: UpstreamProvider) async throws {
+    for (explicitAuth, upstreamKey) in [(false, Optional<String>.none), (true, nil), (false, "upstream-fixture")] {
+        let config = ProxyConfiguration(
+            port: 0, upstreamProvider: provider, upstreamAPIKey: upstreamKey,
+            masterKey: "local-fixture", allowedModels: ["fixture"], requiresAuth: explicitAuth
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+        let probe = await LocalProxyProbe.probe(on: port)
+        let requiresAuth = explicitAuth || upstreamKey != nil
+        #expect(probe.reachable)
+        #expect(probe.authenticationRequired == requiresAuth)
+        // A stale saved provider must not override the live listener's policy.
+        let bootstrap = try await ProxyDaemonBootstrapper.ensureRunning(
+            settings: AgentLaunchSettings(port: port, providerID: "ollama")
+        )
+        #expect(bootstrap.outcome == .alreadyRunning)
+        #expect(bootstrap.authenticationRequired == requiresAuth)
+        if requiresAuth {
+            #expect(throws: SecretsError.self) {
+                try LocalProxyCredential.resolveForClient(authenticationRequired: probe.authenticationRequired, using: DeniedClientSecrets())
+            }
+        } else {
+            #expect(try LocalProxyCredential.resolveForClient(authenticationRequired: probe.authenticationRequired, using: DeniedClientSecrets())
+                == LocalProxyCredential.unauthenticatedClientToken)
+        }
+        // The SDK placeholder must never gain access to either inference protocol.
+        if requiresAuth {
+            for path in ["v1/chat/completions", "v1/messages"] {
+                var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/\(path)")!)
+                request.httpMethod = "POST"
+                request.httpBody = Data("{}".utf8)
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue("Bearer \(LocalProxyCredential.unauthenticatedClientToken)", forHTTPHeaderField: "Authorization")
+                let (_, response) = try await URLSession.shared.data(for: request)
+                #expect((response as? HTTPURLResponse)?.statusCode == 401)
+            }
+        }
+        try await server.stop()
+    }
 }

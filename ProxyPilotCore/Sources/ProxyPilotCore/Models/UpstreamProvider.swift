@@ -230,9 +230,36 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
             return ["https://api.minimaxi.com/v1"]
         case .miniMaxCN:
             return []
+        case .qwen:
+            return [
+                "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+                "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            ]
         default:
             return []
         }
+    }
+
+    /// CLI/shared routes use the same saved official service as the macOS GUI.
+    /// Unknown saved hosts never receive a stored provider credential implicitly.
+    public var preferredAPIBaseURL: String {
+        #if os(macOS)
+        let saved = UserDefaults(suiteName: "com.yourname.ProxyPilot")?
+            .string(forKey: "proxypilot.upstreamAPIBaseURL." + rawValue)
+        return apiBaseURL(savedPreference: saved)
+        #else
+        return defaultAPIBaseURL
+        #endif
+    }
+
+    public func apiBaseURL(savedPreference: String?) -> String {
+        guard let savedPreference else { return defaultAPIBaseURL }
+        let value = savedPreference.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let url = URL(string: value), url.user == nil, url.password == nil,
+              url.query == nil, url.fragment == nil else { return defaultAPIBaseURL }
+        return ([defaultAPIBaseURL] + alternateAPIBaseURLs).first { $0 == value } ?? defaultAPIBaseURL
     }
 
     /// Whether this provider runs on the local machine (no cloud API).

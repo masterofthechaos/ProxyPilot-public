@@ -699,7 +699,7 @@ enum MCPServerSetup {
                 let config = ProxyConfiguration(
                     port: reqPort,
                     upstreamProvider: upstream,
-                    upstreamAPIBaseURL: reqURL,
+                    upstreamAPIBaseURL: CLIProxyRuntime.upstreamBaseURL(provider: upstream, override: reqURL),
                     upstreamAPIKey: apiKey,
                     masterKey: localProxyCredential,
                     allowedModels: allowedModels,
@@ -888,7 +888,7 @@ enum MCPServerSetup {
                 let config = ProxyConfiguration(
                     port: reqPort,
                     upstreamProvider: upstream,
-                    upstreamAPIBaseURL: reqURL,
+                    upstreamAPIBaseURL: CLIProxyRuntime.upstreamBaseURL(provider: upstream, override: reqURL),
                     upstreamAPIKey: apiKey,
                     masterKey: localProxyCredential,
                     allowedModels: allowedModels,
@@ -1056,7 +1056,9 @@ enum MCPServerSetup {
                 }
 
                 do {
-                    let localProxyCredential = try LocalProxyCredential.resolveOrCreate(
+                    let probe = await LocalProxyProbe.probe(on: configPort)
+                    let localProxyCredential = try LocalProxyCredential.resolveForClient(
+                        authenticationRequired: probe.authenticationRequired,
                         using: SecretsProviderFactory.make()
                     )
                     let status = try XcodeConfigManager.install(

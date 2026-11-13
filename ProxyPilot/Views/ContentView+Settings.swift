@@ -2,6 +2,12 @@ import SwiftUI
 import ProxyPilotCore
 
 extension ContentView {
+    func consumeSettingsRequest() {
+        guard vm.settingsRequested else { return }
+        openSettings(.general)
+        vm.settingsRequested = false
+    }
+
     func openSettings(_ category: SettingsCategory) {
         settingsCategory = category
         selectedSection = .advanced
@@ -10,7 +16,7 @@ extension ContentView {
     var settingsCategoryPicker: some View {
         Picker("Category", selection: $settingsCategory) {
             ForEach(SettingsCategory.allCases) { Text($0.rawValue).tag($0) }
-        }.fixedSize()
+        }.pickerStyle(.segmented)
     }
 
     var unifiedSettings: some View {

@@ -25,7 +25,7 @@ public struct AgentLaunchSettings: Codable, Equatable, Sendable {
     public var schema: Int
     /// Local proxy port the launcher should probe/start and route to.
     public var port: UInt16
-    /// Optional model hint exported as `ANTHROPIC_MODEL` to the harness.
+    /// Selected model hint for launch telemetry. The engine uses the active-route alias.
     /// Stale values are harmless: live model routing happens at the proxy.
     public var modelID: String?
     /// Human-readable upstream label, for launch telemetry/logging only.
@@ -44,6 +44,8 @@ public struct AgentLaunchSettings: Codable, Equatable, Sendable {
     /// schema bump would make them reject the whole file (`resolve()`
     /// requires `schema <= currentSchema`).
     public var contextCompactionEnabled: Bool
+    /// Advertised capabilities for the selected model; absent in older saved settings.
+    public var modelMetadata: UpstreamModel?
 
     public static let currentSchema = 3
 
@@ -56,7 +58,8 @@ public struct AgentLaunchSettings: Codable, Equatable, Sendable {
         upstreamURL: String? = nil,
         credentialKey: String? = nil,
         promptCachingMode: PromptCachingMode = .auto,
-        contextCompactionEnabled: Bool = false
+        contextCompactionEnabled: Bool = false,
+        modelMetadata: UpstreamModel? = nil
     ) {
         self.schema = schema
         self.port = port
@@ -67,16 +70,18 @@ public struct AgentLaunchSettings: Codable, Equatable, Sendable {
         self.credentialKey = credentialKey
         self.promptCachingMode = promptCachingMode
         self.contextCompactionEnabled = contextCompactionEnabled
+        self.modelMetadata = modelMetadata
     }
 
     private enum CodingKeys: String, CodingKey {
         case schema, port, modelID, upstreamLabel, providerID, upstreamURL, credentialKey
         case promptCachingMode
-        case contextCompactionEnabled
+        case contextCompactionEnabled, modelMetadata
     }
 
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        modelMetadata = try values.decodeIfPresent(UpstreamModel.self, forKey: .modelMetadata)
         schema = try values.decode(Int.self, forKey: .schema)
         port = try values.decode(UInt16.self, forKey: .port)
         modelID = try values.decodeIfPresent(String.self, forKey: .modelID)

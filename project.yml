@@ -18,8 +18,10 @@ packages:
 settings:
   base:
     SWIFT_VERSION: 6.0
-    MARKETING_VERSION: "1.18.1"
-    CURRENT_PROJECT_VERSION: "161"
+    MARKETING_VERSION: "1.19.1"
+    CURRENT_PROJECT_VERSION: "170"
+    REPOGPS_EXPECTED_VERSION: "0.8.4"
+    REPOGPS_EXPECTED_BEHAVIOR_PACK: "9"
 targets:
   ProxyPilot-macOS:
     type: application
@@ -80,6 +82,12 @@ targets:
           REPOGPS_PAYLOAD="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/RepoGPSPayload"
           if [[ ! -x "$REPOGPS_SOURCE/bin/rgps" ]]; then
             echo "error: staged RepoGPS payload is missing; run scripts/stage_repogps_payload.sh" >&2
+            exit 1
+          fi
+          REPOGPS_VERSION="$(/usr/bin/plutil -extract repogps_version raw -o - "$REPOGPS_SOURCE/payload.json")"
+          REPOGPS_PACK="$(/usr/bin/plutil -extract behavior_pack_version raw -o - "$REPOGPS_SOURCE/payload.json")"
+          if [[ "$REPOGPS_VERSION" != "$REPOGPS_EXPECTED_VERSION" || "$REPOGPS_PACK" != "$REPOGPS_EXPECTED_BEHAVIOR_PACK" ]]; then
+            echo "error: staged RepoGPS payload must match ${REPOGPS_EXPECTED_VERSION}/pack ${REPOGPS_EXPECTED_BEHAVIOR_PACK}; run scripts/stage_repogps_payload.sh" >&2
             exit 1
           fi
           REPOGPS_SOURCE_RELEASE="$(/usr/bin/plutil -extract source_release raw -o - "$REPOGPS_SOURCE/payload.json")"

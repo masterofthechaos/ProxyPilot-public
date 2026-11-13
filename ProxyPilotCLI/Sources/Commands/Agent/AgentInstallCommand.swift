@@ -64,8 +64,8 @@ struct AgentInstallCommand: AsyncParsableCommand {
                 data: AgentInstallPayload(
                     status: "installed",
                     registration: registration,
-                    nodeVersion: manifest.nodeVersion,
-                    adapterVersion: manifest.adapterVersion,
+                    engine: manifest.engine,
+                    engineVersion: manifest.engineVersion,
                     executablePath: registrationManager.executablePath
                 ),
                 humanMessage: message,
@@ -99,14 +99,14 @@ struct AgentInstallCommand: AsyncParsableCommand {
 private struct AgentInstallPayload: Encodable {
     let status: String
     let registration: String
-    let nodeVersion: String
-    let adapterVersion: String
+    let engine: String
+    let engineVersion: String
     let executablePath: String
 
     enum CodingKeys: String, CodingKey {
         case status, registration
-        case nodeVersion = "node_version"
-        case adapterVersion = "adapter_version"
+        case engine
+        case engineVersion = "engine_version"
         case executablePath = "executable_path"
     }
 }

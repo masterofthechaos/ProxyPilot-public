@@ -73,6 +73,8 @@ struct CodingHarnessesView: View {
                 Text("Optional coding in Terminal, with providers and models supplied by ProxyPilot. You do not need RepoGPS to use ProxyPilot Agent in Xcode.")
                     .foregroundStyle(.secondary)
 
+                RepoGPSRouteTestView()
+
                 DashboardCard {
                     VStack(alignment: .leading, spacing: 14) {
                         HStack {

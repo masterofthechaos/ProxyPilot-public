@@ -1,10 +1,12 @@
+import AppKit
 import SwiftUI
 import ProxyPilotCore
 
 struct ProviderWorkspaceView: View {
     @EnvironmentObject private var vm: AppViewModel
+    var compact = false
     var body: some View {
-        ProviderWorkspaceContent(vm: vm, catalog: vm.providerCatalog, favorites: vm.modelFavorites)
+        ProviderWorkspaceContent(vm: vm, catalog: vm.providerCatalog, favorites: vm.modelFavorites, checks: vm.providerConnectionTests, compact: compact)
     }
 }
 
@@ -19,6 +21,13 @@ private struct ProviderWorkspaceContent: View {
     @ObservedObject var vm: AppViewModel
     @ObservedObject var catalog: ProviderCatalogStore
     @ObservedObject var favorites: ModelFavoritesStore
+    @ObservedObject var checks: ProviderConnectionTests
+    var compact: Bool
+    @State private var manageProvidersExpanded = false
+    @State private var showHiddenProviders = false
+    @State private var testModelID = ""
+    @State private var rowTestModelID: String?
+    @State private var credentialPresence: [UpstreamSelection: Bool] = [:]
     @State private var browsing: UpstreamSelection = .none
     @State private var query = ModelBrowserQuery()
     @State private var configurationExpanded = false
@@ -34,7 +43,7 @@ private struct ProviderWorkspaceContent: View {
 
     private var browsableProviders: [UpstreamProvider] {
         vm.keysProviderOrder.map(\.provider).filter {
-            vm.isKeysProviderVisible($0) || browsing == .builtIn($0)
+            showHiddenProviders || vm.isKeysProviderVisible($0) || browsing == .builtIn($0)
         }
     }
     private var identity: ProviderCatalogStore.Identity { vm.browserIdentity(browsing) }
@@ -50,6 +59,12 @@ private struct ProviderWorkspaceContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+          HStack(alignment: .top, spacing: 14) {
+           if !compact {
+               ScrollView { providerOverview.padding(6) }
+                   .fixedSize(horizontal: true, vertical: false)
+               Divider()
+           }
           ScrollView {
            VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -57,10 +72,12 @@ private struct ProviderWorkspaceContent: View {
                 Spacer()
                 Button("Add Provider", systemImage: "plus") { showAddProvider = true }
             }
-            Picker("Browse provider", selection: $browsing) {
-                Text("Choose a provider…").tag(UpstreamSelection.none)
-                ForEach(browsableProviders) { Text($0.title).tag(UpstreamSelection.builtIn($0)) }
-                ForEach(vm.customProviders) { Text($0.name + " (Custom)").tag(UpstreamSelection.custom($0.id)) }
+            if compact {
+                DisclosureGroup("Manage providers · " + vm.browserTitle(browsing), isExpanded: $manageProvidersExpanded) {
+                    providerOverview.padding(.top, 8)
+                }
+            } else {
+                Text(vm.browserTitle(browsing)).font(.headline)
             }
             Text("Explore providers without changing your Xcode selection.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -68,7 +85,8 @@ private struct ProviderWorkspaceContent: View {
                 ContentUnavailableView("Choose a provider", systemImage: "square.stack.3d.up",
                     description: Text("Configure credentials, browse models and build your favorites here."))
             } else {
-                ScrollView { configuration }.frame(maxHeight: configurationExpanded ? 180 : 24)
+                configuration
+                connectionChecks
                 filters
                 HStack {
                     Text("\(results.count) models").font(.caption).foregroundStyle(.secondary)
@@ -96,7 +114,7 @@ private struct ProviderWorkspaceContent: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                         if results.isEmpty {
                             ContentUnavailableView("No matching models", systemImage: "magnifyingglass",
-                                description: Text(vm.browserRequiresKey(browsing) && !vm.browserHasKey(browsing)
+                                description: Text(vm.browserRequiresKey(browsing) && !hasKey(browsing)
                                     ? "Save a provider key to load its catalog, or enter a model ID."
                                     : "Clear filters, refresh the catalog, or enter a model ID."))
                         }
@@ -106,6 +124,8 @@ private struct ProviderWorkspaceContent: View {
 
             }
            }
+           .padding(6) // Keep native keyboard focus rings inside the scroll viewport.
+          }
           }
             Divider()
             if !compared.isEmpty {
@@ -119,15 +139,26 @@ private struct ProviderWorkspaceContent: View {
         }
         .padding(24)
         .task {
+            refreshCredentialPresence()
             if browsing == .none { browsing = vm.selectedUpstreamSelection }
         }
         .task(id: browsing) {
+            if credentialPresence.isEmpty { refreshCredentialPresence() }
             endpointDraft = vm.browserEndpoint(browsing)
             keyDraft = ""
-            configurationExpanded = vm.providerWorkspaceShowsConfiguration || (vm.browserRequiresKey(browsing) && !vm.browserHasKey(browsing))
+            configurationExpanded = true
+            testModelID = vm.browserModels(browsing).first?.id ?? ""
+            rowTestModelID = nil
             query = ModelBrowserQuery()
             message = nil
             await vm.refreshBrowser(browsing)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshCredentialPresence()
+        }
+        .onChange(of: vm.customProviders.map(\.id)) { _, _ in refreshCredentialPresence() }
+        .onChange(of: liveModels.map(\.id), initial: true) { _, ids in
+            if !ids.contains(testModelID) { testModelID = ids.first ?? "" }
         }
         .onChange(of: vm.providerWorkspaceShowsConfiguration) { _, expanded in
             if expanded { configurationExpanded = true }
@@ -135,12 +166,13 @@ private struct ProviderWorkspaceContent: View {
         .sheet(isPresented: $showAddProvider) {
             AddCustomProviderView { name, url, key in
                 vm.addCustomProvider(name: name, apiBaseURL: url, apiKey: key)
+                refreshCredentialPresence()
                 if let added = vm.customProviders.last { browsing = .custom(added.id) }
             }
         }
         .sheet(isPresented: $showComparison) { comparison }
         .confirmationDialog("Remove the stored provider key?", isPresented: $confirmDeleteKey) {
-            Button("Remove Key", role: .destructive) { vm.deleteBrowserKey(browsing) }
+            Button("Remove Key", role: .destructive) { vm.deleteBrowserKey(browsing); refreshCredentialPresence() }
         } message: { Text("Future requests may fail until you supply another key.") }
         .confirmationDialog("Remove this custom provider?", isPresented: $confirmDeleteProvider) {
             Button("Remove Provider", role: .destructive) {
@@ -152,9 +184,140 @@ private struct ProviderWorkspaceContent: View {
         }
     }
 
+    private func hasKey(_ selection: UpstreamSelection) -> Bool {
+        credentialPresence[selection] ?? false
+    }
+
+    private func refreshCredentialPresence() {
+        let providers = UpstreamProvider.allCases.map(UpstreamSelection.builtIn)
+            + vm.customProviders.map { UpstreamSelection.custom($0.id) }
+        credentialPresence = Dictionary(uniqueKeysWithValues: providers.map { ($0, vm.browserHasKey($0)) })
+    }
+
+    private var providerOverview: some View {
+        let providers = (browsableProviders.map(UpstreamSelection.builtIn)
+            + vm.customProviders.map { UpstreamSelection.custom($0.id) }).sorted {
+                let order = vm.browserTitle($0).localizedStandardCompare(vm.browserTitle($1))
+                return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+            }
+        let saved = providers.filter { hasKey($0) }
+        let remaining = providers.filter { !hasKey($0) }
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Providers").font(.headline)
+            Text("Credential status · saved ≠ tested").font(.caption).foregroundStyle(.secondary)
+            if !saved.isEmpty {
+                Text("Saved keys").font(.subheadline.bold()).padding(.top, 8)
+                ForEach(saved, id: \.id) { providerButton($0) }
+            }
+            if !remaining.isEmpty {
+                if !saved.isEmpty { Divider().padding(.vertical, 6) }
+                Text("Other providers").font(.subheadline.bold()).padding(.top, 8)
+                ForEach(remaining, id: \.id) { providerButton($0) }
+            }
+            Toggle("Show hidden providers", isOn: $showHiddenProviders).toggleStyle(.checkbox).font(.caption)
+        }
+    }
+
+    private func providerButton(_ selection: UpstreamSelection) -> some View {
+        Button {
+            browsing = selection
+        } label: {
+            HStack {
+                Image(systemName: hasKey(selection) ? "key.fill" : "key")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(vm.browserTitle(selection)).fontWeight(browsing == selection ? .semibold : .regular)
+                    Text(hasKey(selection) ? "Key saved" : (vm.browserRequiresKey(selection) ? "Not configured" : "Key optional"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if browsing == selection { Image(systemName: "chevron.right") }
+            }.padding(6).contentShape(Rectangle())
+                .background(browsing == selection ? Color.accentColor.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+        }.buttonStyle(.plain)
+            .accessibilityAddTraits(browsing == selection ? .isSelected : [])
+    }
+
+    private var connectionChecks: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button("Test Catalog Access") {
+                    let selection = browsing
+                    rowTestModelID = nil
+                    Task { await vm.testBrowserConnection(selection) }
+                }
+                    .disabled(checks.running.contains(identity) || (vm.browserRequiresKey(browsing) && !hasKey(browsing)))
+                if checks.running.contains(identity) { ProgressView().controlSize(.small) }
+            }
+            Text("Checks the saved endpoint's model catalog. It does not prove that a key can run inference.")
+                .font(.caption).foregroundStyle(.secondary)
+            if vm.repoGPSRoutingFeatureEnabled { RepoGPSRouteTestView() }
+            DisclosureGroup("Test a direct model response") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Sends a small real request using your saved endpoint and key; provider charges or plan quota may apply. Uses the existing 256-token test limit and 20-second timeout.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Picker("Model to test", selection: $testModelID) {
+                            Text("Choose a model…").tag("")
+                            ForEach(models.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }) { model in
+                                Text(model.displayName ?? model.id).tag(model.id)
+                            }
+                            if !testModelID.isEmpty && !models.contains(where: { $0.id == testModelID }) {
+                                Text(testModelID).tag(testModelID)
+                            }
+                        }
+                        .disabled(models.isEmpty)
+
+                        Button("Test Direct Response") {
+                            let model = testModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let selection = browsing
+                            rowTestModelID = nil
+                            Task { await vm.testBrowserConnection(selection, model: model) }
+                        }.disabled(testModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || checks.running.contains(identity) || (vm.browserRequiresKey(browsing) && !hasKey(browsing)))
+                    }
+                    if models.isEmpty {
+                        Text("Refresh the catalog to choose a model, or use the optional unlisted-model entry.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    DisclosureGroup("Test an unlisted model") {
+                        TextField("Exact model ID", text: $testModelID).textFieldStyle(.roundedBorder)
+                            .padding(6)
+                    }
+                }
+            }
+            if let result = checks.results[identity] {
+                Label(result.message, systemImage: result.succeeded ? "checkmark.circle" : "exclamationmark.triangle")
+                    .font(.caption).textSelection(.enabled)
+                Text("Last check: \(result.date.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var configuration: some View {
-        DisclosureGroup("Provider configuration · \(vm.browserHasKey(browsing) ? "Key saved" : (vm.browserRequiresKey(browsing) ? "Key needed" : "Key optional"))", isExpanded: $configurationExpanded) {
+        DisclosureGroup("Provider configuration · \(hasKey(browsing) ? "Key saved" : (vm.browserRequiresKey(browsing) ? "Key needed" : "Key optional"))", isExpanded: $configurationExpanded) {
             VStack(alignment: .leading, spacing: 10) {
+                if browsing == .builtIn(.qwen) {
+                    Picker("Qwen service", selection: Binding(
+                        get: { QwenAPIService(apiBaseURL: URL(string: endpointDraft)) },
+                        set: { service in
+                            if let endpoint = service.endpoint { endpointDraft = endpoint }
+                            message = "Choose Save Endpoint to apply this service."
+                        }
+                    )) {
+                        ForEach(QwenAPIService.allCases.filter { $0 != .custom }) { Text($0.title).tag($0) }
+                        if QwenAPIService(apiBaseURL: URL(string: endpointDraft)) == .custom {
+                            Text("Custom endpoint").tag(QwenAPIService.custom)
+                        }
+                    }
+                    Text(QwenAPIService(apiBaseURL: URL(string: endpointDraft)).keyHint)
+                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text("Qwen stores one key. When changing services, save the matching key. Endpoint changes apply when the route is next started or applied.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if QwenAPIService(apiBaseURL: URL(string: endpointDraft)).isTokenPlan {
+                        Text("For Qwen4 preview, enter qwen4-max-preview below if it is absent from the catalog.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 HStack {
                     TextField("API endpoint", text: $endpointDraft).textFieldStyle(.roundedBorder)
                     Button("Save Endpoint") {
@@ -166,16 +329,30 @@ private struct ProviderWorkspaceContent: View {
                     SecureField("API key", text: $keyDraft).textFieldStyle(.roundedBorder)
                     Button("Save Key") {
                         let saved = vm.saveBrowserKey(keyDraft, selection: browsing)
+                        refreshCredentialPresence()
                         if saved { keyDraft = "" }
                         message = saved ? "Key saved." : "Key was not saved. Check its format and try again."
                         Task { await vm.refreshBrowser(browsing, force: true) }
                     }.disabled(keyDraft.isEmpty)
                 }
                 HStack {
-                    if vm.browserHasKey(browsing) { Button("Remove Key", role: .destructive) { confirmDeleteKey = true } }
+                    if hasKey(browsing) { Button("Remove Key", role: .destructive) { confirmDeleteKey = true } }
                     if case .custom = browsing { Button("Remove Provider", role: .destructive) { confirmDeleteProvider = true } }
-                    if case .builtIn(let provider) = browsing, let url = vm.apiKeyPageURL(for: provider) {
-                        Link("Get an API key", destination: url)
+                    if case .builtIn(let provider) = browsing,
+                       let url = provider.apiKeyPageURL(apiBaseURL: URL(string: endpointDraft)) {
+                        Link(provider == .qwen && QwenAPIService(apiBaseURL: URL(string: endpointDraft)).isTokenPlan
+                             ? "Get a Token Plan key" : "Get an API key", destination: url)
+                    }
+                    if browsing == .builtIn(.qwen), QwenAPIService(apiBaseURL: URL(string: endpointDraft)).isTokenPlan {
+                        Link("Token Plan setup", destination: URL(string: "https://www.alibabacloud.com/help/en/model-studio/token-plan-team-quickstart")!)
+                    }
+                }
+                if case .builtIn(let provider) = browsing {
+                    if provider != .qwen, let hint = provider.apiKeyRegionHint(apiBaseURL: URL(string: endpointDraft)) {
+                        Text(hint).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    if provider.isLocal {
+                        Text(vm.localProviderSetupHint(for: provider)).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                 }
                 if case .builtIn(let provider) = browsing, provider.isMiniMax {
@@ -266,11 +443,27 @@ private struct ProviderWorkspaceContent: View {
                 Spacer()
                 VStack(alignment: .trailing) {
                     Button("Use for Xcode") { vm.useBrowserModel(model, selection: browsing) }
+                    Button("Test Direct Response") {
+                        rowTestModelID = model.id
+                        let selection = browsing
+                        Task { await vm.testBrowserConnection(selection, model: model.id) }
+                    }
+                    .help("Test only this direct provider endpoint. Use Test RepoGPS Route to check session compatibility. Provider quota may apply.")
+                    .accessibilityLabel("Test response from \(model.id)")
+                    .disabled(checks.running.contains(identity) || (vm.browserRequiresKey(browsing) && !hasKey(browsing)))
                     Button(compared.contains(where: { $0.id == browsing.id + "/" + model.id }) ? "Remove comparison" : "Compare") {
                         let item = ComparedModel(provider: browsing, providerTitle: vm.browserTitle(browsing), model: model)
                         if compared.contains(where: { $0.id == item.id }) { compared.removeAll { $0.id == item.id } }
                         else if compared.count < 3 { compared.append(item) }
                     }.disabled(compared.count == 3 && !compared.contains(where: { $0.id == browsing.id + "/" + model.id }))
+                }
+            }
+            if rowTestModelID == model.id {
+                if checks.running.contains(identity) {
+                    ProgressView("Testing response…").controlSize(.small)
+                } else if let result = checks.results[identity] {
+                    Label(result.message, systemImage: result.succeeded ? "checkmark.circle" : "exclamationmark.triangle")
+                        .font(.caption).textSelection(.enabled)
                 }
             }
         }.padding(.vertical, 12)

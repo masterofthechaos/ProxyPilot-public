@@ -12,12 +12,13 @@ public struct RequestAttribution: Sendable, Codable, Equatable {
     }
 
     public static func validated(client: String?, sessionID: String?, role: String? = nil) -> Self? {
-        guard client?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "repogps",
+        let normalizedClient = client?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        guard ["repogps", "xcode-agent", "epiphyte"].contains(normalizedClient),
               let rawSessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines),
               let uuid = UUID(uuidString: rawSessionID) else { return nil }
         let normalizedRole = role?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "lead"
         guard ["lead", "navigator"].contains(normalizedRole) else { return nil }
-        return .init(client: "repogps", sessionID: uuid.uuidString.lowercased(), role: normalizedRole)
+        return .init(client: normalizedClient, sessionID: uuid.uuidString.lowercased(), role: normalizedRole)
     }
 
     public static func validated(headers: [String: String]) -> Self? {

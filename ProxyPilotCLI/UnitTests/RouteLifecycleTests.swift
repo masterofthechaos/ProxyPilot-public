@@ -8,6 +8,20 @@ import Testing
 @testable import proxypilot
 
 struct RouteLifecycleTests {
+    @Test func epiphyteRouteIsExplicitAndSharedRouteDefaultsRemainCompatible() throws {
+        let legacy = try RouteStatusCommand.parse(["--json"])
+        #expect(legacy.client == "repogps")
+        let epi = try RouteStatusCommand.parse(["--client", "epiphyte", "--json"])
+        #expect(epi.client == "epiphyte")
+        let save = try RouteSetCommand.parse(["--client", "epiphyte", "--provider", "openai", "--model", "fixture", "--json"])
+        #expect(save.client == "epiphyte")
+    }
+    @Test func unknownRouteClientIsRejectedBeforeProbingOrMigration() async throws {
+        do {
+            try await RouteStatusReporter.run(json: true, client: "unknown")
+            Issue.record("Unknown client was accepted")
+        } catch { #expect(String(describing: error).contains("Unknown route client")) }
+    }
     @Test func routeLockDescriptorIsCloseOnExec() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -82,7 +82,7 @@ enum CLIStartModelResolver {
 
     private static func normalizedBaseURL(_ upstreamURL: String?, provider: UpstreamProvider) -> String {
         let trimmed = upstreamURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? provider.defaultAPIBaseURL : trimmed
+        return trimmed.isEmpty ? provider.preferredAPIBaseURL : trimmed
     }
 
     private static func isSafeLocalDiscoveryURL(_ baseURL: String) -> Bool {

@@ -20,6 +20,8 @@ Replace `com.yourname` with your own reverse-domain identifier (e.g. `com.janedo
 | 47 | `PRODUCT_BUNDLE_IDENTIFIER` | `com.yourname.ProxyPilot` | `com.<you>.ProxyPilot` |
 | 60 | `PRODUCT_BUNDLE_IDENTIFIER` | `com.yourname.ProxyPilotTests` | `com.<you>.ProxyPilotTests` |
 
+Also replace the matching `com.yourname.ProxyPilot` values in `ProxyPilot/Services/PortOwnerResolver.swift`, `ProxyPilotTests/PortOwnerResolverTests.swift`, and `ProxyPilotCore/Sources/ProxyPilotCore/Models/UpstreamProvider.swift`. The shared provider preferences must use your app bundle identifier so the GUI and CLI read the same saved endpoint.
+
 After editing, regenerate the Xcode project:
 
 ```bash

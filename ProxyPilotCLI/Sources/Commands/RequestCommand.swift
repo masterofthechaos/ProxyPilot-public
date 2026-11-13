@@ -18,6 +18,8 @@ struct RequestCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Explicit upstream base URL (HTTPS or loopback HTTP).") var url: String?
     @Option(name: .long) var sessionId: String
     @Option(name: .long) var role: String = "navigator"
+    @Option(name: .long, help: "Attributed client: repogps, xcode-agent, or epiphyte.") var client: String = "repogps"
+    @Option(name: .long, help: "Request timeout in seconds.") var timeoutSeconds: Double = 45
     @Option(name: .long) var maxOutputTokens: Int = 2_048
     @Flag(name: .long) var json = false
 
@@ -28,12 +30,15 @@ struct RequestCommand: AsyncParsableCommand {
             return try fail("E001", "Unknown provider: \(provider)")
         }
         guard let attribution = RequestAttribution.validated(
-            client: "repogps", sessionID: sessionId, role: role
+            client: client, sessionID: sessionId, role: role
         ) else {
-            return try fail("E034", "Request requires a valid RepoGPS session UUID and role lead|navigator")
+            return try fail("E034", "Request requires a known client, valid session UUID, and role lead|navigator")
         }
         guard (128...16_384).contains(maxOutputTokens) else {
             return try fail("E034", "--max-output-tokens must be between 128 and 16384")
+        }
+        guard timeoutSeconds.isFinite, timeoutSeconds > 0 else {
+            return try fail("E034", "--timeout-seconds must be a finite positive number")
         }
         if let url {
             guard let components = URLComponents(string: url),
@@ -66,6 +71,11 @@ struct RequestCommand: AsyncParsableCommand {
             upstreamAPIKey: apiKey
         ) ? try LocalProxyCredential.resolveOrCreate(using: secrets) : nil
 
+        // Independent Epiphyte requests do not own the shared listener. Publish
+        // only their actual process-held lifetime for the GUI's client badge.
+        let activityLease = attribution.client == "epiphyte"
+            ? try EpiphyteRequestLease(.init(sessionID: attribution.sessionID, provider: provider, model: model)) : nil
+        defer { withExtendedLifetime(activityLease) {} }
         let stats = SessionStats(
             sessionReportURL: SessionReportStore.defaultURL,
             sessionSource: attribution.client,
@@ -74,7 +84,7 @@ struct RequestCommand: AsyncParsableCommand {
         let config = ProxyConfiguration(
             port: 0,
             upstreamProvider: upstream,
-            upstreamAPIBaseURL: url,
+            upstreamAPIBaseURL: CLIProxyRuntime.upstreamBaseURL(provider: upstream, override: url),
             upstreamAPIKey: apiKey,
             masterKey: localProxyCredential,
             allowedModels: [model],
@@ -102,7 +112,7 @@ struct RequestCommand: AsyncParsableCommand {
         let body = try JSONSerialization.data(withJSONObject: payload)
         var request = URLRequest(
             url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!,
-            timeoutInterval: 45
+            timeoutInterval: timeoutSeconds
         )
         request.httpMethod = "POST"
         request.httpBody = body
@@ -118,8 +128,8 @@ struct RequestCommand: AsyncParsableCommand {
         let response: URLResponse
         do {
             let configuration = URLSessionConfiguration.ephemeral
-            configuration.timeoutIntervalForRequest = 45
-            configuration.timeoutIntervalForResource = 45
+            configuration.timeoutIntervalForRequest = timeoutSeconds
+            configuration.timeoutIntervalForResource = timeoutSeconds
             let session = URLSession(configuration: configuration)
             defer { session.invalidateAndCancel() }
             (responseData, response) = try await session.data(for: request)
@@ -135,13 +145,11 @@ struct RequestCommand: AsyncParsableCommand {
         }
 
         let returnedModel = result["model"] as? String
-        let choices = result["choices"] as? [[String: Any]]
-        let message = choices?.first?["message"] as? [String: Any]
-        let output = message?["content"] as? String
-        guard let output else {
+        guard let reply = try? IndependentRequestAssistantReply(result: result) else {
             try? await server.stop()
-            return try fail("E005", "Independent request returned no text content")
+            return try fail("E005", "Independent request returned no assistant content or tool calls")
         }
+        let output = reply.output
         let usage = result["usage"] as? [String: Any] ?? [:]
         let promptTokens = usage["prompt_tokens"] as? Int
         let completionTokens = usage["completion_tokens"] as? Int
@@ -155,6 +163,10 @@ struct RequestCommand: AsyncParsableCommand {
             command: "request",
             data: RequestPayload(
                 output: output,
+                messageJSON: reply.messageJSON,
+                finishReason: reply.finishReason,
+                client: attribution.client,
+                sessionID: attribution.sessionID,
                 provider: provider,
                 requestedModel: model,
                 returnedModel: returnedModel,
@@ -166,7 +178,7 @@ struct RequestCommand: AsyncParsableCommand {
                 costProvenance: providerCost != nil ? "provider_reported" : (estimated != nil ? "provider_known_catalog_estimate" : "unavailable"),
                 runtime: "ephemeral_loopback"
             ),
-            humanMessage: output,
+            humanMessage: output ?? "Assistant returned tool calls",
             json: json
         )
         try await server.stop()
@@ -179,7 +191,11 @@ struct RequestCommand: AsyncParsableCommand {
 }
 
 private struct RequestPayload: Encodable {
-    let output: String
+    let output: String?
+    let messageJSON: String
+    let finishReason: String?
+    let client: String
+    let sessionID: String
     let provider: String
     let requestedModel: String
     let returnedModel: String?
@@ -192,7 +208,10 @@ private struct RequestPayload: Encodable {
     let runtime: String
 
     enum CodingKeys: String, CodingKey {
-        case output, provider, role, runtime
+        case output, provider, role, runtime, client
+        case sessionID = "session_id"
+        case messageJSON = "message_json"
+        case finishReason = "finish_reason"
         case requestedModel = "requested_model"
         case returnedModel = "returned_model"
         case promptTokens = "prompt_tokens"
@@ -200,5 +219,26 @@ private struct RequestPayload: Encodable {
         case providerReportedCostUSD = "provider_reported_cost_usd"
         case estimatedCostUSD = "estimated_cost_usd"
         case costProvenance = "cost_provenance"
+    }
+}
+
+
+/// Preserve the complete assistant message (including provider-required opaque fields).
+/// A tool response must have tool calls and the corresponding stop reason.
+struct IndependentRequestAssistantReply {
+    let output: String?
+    let messageJSON: String
+    let finishReason: String
+    init(result: [String: Any]) throws {
+        guard let choices = result["choices"] as? [[String: Any]],
+              let first = choices.first, let message = first["message"] as? [String: Any],
+              message["role"] as? String == "assistant",
+              let finish = first["finish_reason"] as? String else { throw ValidationError("Invalid assistant response") }
+        let tools = message["tool_calls"] as? [[String: Any]] ?? []
+        guard (finish == "tool_calls") == !tools.isEmpty,
+              message["content"] is String || !tools.isEmpty else { throw ValidationError("Inconsistent assistant response") }
+        output = message["content"] as? String
+        finishReason = finish
+        messageJSON = String(decoding: try JSONSerialization.data(withJSONObject: message, options: [.sortedKeys]), as: UTF8.self)
     }
 }

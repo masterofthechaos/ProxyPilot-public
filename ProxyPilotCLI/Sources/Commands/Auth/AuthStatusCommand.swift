@@ -209,7 +209,7 @@ struct AuthStatusCommand: AsyncParsableCommand {
         do {
             let models = try await ModelDiscovery.fetchModels(
                 provider: provider,
-                baseURL: provider.defaultAPIBaseURL,
+                baseURL: provider.preferredAPIBaseURL,
                 apiKey: apiKey
             )
             return AuthVerificationSupport.outcome(

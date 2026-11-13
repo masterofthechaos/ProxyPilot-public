@@ -166,6 +166,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         RequestAttributionContext.$current.withValue(attribution) {
             PromptCacheRequestContext.$current.withValue(PromptCacheRequestContext()) {
                 switch (head.method, path) {
+                case (.GET, "/v1/proxypilot/route"):
+                    handleRouteIdentity(context: context)
                 case (.GET, "/v1/models"), (.GET, "/models"):
                     handleModels(context: context)
                 case (.POST, "/v1/chat/completions"), (.POST, "/chat/completions"):
@@ -205,6 +207,20 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return false
     }
 
+    /// Protected local proof of the immutable configuration held by this process.
+    private func handleRouteIdentity(context: ChannelHandlerContext) {
+        var endpoint = URLComponents(string: config.upstreamAPIBaseURL)
+        endpoint?.user = nil; endpoint?.password = nil; endpoint?.query = nil; endpoint?.fragment = nil
+        let object: [String: Any] = ["provider": config.upstreamProvider.rawValue,
+            "model": config.preferredAnthropicUpstreamModel, "endpoint": endpoint?.string ?? "",
+            "session_id": config.sessionID]
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else {
+            sendErrorResponse(context: context, status: .internalServerError, message: "Route identity unavailable")
+            return
+        }
+        sendJSONResponse(context: context, status: .ok, json: String(decoding: data, as: UTF8.self))
+    }
+
     // MARK: - Models Endpoint
 
     private func handleModels(context: ChannelHandlerContext) {
@@ -220,6 +236,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let responseDict: [String: Any] = [
             "object": "list",
+            LocalProxyCredential.authenticationMetadataKey: config.requiresAuthForProtectedRoutes ? "required" : "none",
             "data": modelEntries
         ]
 
