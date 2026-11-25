@@ -19,7 +19,6 @@ struct ContentView: View {
     @State var diyCommandsCopied: Bool = false
     @AppStorage("proxypilot.preflightExpanded") var preflightExpanded: Bool = true
     @State var showNuclearResetConfirm: Bool = false
-    @State var confirmToolbarRestart = false
     @State var settingsCategory: SettingsCategory = .general
     @State var selectedSection: SettingsSection = .home
     @State var proxySectionFocus: ProxySectionFocus?
@@ -176,9 +175,6 @@ struct ContentView: View {
         } message: {
             Text("ProxyPilot is about to modify system files on your behalf. Please note that while these changes are reversible, quitting or uninstalling ProxyPilot will not revert them automatically.")
         }
-        .confirmationDialog("Apply selection and restart?", isPresented: $confirmToolbarRestart) {
-            Button("Apply & Restart", role: .destructive) { Task { await vm.restartProxy() } }
-        } message: { Text("Requests using this proxy will be interrupted, including other clients.") }
         .frame(minWidth: 680, minHeight: 620)
         .background {
             WindowWidthReader { width in
@@ -493,31 +489,16 @@ struct ContentView: View {
             }
 
             if selectedSection != .home {
-            Button {
-                Task { await vm.startProxy() }
-            } label: {
-                Label("Start", systemImage: "play.fill")
-            }
-            .disabled(!vm.canStartProxy)
-            .tint(.green)
-            .help("Start ProxyPilot local proxy")
-
-            Button {
-                Task { await vm.stopProxy() }
-            } label: {
-                Label("Stop", systemImage: "stop.fill")
-            }
-            .disabled(!vm.canStopProxy)
-            .tint(.red)
-            .help("Stop the running ProxyPilot proxy")
-
-            Button {
-                confirmToolbarRestart = true
-            } label: {
-                Label("Apply & Restart", systemImage: "arrow.clockwise")
-            }
-            .disabled(!vm.canRestartProxy)
-            .help("Apply the selected configuration and restart the proxy")
+                // The menu's action set and labels for whatever is serving.
+                ForEach(vm.menuBarProxyOwnership.actions(isStoppingCLIProxy: vm.isStoppingCLIProxy), id: \.self) { action in
+                    Button {
+                        ProxyControlActionRunner.run(action, vm: vm)
+                    } label: {
+                        Label(action.title, systemImage: action.systemImage)
+                    }
+                    .tint(action == .startXcodeProxy ? .green : (action.isDestructive ? .red : nil))
+                    .help(action.title)
+                }
             }
         }
 
@@ -574,6 +555,7 @@ struct ContentView: View {
                 Divider()
                 Button("Export Diagnostics") { vm.exportDiagnostics() }
                 Button("Copy Support Summary") { vm.copySupportSummaryToPasteboard() }
+                Button("Get Diagnostic Collector") { vm.openDiagnosticCollectorPage() }
             } label: {
                 Label("Help", systemImage: "questionmark.circle")
             }

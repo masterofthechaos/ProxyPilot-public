@@ -21,15 +21,98 @@ struct RequestAnalyticsMetadata: Equatable, Sendable {
 }
 
 @MainActor
+final class ProxyIdleSleepProtection {
+    private let now: () -> ContinuousClock.Instant
+    private let setAssertion: (Bool) -> Void
+    private var requests: Set<UUID> = []
+    private var lastCompletion: ContinuousClock.Instant?
+    private var expiryTask: Task<Void, Never>?
+    private var asserted = false
+    var enabled = false { didSet { refresh() } }
+    var running = false {
+        didSet {
+            if !running {
+                requests.removeAll()
+                lastCompletion = nil
+            }
+            refresh()
+        }
+    }
+
+    init(now: @escaping () -> ContinuousClock.Instant = { ContinuousClock.now },
+         setAssertion: @escaping (Bool) -> Void) {
+        self.now = now
+        self.setAssertion = setAssertion
+    }
+
+    convenience init() {
+        var activity: NSObjectProtocol?
+        self.init { active in
+            if active {
+                activity = ProcessInfo.processInfo.beginActivity(
+                    options: [.idleSystemSleepDisabled], reason: "ProxyPilot model requests"
+                )
+            } else if let token = activity {
+                ProcessInfo.processInfo.endActivity(token)
+                activity = nil
+            }
+        }
+    }
+
+    func begin(_ id: UUID) {
+        guard running else { return }
+        requests.insert(id)
+        refresh()
+    }
+
+    func end(_ id: UUID, completed: Bool = false) {
+        guard requests.remove(id) != nil else { return }
+        if completed { lastCompletion = now() }
+        refresh()
+    }
+
+    func refresh() {
+        expiryTask?.cancel()
+        expiryTask = nil
+        let remaining = lastCompletion.map { now().duration(to: $0.advanced(by: .seconds(10_800))) } ?? .zero
+        let shouldAssert = enabled && running && (!requests.isEmpty || remaining > .zero)
+        if asserted != shouldAssert {
+            asserted = shouldAssert
+            setAssertion(shouldAssert)
+        }
+        if shouldAssert && requests.isEmpty {
+            expiryTask = Task { [weak self] in
+                do { try await Task.sleep(for: remaining) } catch { return }
+                self?.refresh()
+            }
+        }
+    }
+}
+
+/// An explained upstream failure, ready to show.
+struct UpstreamFailureNotice: Equatable, Sendable {
+    let failure: UpstreamFailure
+    /// Names the cause and the fix. May include sanitized provider wording.
+    let message: String
+    let at: Date
+}
+
+@MainActor
 final class LocalProxyState: ObservableObject {
     nonisolated init() {}
-    @Published var isRunning: Bool = false
+    lazy var idleSleepProtection = ProxyIdleSleepProtection()
+    @Published var isRunning: Bool = false {
+        didSet { idleSleepProtection.running = isRunning }
+    }
     @Published var lastStatus: String = ""
     @Published var sessionRequestCount: Int = 0
     @Published private(set) var pendingRequestCount: Int = 0
     @Published private(set) var failedRequestCount: Int = 0
     @Published private(set) var activeModels: Set<String> = []
     @Published private(set) var lastFailureAt: Date?
+    /// The most recent upstream failure ProxyPilot could explain. Cleared by
+    /// the next request that completes.
+    @Published private(set) var lastUpstreamFailure: UpstreamFailureNotice?
     @Published var lastModelSeen: String = ""
     @Published var lastUpstreamModelUsed: String = ""
     @Published var activeXcodeAgentModel: String = ""
@@ -52,7 +135,12 @@ final class LocalProxyState: ObservableObject {
         activeRequestAnalytics.removeAll()
         activeModels.removeAll()
         lastFailureAt = nil
+        lastUpstreamFailure = nil
         lastContextCompaction = nil
+    }
+
+    func noteUpstreamFailure(_ notice: UpstreamFailureNotice) {
+        lastUpstreamFailure = notice
     }
 
     func beginRequest(
@@ -61,6 +149,7 @@ final class LocalProxyState: ObservableObject {
         analyticsMetadata: RequestAnalyticsMetadata? = nil,
         clearsUpstreamModelAttribution: Bool = false
     ) {
+        idleSleepProtection.begin(id)
         if clearsUpstreamModelAttribution {
             lastUpstreamModelUsed = ""
         }
@@ -84,7 +173,9 @@ final class LocalProxyState: ObservableObject {
 
     @discardableResult
     func completeRequest(id: UUID) -> Bool {
+        idleSleepProtection.end(id, completed: true)
         guard activeRequestIDs.remove(id) != nil else { return false }
+        lastUpstreamFailure = nil
         activeRequestModels.removeValue(forKey: id)
         activeRequestAnalytics.removeValue(forKey: id)
         pendingRequestCount = activeRequestIDs.count
@@ -94,6 +185,7 @@ final class LocalProxyState: ObservableObject {
 
     @discardableResult
     func failRequest(id: UUID) -> Bool {
+        idleSleepProtection.end(id)
         guard activeRequestIDs.remove(id) != nil else { return false }
         activeRequestModels.removeValue(forKey: id)
         activeRequestAnalytics.removeValue(forKey: id)
@@ -121,15 +213,10 @@ final class LocalProxyState: ObservableObject {
         activeRequestAnalytics[id]
     }
 
-    func importCompletedRequests(count: Int, lastModel: String?) {
-        sessionRequestCount = max(0, count)
-        pendingRequestCount = 0
-        failedRequestCount = 0
-        activeRequestIDs.removeAll()
-        activeRequestModels.removeAll()
-        activeModels.removeAll()
-        lastFailureAt = nil
-        if let lastModel, !lastModel.isEmpty {
+    func addImportedRequests(count: Int, lastModel: String?) {
+        guard count > 0 else { return }
+        sessionRequestCount += count
+        if activeRequestIDs.isEmpty, let lastModel, !lastModel.isEmpty {
             lastModelSeen = lastModel
         }
     }
@@ -232,6 +319,21 @@ final class LocalProxyServer: @unchecked Sendable {
             return lowered == "localhost" || lowered == "127.0.0.1" || lowered == "::1"
         }
 
+        /// Whether the upstream runs on this machine's hardware. Decided in
+        /// Core so both engines agree.
+        var isLocalUpstream: Bool {
+            UpstreamWaitPolicy.isLocal(provider: upstreamProvider, baseURL: upstreamAPIBase.absoluteString)
+        }
+
+        /// The wait limits this engine applies to the configured provider.
+        var waitPolicy: UpstreamWaitPolicy { isLocalUpstream ? .local : .appCloud }
+
+        /// How long the upstream may go without sending data. Buffered chat
+        /// passes a shorter cloud limit.
+        func upstreamIdleTimeout(cloudDefault: TimeInterval = UpstreamWaitPolicy.appCloud.idle) -> TimeInterval {
+            isLocalUpstream ? waitPolicy.idle : cloudDefault
+        }
+
         var requiresUpstreamAPIKey: Bool {
             upstreamProvider.requiresAPIKey && !isLocalhostUpstream
         }
@@ -257,8 +359,9 @@ final class LocalProxyServer: @unchecked Sendable {
     let reportCard = SessionReportCard()
     private let sessionReportURL: URL?
 
-    init(sessionReportURL: URL? = nil) {
+    init(sessionReportURL: URL? = nil, logURL: URL = URL(fileURLWithPath: "/tmp/proxypilot_builtin_proxy.log")) {
         self.sessionReportURL = sessionReportURL
+        self.logURL = logURL
     }
 
     static let maxHeaderBytes = 64 * 1024
@@ -267,7 +370,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "ProxyPilot.LocalProxyServer")
-    private let logURL = URL(fileURLWithPath: "/tmp/proxypilot_builtin_proxy.log")
+    private let logURL: URL
     private let toolchainLogURL = URL(fileURLWithPath: "/tmp/proxypilot_toolchain.log")
     private let logMaxValueLength = 180
     private let logMaxArgsLength = 120
@@ -287,6 +390,7 @@ final class LocalProxyServer: @unchecked Sendable {
             if Task.isCancelled {
                 await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
             }
+            await MainActor.run { self.state.idleSleepProtection.end(trackingID) }
         }
         requestTasks[key] = (connection, task)
         connectionCountLock.unlock()
@@ -803,7 +907,7 @@ final class LocalProxyServer: @unchecked Sendable {
         applyUpstreamAuth(config: config, request: &request)
         request.timeoutInterval = TutorRequestAdapter.upstreamTimeout(
             envelopeHeader: tutorEnvelope, attribution: RequestAttributionContext.current,
-            provider: config.upstreamProvider) ?? 60
+            provider: config.upstreamProvider) ?? config.upstreamIdleTimeout(cloudDefault: 60)
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -856,20 +960,30 @@ final class LocalProxyServer: @unchecked Sendable {
                 )
                 await recordSessionReport(record, config: config, trackingID: trackingID)
             } else {
-                await failTrackedRequest(id: trackingID, statusCode: normalized.statusCode)
+                await failUpstream(
+                    UpstreamFailureClassifier.classify(httpStatus: normalized.statusCode, body: text),
+                    statusCode: normalized.statusCode, path: "/v1/chat/completions", wasStreaming: false,
+                    model: requestModel, requestedModel: requestModel, startedAt: requestStartTime,
+                    config: config, trackingID: trackingID
+                )
             }
         } catch {
             if Task.isCancelled {
                 await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
                 return
             }
+            let report = UpstreamFailureClassifier.classify(error: error)
             respond(
                 connection: connection,
-                status: 502,
-                body: #"{"error":{"message":"Upstream request failed","type":"server_error"}}"#,
+                status: report.clientStatus,
+                body: ProxyErrorResponse.openAI(message: upstreamFailureMessage(report, config: config), type: "server_error"),
                 contentType: "application/json"
             )
-            await failTrackedRequest(id: trackingID, error: error)
+            await failUpstream(
+                report, error: error, path: "/v1/chat/completions", wasStreaming: false,
+                model: requestModel, requestedModel: requestModel, startedAt: requestStartTime,
+                config: config, trackingID: trackingID
+            )
         }
     }
 
@@ -928,22 +1042,85 @@ final class LocalProxyServer: @unchecked Sendable {
         applyUpstreamAuth(config: config, request: &request)
         request.timeoutInterval = TutorRequestAdapter.upstreamTimeout(
             envelopeHeader: tutorEnvelope, attribution: RequestAttributionContext.current,
-            provider: config.upstreamProvider) ?? 120
+            provider: config.upstreamProvider) ?? config.upstreamIdleTimeout()
+
+        var lastSeenPromptTokens = 0
+        var lastSeenCompletionTokens = 0
+        var lastSeenPromptCacheHitTokens: Int?
+        var lastSeenPromptCacheMissTokens: Int?
+        var lastSeenPromptCacheWriteTokens: Int?
+        var lastSeenModel = requestModel
+        var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
+        var streamingNormalizationContext = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
+        var tutorAccounting = TutorResponseAccounting()
+        let tracksTutor = TutorRequestAdapter.accepts(envelopeHeader: tutorEnvelope,
+            attribution: RequestAttributionContext.current, provider: config.upstreamProvider)
+        var lastSeenProviderCostUSD: Double?
+        var completion = OpenAIChatStreamCompletion()
+        var streamHeadersSent = false
+        let trace = AgentStreamTrace(engine: .gui, attribution: RequestAttributionContext.current, port: Int(config.port))
+        var lastTraceActivity = Date.distantPast
+        await trace?.record("stream_started")
+
+        // Journals what the stream delivered, labelled with how it ended.
+        func recordStreamedChat(outcome: StreamOutcome, failure: UpstreamFailureReport? = nil) async {
+            let failure = outcome == .completed ? nil : (failure ?? completion.upstreamFailure)
+            if let failure { await noteUpstreamFailure(failure, config: config) }
+            let record = SessionReportCard.RequestRecord(
+                timestamp: requestStartTime,
+                model: lastSeenModel,
+                promptTokens: lastSeenPromptTokens,
+                completionTokens: lastSeenCompletionTokens,
+                promptCacheHitTokens: lastSeenPromptCacheHitTokens,
+                promptCacheMissTokens: lastSeenPromptCacheMissTokens,
+                promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
+                durationSeconds: Date().timeIntervalSince(requestStartTime),
+                path: "/v1/chat/completions",
+                wasStreaming: true,
+                requestedModel: requestModel,
+                providerReportedCostUSD: lastSeenProviderCostUSD,
+                serverToolCalls: tracksTutor ? tutorAccounting.receipts : nil,
+                streamOutcome: outcome.rawValue,
+                upstreamFailure: failure?.failure
+            )
+            await recordSessionReport(record, config: config, trackingID: trackingID)
+            await recordInputOutputLog(
+                inputBody: body,
+                outputBody: outputCapture.capturedOutput,
+                outputTruncated: outputCapture.isTruncated,
+                model: lastSeenModel,
+                path: "/v1/chat/completions",
+                wasStreaming: true,
+                statusCode: 200,
+                startedAt: requestStartTime,
+                streamOutcome: outcome,
+                config: config
+            )
+        }
 
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
             try Task.checkCancellation()
             let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 502
+            await trace?.record("stream_headers")
 
             if httpStatus != 200 {
+                await trace?.record("stream_http_error")
                 var errorBody = ""
                 for try await line in bytes.lines { errorBody += line }
                 respond(connection: connection, status: httpStatus, body: errorBody, contentType: "application/json")
-                await failTrackedRequest(id: trackingID, statusCode: httpStatus)
+                await failUpstream(
+                    UpstreamFailureClassifier.classify(httpStatus: httpStatus, body: errorBody),
+                    statusCode: httpStatus, path: "/v1/chat/completions", wasStreaming: true,
+                    model: lastSeenModel, requestedModel: requestModel, startedAt: requestStartTime,
+                    config: config, trackingID: trackingID
+                )
                 return
             }
 
-            // Send SSE response headers
+            // Send SSE response headers. From here on an error can only be
+            // reported inside the stream: a second status line on this
+            // connection is not a valid response.
             let headers =
                 "HTTP/1.1 200 OK\r\n" +
                 "Date: \(HTTPDateFormatter.shared.string(from: Date()))\r\n" +
@@ -953,23 +1130,18 @@ final class LocalProxyServer: @unchecked Sendable {
                 "Connection: keep-alive\r\n" +
                 "\r\n"
             await sendData(Data(headers.utf8), on: connection)
-
-            // Stream lines from upstream to client
-            var lastSeenPromptTokens = 0
-            var lastSeenCompletionTokens = 0
-            var lastSeenPromptCacheHitTokens: Int?
-            var lastSeenPromptCacheMissTokens: Int?
-            var lastSeenPromptCacheWriteTokens: Int?
-            var lastSeenModel = requestModel
-            var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
-            var streamingNormalizationContext = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
-            var tutorAccounting = TutorResponseAccounting()
-            let tracksTutor = TutorRequestAdapter.accepts(envelopeHeader: tutorEnvelope,
-                attribution: RequestAttributionContext.current, provider: config.upstreamProvider)
-            var lastSeenProviderCostUSD: Double?
+            streamHeadersSent = true
 
             for try await line in bytes.lines {
                 try Task.checkCancellation()
+                let now = Date()
+                if now.timeIntervalSince(lastTraceActivity) >= 15 {
+                    await trace?.record(lastTraceActivity == .distantPast ? "stream_first_activity" : "stream_activity")
+                    lastTraceActivity = now
+                }
+                let wasComplete = completion.isComplete
+                completion.observe(line: line)
+                if !wasComplete && completion.isComplete { await trace?.record("stream_terminal") }
                 let normalizedLine = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
                     line,
                     provider: config.upstreamProvider,
@@ -999,83 +1171,69 @@ final class LocalProxyServer: @unchecked Sendable {
                 if normalizedLine == "data: [DONE]" {
                     // Send final newline and close
                     await sendData(Data("\n".utf8), on: connection)
-                    let record = SessionReportCard.RequestRecord(
-                        timestamp: requestStartTime,
-                        model: lastSeenModel,
-                        promptTokens: lastSeenPromptTokens,
-                        completionTokens: lastSeenCompletionTokens,
-                        promptCacheHitTokens: lastSeenPromptCacheHitTokens,
-                        promptCacheMissTokens: lastSeenPromptCacheMissTokens,
-                        promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
-                        durationSeconds: Date().timeIntervalSince(requestStartTime),
-                        path: "/v1/chat/completions",
-                        wasStreaming: true,
-                        requestedModel: requestModel,
-                        providerReportedCostUSD: lastSeenProviderCostUSD,
-                        serverToolCalls: tracksTutor ? tutorAccounting.receipts : nil
-                    )
-                    await recordSessionReport(record, config: config, trackingID: trackingID)
-                    await recordInputOutputLog(
-                        inputBody: body,
-                        outputBody: outputCapture.capturedOutput,
-                        outputTruncated: outputCapture.isTruncated,
-                        model: lastSeenModel,
-                        path: "/v1/chat/completions",
-                        wasStreaming: true,
-                        statusCode: 200,
-                        startedAt: requestStartTime,
-                        config: config
-                    )
-                    finishConnection(connection)
-                    return
+                    break
                 }
             }
 
-            // If upstream closes without [DONE], record what we have
-            let record = SessionReportCard.RequestRecord(
-                timestamp: requestStartTime,
-                model: lastSeenModel,
-                promptTokens: lastSeenPromptTokens,
-                completionTokens: lastSeenCompletionTokens,
-                promptCacheHitTokens: lastSeenPromptCacheHitTokens,
-                promptCacheMissTokens: lastSeenPromptCacheMissTokens,
-                promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
-                durationSeconds: Date().timeIntervalSince(requestStartTime),
-                path: "/v1/chat/completions",
-                wasStreaming: true,
-                requestedModel: requestModel,
-                providerReportedCostUSD: lastSeenProviderCostUSD,
-                serverToolCalls: tracksTutor ? tutorAccounting.receipts : nil
-            )
-            await recordSessionReport(record, config: config, trackingID: trackingID)
-            await recordInputOutputLog(
-                inputBody: body,
-                outputBody: outputCapture.capturedOutput,
-                outputTruncated: outputCapture.isTruncated,
-                model: lastSeenModel,
-                path: "/v1/chat/completions",
-                wasStreaming: true,
-                statusCode: 200,
-                startedAt: requestStartTime,
-                config: config
-            )
+            // Either terminal signal completes the stream. A clean end
+            // without one is a cut-off, not a success: say so in-band.
+            let outcome = completion.outcomeAtEndOfStream
+            await trace?.record("stream_\(outcome.rawValue)")
+            if completion.needsInterruptionEvent {
+                let event = StreamErrorEvent.openAIChat(
+                    message: StreamErrorEvent.interruptedMessage,
+                    code: StreamErrorEvent.interruptedCode
+                )
+                outputCapture.append(event)
+                await sendData(event, on: connection)
+            }
+            await recordStreamedChat(outcome: outcome)
             finishConnection(connection)
         } catch {
             if Task.isCancelled {
+                await trace?.record("stream_cancelled")
                 await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
                 return
             }
-            respond(
-                connection: connection,
-                status: 502,
-                body: #"{"error":{"message":"Upstream streaming failed","type":"server_error"}}"#,
-                contentType: "application/json"
+            await trace?.record(completion.isComplete ? "stream_completed" : AgentStreamTrace.failureEvent(for: error))
+            guard streamHeadersSent else {
+                let report = UpstreamFailureClassifier.classify(error: error)
+                respond(
+                    connection: connection,
+                    status: report.clientStatus,
+                    body: ProxyErrorResponse.openAI(message: upstreamFailureMessage(report, config: config), type: "server_error"),
+                    contentType: "application/json"
+                )
+                await failUpstream(
+                    report, error: error, path: "/v1/chat/completions", wasStreaming: true,
+                    model: lastSeenModel, requestedModel: requestModel, startedAt: requestStartTime,
+                    config: config, trackingID: trackingID
+                )
+                return
+            }
+            // The model may already have finished: a terminal signal followed
+            // by an abnormal close is still a complete response.
+            if completion.isComplete {
+                await recordStreamedChat(outcome: .completed)
+                finishConnection(connection)
+                return
+            }
+            // An upstream error event was already forwarded; don't add another.
+            if !completion.sawUpstreamError {
+                let event = StreamErrorEvent.openAIChat(
+                    message: StreamErrorEvent.upstreamFailureMessage(error),
+                    code: StreamErrorEvent.upstreamFailureCode
+                )
+                outputCapture.append(event)
+                await sendData(event, on: connection)
+            }
+            await recordStreamedChat(
+                outcome: .upstreamError,
+                failure: completion.upstreamFailure ?? UpstreamFailureClassifier.classify(error: error)
             )
-            await failTrackedRequest(id: trackingID, error: error)
+            finishConnection(connection)
         }
     }
-
-    // MARK: - POST /v1/messages (Anthropic API Translation)
 
     private func handleAnthropicMessages(body: Data, headers: [String: String], connection: NWConnection, config: Config, trackingID: UUID) async {
         let requestID = "req_\(UUID().uuidString.prefix(12).lowercased())"
@@ -1141,7 +1299,7 @@ final class LocalProxyServer: @unchecked Sendable {
             request.httpMethod = "POST"
             request.httpBody = passthroughData
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.timeoutInterval = 120
+            request.timeoutInterval = config.upstreamIdleTimeout()
 
             if isStreaming {
                 request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -1226,7 +1384,7 @@ final class LocalProxyServer: @unchecked Sendable {
         request.httpMethod = "POST"
         request.httpBody = openAIData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 120
+        request.timeoutInterval = config.upstreamIdleTimeout()
 
         if isStreaming {
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -1299,19 +1457,19 @@ final class LocalProxyServer: @unchecked Sendable {
             if httpStatus != 200 {
                 let errorText = String(decoding: data, as: UTF8.self)
                 recordXcodeAgentRequest(model: reportModel, status: httpStatus)
+                let report = UpstreamFailureClassifier.classify(httpStatus: httpStatus, body: errorText)
                 respond(
                     connection: connection,
                     status: httpStatus,
                     body: AnthropicTranslator.errorJSON(
-                        message: upstreamErrorMessage(
-                            statusCode: httpStatus,
-                            body: errorText,
-                            provider: translationContext.upstreamProvider
-                        )
+                        message: upstreamFailureMessage(report, config: config, rawBody: errorText)
                     ),
                     contentType: "application/json"
                 )
-                await failTrackedRequest(id: trackingID, statusCode: httpStatus)
+                await failUpstream(
+                    report, statusCode: httpStatus, path: "/v1/messages", wasStreaming: false,
+                    model: reportModel, startedAt: requestStartTime, config: config, trackingID: trackingID
+                )
                 return
             }
 
@@ -1378,14 +1536,18 @@ final class LocalProxyServer: @unchecked Sendable {
                 await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
                 return
             }
+            let report = UpstreamFailureClassifier.classify(error: error)
             respond(
                 connection: connection,
-                status: 502,
-                body: AnthropicTranslator.errorJSON(message: "Upstream request failed"),
+                status: report.clientStatus,
+                body: AnthropicTranslator.errorJSON(message: upstreamFailureMessage(report, config: config)),
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
-            await failTrackedRequest(id: trackingID, error: error)
+            await failUpstream(
+                report, error: error, path: "/v1/messages", wasStreaming: false,
+                model: reportModel, startedAt: requestStartTime, config: config, trackingID: trackingID
+            )
         }
     }
 
@@ -1401,6 +1563,7 @@ final class LocalProxyServer: @unchecked Sendable {
         config: Config
     ) async {
         let requestStartTime = Date()
+        var streamHeadersSent = false
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
             try Task.checkCancellation()
@@ -1410,23 +1573,24 @@ final class LocalProxyServer: @unchecked Sendable {
                 var errorBody = ""
                 for try await line in bytes.lines { errorBody += line }
                 recordXcodeAgentRequest(model: reportModel, status: httpStatus)
+                let report = UpstreamFailureClassifier.classify(httpStatus: httpStatus, body: errorBody)
                 respond(
                     connection: connection,
                     status: httpStatus,
                     body: AnthropicTranslator.errorJSON(
-                        message: upstreamErrorMessage(
-                            statusCode: httpStatus,
-                            body: errorBody,
-                            provider: config.upstreamProvider
-                        )
+                        message: upstreamFailureMessage(report, config: config, rawBody: errorBody)
                     ),
                     contentType: "application/json"
                 )
-                await failTrackedRequest(id: trackingID, statusCode: httpStatus)
+                await failUpstream(
+                    report, statusCode: httpStatus, path: "/v1/messages", wasStreaming: true,
+                    model: reportModel, startedAt: requestStartTime, config: config, trackingID: trackingID
+                )
                 return
             }
 
             await sendAnthropicSSEHeaders(on: connection)
+            streamHeadersSent = true
 
             var isFirstChunk = true
             let msgID = "msg_\(UUID().uuidString.prefix(24).lowercased())"
@@ -1440,6 +1604,15 @@ final class LocalProxyServer: @unchecked Sendable {
 
             for try await line in bytes.lines {
                 try Task.checkCancellation()
+                // A provider can answer 200 and then fail inside the stream.
+                // Report it in the client's stream; do not let it pass as an
+                // empty reply.
+                if let report = UpstreamFailureClassifier.classify(streamLine: line) {
+                    await failAnthropicStreamOnProviderError(
+                        report, connection: connection, reportModel: reportModel, trackingID: trackingID,
+                        startedAt: requestStartTime, config: config)
+                    return
+                }
                 guard line.hasPrefix("data: ") else { continue }
                 let payload = String(line.dropFirst(6))
 
@@ -1556,14 +1729,24 @@ final class LocalProxyServer: @unchecked Sendable {
                 await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
                 return
             }
+            if streamHeadersSent {
+                await failAnthropicStreamAfterHeaders(
+                    error: error, connection: connection, reportModel: reportModel, trackingID: trackingID,
+                    startedAt: requestStartTime, config: config)
+                return
+            }
+            let report = UpstreamFailureClassifier.classify(error: error)
             respond(
                 connection: connection,
-                status: 502,
-                body: AnthropicTranslator.errorJSON(message: "Upstream streaming failed"),
+                status: report.clientStatus,
+                body: AnthropicTranslator.errorJSON(message: upstreamFailureMessage(report, config: config)),
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
-            await failTrackedRequest(id: trackingID, error: error)
+            await failUpstream(
+                report, error: error, path: "/v1/messages", wasStreaming: true,
+                model: reportModel, startedAt: requestStartTime, config: config, trackingID: trackingID
+            )
         }
     }
 
@@ -1580,6 +1763,7 @@ final class LocalProxyServer: @unchecked Sendable {
         config: Config
     ) async {
         let requestStartTime = Date()
+        var streamHeadersSent = false
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
             try Task.checkCancellation()
@@ -1589,23 +1773,24 @@ final class LocalProxyServer: @unchecked Sendable {
                 var errorBody = ""
                 for try await line in bytes.lines { errorBody += line }
                 recordXcodeAgentRequest(model: reportModel, status: httpStatus)
+                let report = UpstreamFailureClassifier.classify(httpStatus: httpStatus, body: errorBody)
                 respond(
                     connection: connection,
                     status: httpStatus,
                     body: AnthropicTranslator.errorJSON(
-                        message: upstreamErrorMessage(
-                            statusCode: httpStatus,
-                            body: errorBody,
-                            provider: translationContext.upstreamProvider
-                        )
+                        message: upstreamFailureMessage(report, config: config, rawBody: errorBody)
                     ),
                     contentType: "application/json"
                 )
-                await failTrackedRequest(id: trackingID, statusCode: httpStatus)
+                await failUpstream(
+                    report, statusCode: httpStatus, path: "/v1/messages", wasStreaming: true,
+                    model: reportModel, startedAt: requestStartTime, config: config, trackingID: trackingID
+                )
                 return
             }
 
             await sendAnthropicSSEHeaders(on: connection)
+            streamHeadersSent = true
 
             var state = AnthropicStreamingState(
                 requestID: requestID,
@@ -1615,6 +1800,15 @@ final class LocalProxyServer: @unchecked Sendable {
 
             for try await line in bytes.lines {
                 try Task.checkCancellation()
+                // A provider can answer 200 and then fail inside the stream.
+                // Report it in the client's stream; do not let it pass as an
+                // empty reply.
+                if let report = UpstreamFailureClassifier.classify(streamLine: line) {
+                    await failAnthropicStreamOnProviderError(
+                        report, connection: connection, reportModel: reportModel, trackingID: trackingID,
+                        startedAt: requestStartTime, config: config)
+                    return
+                }
                 guard line.hasPrefix("data: ") else { continue }
                 let payload = String(line.dropFirst(6))
 
@@ -1679,14 +1873,24 @@ final class LocalProxyServer: @unchecked Sendable {
                 await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
                 return
             }
+            if streamHeadersSent {
+                await failAnthropicStreamAfterHeaders(
+                    error: error, connection: connection, reportModel: reportModel, trackingID: trackingID,
+                    startedAt: requestStartTime, config: config)
+                return
+            }
+            let report = UpstreamFailureClassifier.classify(error: error)
             respond(
                 connection: connection,
-                status: 502,
-                body: AnthropicTranslator.errorJSON(message: "Upstream streaming failed"),
+                status: report.clientStatus,
+                body: AnthropicTranslator.errorJSON(message: upstreamFailureMessage(report, config: config)),
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
-            await failTrackedRequest(id: trackingID, error: error)
+            await failUpstream(
+                report, error: error, path: "/v1/messages", wasStreaming: true,
+                model: reportModel, startedAt: requestStartTime, config: config, trackingID: trackingID
+            )
         }
     }
 
@@ -1734,7 +1938,11 @@ final class LocalProxyServer: @unchecked Sendable {
                 )
                 await recordSessionReport(record, config: config, trackingID: trackingID)
             } else {
-                await failTrackedRequest(id: trackingID, statusCode: validated.statusCode)
+                await failUpstream(
+                    UpstreamFailureClassifier.classify(httpStatus: validated.statusCode, body: text),
+                    statusCode: validated.statusCode, path: "/v1/messages", wasStreaming: false,
+                    model: responseModel, startedAt: requestStartTime, config: config, trackingID: trackingID
+                )
             }
             await recordInputOutputLog(
                 inputBody: inputBody,
@@ -1754,15 +1962,20 @@ final class LocalProxyServer: @unchecked Sendable {
                 await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
                 return
             }
-            appendLog("passthrough error: \(error.localizedDescription)")
+            let report = UpstreamFailureClassifier.classify(error: error)
+            // Name the endpoint this request went to, not the chat endpoint.
+            let endpoint = provider.anthropicPassthroughBaseURL(from: config.upstreamAPIBaseURL)
             respond(
                 connection: connection,
-                status: 502,
-                body: AnthropicTranslator.errorJSON(message: "Passthrough upstream error: \(error.localizedDescription)"),
+                status: report.clientStatus,
+                body: AnthropicTranslator.errorJSON(message: upstreamFailureMessage(report, config: config, endpoint: endpoint)),
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
-            await failTrackedRequest(id: trackingID, error: error)
+            await failUpstream(
+                report, error: error, path: "/v1/messages", wasStreaming: false,
+                model: reportModel, startedAt: requestStartTime, endpoint: endpoint, config: config, trackingID: trackingID
+            )
         }
     }
 
@@ -1784,6 +1997,7 @@ final class LocalProxyServer: @unchecked Sendable {
         var lastSeenPromptCacheHitTokens: Int?
         var lastSeenPromptCacheMissTokens: Int?
         var lastSeenPromptCacheWriteTokens: Int?
+        var streamHeadersSent = false
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: request)
             try Task.checkCancellation()
@@ -1795,7 +2009,11 @@ final class LocalProxyServer: @unchecked Sendable {
                 let text = String(decoding: errorData, as: UTF8.self)
                 respond(connection: connection, status: statusCode, body: text, contentType: "application/json")
                 recordXcodeAgentRequest(model: reportModel, status: statusCode)
-                await failTrackedRequest(id: trackingID, statusCode: statusCode)
+                await failUpstream(
+                    UpstreamFailureClassifier.classify(httpStatus: statusCode, body: text),
+                    statusCode: statusCode, path: "/v1/messages", wasStreaming: true,
+                    model: reportModel, startedAt: requestStartTime, config: config, trackingID: trackingID
+                )
                 return
             }
 
@@ -1809,6 +2027,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 "Connection: keep-alive\r\n" +
                 "\r\n"
             await sendData(Data(headers.utf8), on: connection)
+            streamHeadersSent = true
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
 
             for try await line in bytes.lines {
@@ -1867,19 +2086,117 @@ final class LocalProxyServer: @unchecked Sendable {
                 await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
                 return
             }
-            appendLog("passthrough streaming error: \(error.localizedDescription)")
+
+            if streamHeadersSent {
+                await failAnthropicStreamAfterHeaders(
+                    error: error, connection: connection, reportModel: reportModel, trackingID: trackingID,
+                    startedAt: requestStartTime, config: config)
+                return
+            }
+            let report = UpstreamFailureClassifier.classify(error: error)
+            // Name the endpoint this request went to, not the chat endpoint.
+            let endpoint = provider.anthropicPassthroughBaseURL(from: config.upstreamAPIBaseURL)
             respond(
                 connection: connection,
-                status: 502,
-                body: AnthropicTranslator.errorJSON(message: "Passthrough streaming error: \(error.localizedDescription)"),
+                status: report.clientStatus,
+                body: AnthropicTranslator.errorJSON(message: upstreamFailureMessage(report, config: config, endpoint: endpoint)),
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
-            await failTrackedRequest(id: trackingID, error: error)
+            await failUpstream(
+                report, error: error, path: "/v1/messages", wasStreaming: true,
+                model: reportModel, startedAt: requestStartTime, endpoint: endpoint, config: config, trackingID: trackingID
+            )
         }
     }
 
     // MARK: - Helpers
+
+    /// Ends an Anthropic Messages stream that failed after its SSE headers:
+    /// an in-band `event: error`, then close. Writing `respond(status:)` here
+    /// would put a second HTTP status line on the same connection.
+    private func failAnthropicStreamAfterHeaders(
+        error: Error,
+        connection: NWConnection,
+        reportModel: String,
+        trackingID: UUID,
+        startedAt: Date,
+        config: Config
+    ) async {
+        await sendData(
+            StreamErrorEvent.anthropic(message: StreamErrorEvent.upstreamFailureMessage(error)),
+            on: connection
+        )
+        finishConnection(connection)
+        recordXcodeAgentRequest(model: reportModel, status: 502)
+        await failUpstream(
+            UpstreamFailureClassifier.classify(error: error), error: error,
+            path: "/v1/messages", wasStreaming: true, model: reportModel,
+            startedAt: startedAt, streamOutcome: .upstreamError, config: config, trackingID: trackingID
+        )
+    }
+
+    /// Ends an Anthropic Messages stream when the provider answered 200 and
+    /// then reported an error inside its stream: one in-band `event: error`
+    /// that explains the failure, then close.
+    private func failAnthropicStreamOnProviderError(
+        _ report: UpstreamFailureReport,
+        connection: NWConnection,
+        reportModel: String,
+        trackingID: UUID,
+        startedAt: Date,
+        config: Config
+    ) async {
+        await sendData(
+            StreamErrorEvent.anthropic(message: upstreamFailureMessage(report, config: config)),
+            on: connection
+        )
+        finishConnection(connection)
+        recordXcodeAgentRequest(model: reportModel, status: 502)
+        await failUpstream(
+            report, path: "/v1/messages", wasStreaming: true, model: reportModel,
+            startedAt: startedAt, streamOutcome: .upstreamError, config: config, trackingID: trackingID
+        )
+    }
+
+    /// A request the provider failed: explains it on Home, journals it with
+    /// the classified reason and no tokens, and counts it as failed.
+    private func failUpstream(
+        _ report: UpstreamFailureReport,
+        statusCode: Int? = nil,
+        error: Error? = nil,
+        path: String,
+        wasStreaming: Bool,
+        model: String,
+        requestedModel: String? = nil,
+        startedAt: Date,
+        streamOutcome: StreamOutcome? = nil,
+        endpoint: String? = nil,
+        config: Config,
+        trackingID: UUID
+    ) async {
+        guard !Task.isCancelled else {
+            await failTrackedRequest(id: trackingID, error: URLError(.cancelled))
+            return
+        }
+        await noteUpstreamFailure(report, config: config, endpoint: endpoint)
+        let record = SessionReportCard.RequestRecord(
+            timestamp: startedAt,
+            model: model,
+            promptTokens: 0,
+            completionTokens: 0,
+            durationSeconds: Date().timeIntervalSince(startedAt),
+            path: path,
+            wasStreaming: wasStreaming,
+            requestedModel: requestedModel,
+            streamOutcome: streamOutcome?.rawValue,
+            upstreamFailure: report.failure
+        )
+        await recordSessionReport(
+            record, config: config, trackingID: trackingID,
+            failureTelemetry: Self.failureTelemetry(statusCode: statusCode ?? report.failure.httpStatus, error: error)
+        )
+    }
 
     private func sendData(_ data: Data, on connection: NWConnection) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -1965,6 +2282,7 @@ final class LocalProxyServer: @unchecked Sendable {
         wasStreaming: Bool,
         statusCode: Int?,
         startedAt: Date,
+        streamOutcome: StreamOutcome? = nil,
         config: Config
     ) async {
         guard !Task.isCancelled, let logger = config.inputOutputLogger else { return }
@@ -1978,14 +2296,16 @@ final class LocalProxyServer: @unchecked Sendable {
             startedAt: startedAt,
             inputBody: inputBody,
             outputBody: outputBody,
-            outputTruncated: outputTruncated
+            outputTruncated: outputTruncated,
+            streamOutcome: streamOutcome
         )
     }
 
     private func recordSessionReport(
         _ record: SessionReportCard.RequestRecord,
         config: Config,
-        trackingID: UUID
+        trackingID: UUID,
+        failureTelemetry: (errorClass: String, statusClass: String, retryable: String)? = nil
     ) async {
         guard !Task.isCancelled else { return }
         var record = recordWithAllowedCacheTelemetry(record, promptCaching: config.promptCaching)
@@ -1997,9 +2317,44 @@ final class LocalProxyServer: @unchecked Sendable {
         record.promptCacheApplied = PromptCacheRequestContext.current?.outcome?.applied
         let attribution = RequestAttributionContext.current
         let currentSessionID = attribution?.sessionID ?? config.sessionID
+        // An interrupted or failed stream still consumed tokens, so it is
+        // journaled with its outcome; but it counts as a failed request, not
+        // a completed one.
+        let failedOutcome = record.streamOutcome.flatMap(StreamOutcome.init(rawValue:))
+            .flatMap { $0 == .completed ? nil : $0 }
+        let clientSurface = attribution?.client ?? "gui"
+        // A record that carries a failure reason is a failed request too,
+        // whether or not a stream ever started.
+        let telemetry: (errorClass: String, statusClass: String, retryable: String)?
+        if let failureTelemetry {
+            telemetry = failureTelemetry
+        } else if let failedOutcome {
+            telemetry = (failedOutcome == .interrupted ? "stream_interrupted" : "upstream_stream_error", "stream", "unknown")
+        } else if record.upstreamFailure != nil {
+            telemetry = ("upstream_stream_error", "stream", "unknown")
+        } else {
+            telemetry = nil
+        }
         let shouldRecord = await MainActor.run { [weak self] in
             guard let self, !Task.isCancelled else { return false }
-            guard self.state.completeRequest(id: trackingID) else { return false }
+            if let telemetry {
+                let metadata = self.state.analyticsMetadata(for: trackingID)
+                guard self.state.failRequest(id: trackingID) else { return false }
+                self.telemetryTracker?(
+                    "proxy_request_failed",
+                    [
+                        "stage": "proxy_request",
+                        "error_class": telemetry.errorClass,
+                        "status_class": telemetry.statusClass,
+                        "path_category": metadata?.pathCategory ?? "other",
+                        "provider_identifier": metadata?.providerIdentifier ?? "unknown",
+                        "client_surface": clientSurface,
+                        "retryable": telemetry.retryable
+                    ]
+                )
+            } else {
+                guard self.state.completeRequest(id: trackingID) else { return false }
+            }
             self.reportCard.record(record)
             return true
         }
@@ -2026,7 +2381,9 @@ final class LocalProxyServer: @unchecked Sendable {
                 : config.anthropicTranslatorMode.rawValue,
             serverToolCalls: record.serverToolCalls,
             promptCacheStrategy: record.promptCacheStrategy,
-            promptCacheApplied: record.promptCacheApplied
+            promptCacheApplied: record.promptCacheApplied,
+            streamOutcome: record.streamOutcome,
+            upstreamFailure: record.upstreamFailure
         )
         try? SessionReportStore.append(
             SessionReportEvent(
@@ -2038,6 +2395,31 @@ final class LocalProxyServer: @unchecked Sendable {
             ),
             to: sessionReportURL ?? SessionReportStore.defaultURL
         )
+    }
+
+    /// The explanation for a classified upstream failure, naming the
+    /// provider this proxy is configured for.
+    private func upstreamFailureMessage(_ report: UpstreamFailureReport, config: Config, rawBody: String? = nil, endpoint: String? = nil) -> String {
+        // A custom provider is carried as `.openAI`; don't call it OpenAI.
+        let isBuiltIn = config.analyticsProviderIdentifier == config.upstreamProvider.rawValue
+        return report.clientMessage(
+            provider: config.upstreamProvider,
+            providerTitle: isBuiltIn ? nil : "The provider",
+            endpoint: endpoint ?? config.upstreamAPIBase.absoluteString,
+            isLocal: config.isLocalUpstream,
+            waitedSeconds: config.upstreamIdleTimeout(),
+            rawBody: rawBody
+        )
+    }
+
+    /// Logs a classified upstream failure and publishes it for the app's UI.
+    private func noteUpstreamFailure(_ report: UpstreamFailureReport, config: Config, endpoint: String? = nil) async {
+        guard !Task.isCancelled else { return }
+        let message = upstreamFailureMessage(report, config: config, endpoint: endpoint)
+        // Category and numbers only: provider wording can quote the request.
+        appendLog("upstream failure \(report.logSummary)")
+        let notice = UpstreamFailureNotice(failure: report.failure, message: message, at: Date())
+        await MainActor.run { [weak self] in self?.state.noteUpstreamFailure(notice) }
     }
 
     private func recordWithAllowedCacheTelemetry(
@@ -2064,7 +2446,9 @@ final class LocalProxyServer: @unchecked Sendable {
                 contextCompactionEnabled: record.contextCompactionEnabled,
                 translationMode: record.translationMode,
                 promptCacheStrategy: record.promptCacheStrategy,
-                promptCacheApplied: record.promptCacheApplied
+                promptCacheApplied: record.promptCacheApplied,
+                streamOutcome: record.streamOutcome,
+                upstreamFailure: record.upstreamFailure
             )
         }
         return record
@@ -2363,14 +2747,6 @@ final class LocalProxyServer: @unchecked Sendable {
         for (name, value) in mutation.headers {
             request.setValue(value, forHTTPHeaderField: name)
         }
-    }
-
-    private func upstreamErrorMessage(
-        statusCode: Int,
-        body: String,
-        provider: UpstreamProvider
-    ) -> String {
-        LocalProxyServerHelpers.upstreamErrorMessage(statusCode: statusCode, body: body, provider: provider)
     }
 
     static func limitStatusCode(headerBytes: Int, bodyBytes: Int, activeConnections: Int) -> Int? {

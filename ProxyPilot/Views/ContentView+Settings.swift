@@ -46,6 +46,10 @@ extension ContentView {
                 .toggleStyle(.switch)
                 .help("Hide the Dock icon and keep ProxyPilot running from the menu bar. Keeps the menu bar icon enabled so the app stays reachable.")
                 .accessibilityLabel("Run in background")
+
+                Toggle("Keep Mac Awake", isOn: $vm.keepMacAwake)
+                    .toggleStyle(.switch)
+                    .help("Prevent idle sleep during built-in proxy requests and for up to 3 hours after the last completed response.")
             }
                         Section("Default destination") {
                             Picker("Open on launch", selection: Binding(get: { AppNavigationTarget.migrated(vm.defaultSettingsSection).section }, set: { vm.defaultSettingsSection = $0 })) {
@@ -205,6 +209,15 @@ extension ContentView {
                         .foregroundStyle(.secondary)
                 }
                 Text("Send Feedback opens a prefilled email draft and copies the current support summary to your clipboard.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Button("Get Diagnostic Collector") { vm.openDiagnosticCollectorPage() }
+                        .accessibilityLabel("Get the Enhanced Diagnostic Collector")
+                        .accessibilityHint("Opens the download page in your default browser")
+                    Spacer()
+                }
+                Text("The Enhanced Diagnostic Collector is a separate download for capturing a detailed local report while you reproduce a problem. Nothing is uploaded; you choose what to share.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

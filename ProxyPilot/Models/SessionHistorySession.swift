@@ -82,6 +82,8 @@ struct SessionHistorySession: Identifiable, Equatable, Sendable {
         var modelCounts: [String: Int] = [:]
         var durations: [TimeInterval] = []
         var tokenAccountingAvailable = false
+        // A failed request used no tokens; that is known, not missing.
+        var everyRequestFailed = !requests.isEmpty
         durations.reserveCapacity(requests.count)
 
         for request in requests {
@@ -101,6 +103,7 @@ struct SessionHistorySession: Identifiable, Equatable, Sendable {
                 || request.promptCacheWriteTokens != nil {
                 tokenAccountingAvailable = true
             }
+            if request.upstreamFailure == nil { everyRequestFailed = false }
             modelCounts[request.model, default: 0] += 1
             durations.append(request.durationSeconds)
         }
@@ -121,7 +124,7 @@ struct SessionHistorySession: Identifiable, Equatable, Sendable {
             totalPromptCacheHitTokens: totalPromptCacheHitTokens,
             totalPromptCacheMissTokens: totalPromptCacheMissTokens,
             totalPromptCacheWriteTokens: totalPromptCacheWriteTokens,
-            tokenAccountingAvailable: tokenAccountingAvailable,
+            tokenAccountingAvailable: tokenAccountingAvailable || everyRequestFailed,
             cacheAccountingAvailable: requests.contains { $0.promptCacheHitTokens != nil || $0.promptCacheMissTokens != nil || $0.promptCacheWriteTokens != nil },
             cacheHitRate: cacheHitRate,
             totalTokensFormatted: Self.formatTokens(totalTokens),
@@ -401,22 +404,26 @@ enum SessionHistoryFileExport {
         let formatter = ISO8601DateFormatter()
         var lines = [csvHeader]
         for request in session.requests {
-            let fields = [
+            let cacheHitTokens = request.promptCacheHitTokens.map { String($0) } ?? ""
+            let cacheMissTokens = request.promptCacheMissTokens.map { String($0) } ?? ""
+            let cacheWriteTokens = request.promptCacheWriteTokens.map { String($0) } ?? ""
+            let cacheApplied = request.promptCacheApplied.map { String($0) } ?? ""
+            let fields: [String] = [
                 session.id,
                 session.source,
                 formatter.string(from: request.timestamp),
                 request.model,
                 String(request.promptTokens),
                 String(request.completionTokens),
-                request.promptCacheHitTokens.map(String.init) ?? "",
-                request.promptCacheMissTokens.map(String.init) ?? "",
-                request.promptCacheWriteTokens.map(String.init) ?? "",
+                cacheHitTokens,
+                cacheMissTokens,
+                cacheWriteTokens,
                 String(request.durationSeconds),
                 request.path,
                 String(request.wasStreaming),
                 request.promptCachingMode ?? "",
                 request.promptCacheStrategy ?? "",
-                request.promptCacheApplied.map { String($0) } ?? ""
+                cacheApplied
             ]
             lines.append(fields.map(csvEscapedField).joined(separator: ","))
         }

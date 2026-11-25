@@ -1398,8 +1398,11 @@ struct NIOProxyServerTests {
         let httpResponse = response as! HTTPURLResponse
         let body = String(decoding: data, as: UTF8.self)
 
-        #expect(httpResponse.statusCode == 502)
-        #expect(body.contains("Upstream returned status 403"))
+        // The provider's status reaches the client, in an Anthropic error
+        // body that names the provider and keeps its wording.
+        #expect(httpResponse.statusCode == 403)
+        #expect(body.contains(#""type":"api_error""#))
+        #expect(body.contains("reported an error (HTTP 403)"))
         #expect(body.contains("Context limit exceeded for this account"))
 
         try await server.stop()
@@ -1527,10 +1530,12 @@ struct NIOProxyServerTests {
             "messages": [["role": "user", "content": "hi"]]
         ])
 
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
         let httpResponse = response as! HTTPURLResponse
-        // Streaming path: upstream 500 → UpstreamClient throws httpError → proxy returns 502
-        #expect(httpResponse.statusCode == 502)
+        // A chat client gets the provider's own error response, as it does
+        // from the app's built-in proxy.
+        #expect(httpResponse.statusCode == 500)
+        #expect(String(decoding: data, as: UTF8.self) == "{\"error\":\"internal\"}")
 
         let capturedRequest = try #require(stub.requests().first)
         #expect(capturedRequest.headerValue("Content-Type") == "application/json")

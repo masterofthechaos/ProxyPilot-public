@@ -5,6 +5,9 @@ import Glibc
 #endif
 import ArgumentParser
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import ProxyPilotCore
 
 struct RouteCommand: AsyncParsableCommand {

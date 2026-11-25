@@ -1201,8 +1201,11 @@ struct SessionHistoryView: View {
     }
 
     private func requestInlineTokenSummary(_ request: RequestRecord) -> String {
-        guard requestHasTokenTelemetry(request) else { return "token usage unavailable" }
-        return "\(request.promptTokens + request.completionTokens) tok"
+        RequestRowSummary.text(
+            totalTokens: request.promptTokens + request.completionTokens,
+            hasTokenTelemetry: requestHasTokenTelemetry(request),
+            failure: request.upstreamFailure
+        )
     }
 
     private func compactLogMetric(_ label: String, _ value: String) -> some View {

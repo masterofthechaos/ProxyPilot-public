@@ -1296,6 +1296,26 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.xcodeAgentAppliedModelText, "glm-4.5")
     }
 
+    func testPendingXcodeRouteChangeTracksModelAndProviderOnlyWhileRunning() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.upstreamProvider = .lmStudio
+        vm.selectedXcodeAgentModel = "model-a"
+        vm.localProxyState.isRunning = true
+        vm.localProxyState.activeXcodeAgentModel = "model-a"
+        vm.localProxyState.activeProviderIdentifier = "lmstudio"
+        XCTAssertFalse(vm.hasPendingXcodeRouteChange, "the running route matches the selection")
+
+        vm.localProxyState.activeXcodeAgentModel = "model-b"
+        XCTAssertTrue(vm.hasPendingXcodeRouteChange, "a different model is pending")
+
+        vm.localProxyState.activeXcodeAgentModel = "model-a"
+        vm.localProxyState.activeProviderIdentifier = "ollama"
+        XCTAssertTrue(vm.hasPendingXcodeRouteChange, "a different provider is pending even with the same model name")
+
+        vm.localProxyState.isRunning = false
+        XCTAssertFalse(vm.hasPendingXcodeRouteChange, "nothing is pending while stopped")
+    }
+
     func testHomeAgentModelBadgeUsesSelectedModelWhenStopped() {
         let vm = AppViewModel(defaults: defaults)
         vm.selectedXcodeAgentModel = "glm-5.1"
@@ -2590,6 +2610,17 @@ final class AppViewModelTests: XCTestCase {
         )
     }
 
+    func testDiagnosticCollectorLinkOpensItsDownloadPage() {
+        let vm = AppViewModel(defaults: defaults)
+
+        // The page, not a versioned DMG: the link must survive collector updates.
+        XCTAssertEqual(
+            vm.diagnosticCollectorURL.absoluteString,
+            "https://micah.chat/proxypilot/edc-util"
+        )
+        XCTAssertFalse(vm.diagnosticCollectorURL.pathExtension == "dmg")
+    }
+
     func testLocalProvidersDontRequireKeys() {
         let localProviders: [UpstreamProvider] = [.ollama, .lmStudio, .nineRouter]
         for provider in localProviders {
@@ -2743,10 +2774,12 @@ final class AppViewModelTests: XCTestCase {
         )
 
         let vm = AppViewModel(defaults: defaults, sessionReportURL: reportURL)
-        vm.importExternalSessionReportEvents()
-        try await waitForSessionReportImport(vm: vm, expectedTotalRequests: 1)
+        let task = vm.importExternalSessionReportEvents()
+        XCTAssertNotNil(task)
+        await task?.value
 
         XCTAssertEqual(vm.sessionReportCard.totalRequests, 1)
+        XCTAssertEqual(vm.localProxyState.sessionRequestCount, 1)
         XCTAssertEqual(vm.sessionReportCard.totalPromptTokens, 80)
         XCTAssertEqual(vm.sessionReportCard.totalCompletionTokens, 20)
         XCTAssertEqual(vm.sessionReportCard.requests.first?.model, "glm-5")
@@ -2754,27 +2787,35 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.sessionReportCard.requests.first?.wasStreaming, true)
     }
 
-    /// Polls until the async import path moves `sessionReportCard.totalRequests` to the
-    /// expected value. Required because `importExternalSessionReportEvents()` was made
-    /// non-blocking in commit `89cc265` — it dispatches the read on a detached task and
-    /// applies events back on the MainActor after the file I/O resolves.
-    private func waitForSessionReportImport(
-        vm: AppViewModel,
-        expectedTotalRequests: Int,
-        timeout: TimeInterval = 2.0,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if vm.sessionReportCard.totalRequests == expectedTotalRequests { return }
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
-        XCTFail(
-            "Timed out waiting for sessionReportCard.totalRequests == \(expectedTotalRequests); observed \(vm.sessionReportCard.totalRequests)",
-            file: file,
-            line: line
-        )
+    func testJournalImportPreservesPendingAndFailedLocalRequests() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let reportURL = directory.appendingPathComponent("session-report.jsonl")
+        let vm = AppViewModel(defaults: defaults, sessionReportURL: reportURL)
+        let state = vm.localProxyState
+        let failed = UUID()
+        let pending = UUID()
+        state.beginRequest(id: failed, modelName: "failed-local")
+        XCTAssertTrue(state.failRequest(id: failed))
+        let failureDate = state.lastFailureAt
+        state.beginRequest(id: pending, modelName: "pending-local")
+
+        let event = SessionReportEvent(source: "cli", sessionID: "external", record: RequestRecord(
+            model: "external", promptTokens: 80, completionTokens: 20, durationSeconds: 1,
+            path: "/v1/chat/completions", wasStreaming: false))
+        try SessionReportStore.append(event, to: reportURL)
+        let task = vm.importExternalSessionReportEvents()
+        XCTAssertNotNil(task)
+        await task?.value
+
+        XCTAssertEqual(vm.sessionReportCard.totalRequests, 1)
+        XCTAssertEqual(state.sessionRequestCount, 3)
+        XCTAssertEqual(state.pendingRequestCount, 1)
+        XCTAssertEqual(state.failedRequestCount, 1)
+        XCTAssertEqual(state.lastFailureAt, failureDate)
+        XCTAssertEqual(state.activeModels, ["pending-local"])
+        XCTAssertEqual(state.lastModelSeen, "pending-local")
+        XCTAssertTrue(state.completeRequest(id: pending))
     }
 
     func testDoesNotImportOlderCLISessionWhenNewerGUISessionExists() async throws {

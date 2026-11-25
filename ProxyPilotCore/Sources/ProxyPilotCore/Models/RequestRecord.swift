@@ -29,6 +29,15 @@ public struct RequestRecord: Sendable, Codable, Equatable {
     /// Nil is legacy/unobserved; an empty array is an observed request with no
     /// completed, structurally paired server-tool exchanges.
     public let serverToolCalls: [TutorServerToolReceipt]?
+    /// How a streamed response ended: a `StreamOutcome` raw value
+    /// (`completed`, `interrupted`, `upstream_error`). Nil for buffered
+    /// requests and for records written before outcomes were recorded, so
+    /// readers must treat nil as "not assessed", never as a failure.
+    public let streamOutcome: String?
+    /// Why the upstream request failed, when ProxyPilot could tell: a
+    /// category and numbers, never provider text. Nil for successful requests
+    /// and for records written before failures were classified.
+    public let upstreamFailure: UpstreamFailure?
 
     public init(
         timestamp: Date = Date(),
@@ -49,7 +58,9 @@ public struct RequestRecord: Sendable, Codable, Equatable {
         translationMode: String? = nil,
         serverToolCalls: [TutorServerToolReceipt]? = nil,
         promptCacheStrategy: String? = nil,
-        promptCacheApplied: Bool? = nil
+        promptCacheApplied: Bool? = nil,
+        streamOutcome: String? = nil,
+        upstreamFailure: UpstreamFailure? = nil
     ) {
         self.timestamp = timestamp
         self.model = model
@@ -70,5 +81,7 @@ public struct RequestRecord: Sendable, Codable, Equatable {
         self.serverToolCalls = serverToolCalls
         self.promptCacheStrategy = promptCacheStrategy
         self.promptCacheApplied = promptCacheApplied
+        self.streamOutcome = streamOutcome
+        self.upstreamFailure = upstreamFailure
     }
 }

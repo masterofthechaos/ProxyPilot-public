@@ -339,7 +339,7 @@ extension ContentView {
                 HStack {
                     checklistRow(String(localized: "Proxy is running"), isOn: vm.isRunning)
                     if vm.canStartProxy {
-                        Button("Start Proxy") { Task { await vm.startProxy() } }
+                        Button("Start Xcode Proxy") { Task { await vm.startProxy() } }
                             .font(.caption)
                     }
                 }

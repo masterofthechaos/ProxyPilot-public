@@ -61,6 +61,60 @@ final class SessionReportCardTests: XCTestCase {
         XCTAssertEqual(card.cacheHitRate, 0.2)
     }
 
+    /// Home's "Completed Requests" must not count a request the provider
+    /// failed or a stream that was cut off; both are still recorded.
+    @MainActor func testCompletedRequestsExcludeFailedAndInterruptedOnes() {
+        let card = SessionReportCard()
+        func record(outcome: String? = nil, failure: UpstreamFailure? = nil, tokens: Int = 10) {
+            card.record(SessionReportCard.RequestRecord(
+                timestamp: Date(), model: "model", promptTokens: tokens, completionTokens: 0,
+                durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: outcome != nil,
+                streamOutcome: outcome, upstreamFailure: failure))
+        }
+        record()
+        record(outcome: "completed")
+        record(outcome: "interrupted")
+        record(outcome: "upstream_error", failure: UpstreamFailure(kind: .contextExceeded))
+        record(failure: UpstreamFailure(kind: .serverUnreachable), tokens: 0)
+        XCTAssertEqual(card.totalRequests, 5)
+        XCTAssertEqual(card.completedRequests, 2)
+        card.reset()
+        XCTAssertEqual(card.completedRequests, 0)
+    }
+
+    /// A session where every request failed has known token totals of zero;
+    /// "unavailable" is for a provider that returned no usage.
+    func testTokenTotalsAreKnownWhenEveryRequestFailed() {
+        let card = SessionReportCard()
+        func record(failure: UpstreamFailure?, tokens: Int = 0) {
+            card.record(SessionReportCard.RequestRecord(
+                timestamp: Date(), model: "model", promptTokens: tokens, completionTokens: 0,
+                durationSeconds: 1, path: "/v1/chat/completions", wasStreaming: false, upstreamFailure: failure))
+        }
+        record(failure: UpstreamFailure(kind: .serverUnreachable))
+        XCTAssertTrue(card.tokenAccountingAvailable)
+        XCTAssertEqual(card.totalPromptTokens, 0)
+        // A completed request without usage makes the totals unknown again.
+        record(failure: nil)
+        XCTAssertFalse(card.tokenAccountingAvailable)
+        record(failure: nil, tokens: 12)
+        XCTAssertTrue(card.tokenAccountingAvailable)
+    }
+
+    func testRequestRowSaysWhyARequestFailed() {
+        XCTAssertEqual(RequestRowSummary.text(totalTokens: 0, hasTokenTelemetry: false,
+                                              failure: UpstreamFailure(kind: .serverUnreachable)),
+                       "failed: could not reach the provider")
+        XCTAssertEqual(RequestRowSummary.text(totalTokens: 0, hasTokenTelemetry: false,
+                                              failure: UpstreamFailure(kind: .providerError, httpStatus: 500)),
+                       "failed: provider error (HTTP 500)")
+        XCTAssertEqual(RequestRowSummary.text(totalTokens: 40, hasTokenTelemetry: true,
+                                              failure: UpstreamFailure(kind: .connectionLost)),
+                       "40 tok, failed: connection lost")
+        XCTAssertEqual(RequestRowSummary.text(totalTokens: 40, hasTokenTelemetry: true, failure: nil), "40 tok")
+        XCTAssertEqual(RequestRowSummary.text(totalTokens: 0, hasTokenTelemetry: false, failure: nil), "token usage unavailable")
+    }
+
     func testEmptyReportCard() {
         let card = SessionReportCard()
         XCTAssertEqual(card.totalRequests, 0)

@@ -151,6 +151,22 @@ struct MenuBarView: View {
                 }
             }
             .disabled(routeControl.isApplying)
+
+            // Starting is not switching. Nothing is serving the route, so
+            // there is no request to interrupt and no confirmation; and it
+            // cannot ride on the picker, which ignores re-picking the current
+            // model. `route ensure` starts exactly what `route.json` records.
+            if routeControl.status.needsStart {
+                Button(routeControl.isApplying ? "Starting RepoGPS Proxy…" : "Start RepoGPS Proxy") {
+                    Task { await routeControl.ensureRoute() }
+                }
+                .disabled(routeControl.isApplying)
+                .accessibilityHint("Starts the selected RepoGPS route without changing it")
+            }
+
+            if let error = routeControl.lastError {
+                Text(error)
+            }
         }
     }
 
@@ -166,15 +182,38 @@ struct MenuBarView: View {
         return choices
     }
 
+    /// Each label names the route it acts on. "Start Proxy" read as though it
+    /// could start RepoGPS; it only ever started the built-in Xcode proxy.
+    @ViewBuilder
+    private func quickActionButton(_ action: MenuBarProxyOwnership.Action) -> some View {
+        Button(action.title) {
+            ProxyControlActionRunner.run(action, vm: vm)
+        }
+        .accessibilityHint(Self.accessibilityHint(for: action))
+    }
+
+    private static func accessibilityHint(for action: MenuBarProxyOwnership.Action) -> String {
+        switch action {
+        case .startXcodeProxy: return "Starts ProxyPilot's built-in proxy for the Xcode route"
+        case .stopXcodeProxy: return "Stops ProxyPilot's built-in proxy for the Xcode route"
+        case .restartXcodeProxy, .restartExternalProxy: return "Applies the Xcode route and restarts the local proxy server"
+        case .stopRepoGPSRoute: return "Stops the background proxy serving the RepoGPS route"
+        case .stopExternalProxy: return "Stops the local proxy server"
+        }
+    }
+
     @ViewBuilder
     private func menuBarSection(_ section: MenuBarSection) -> some View {
         switch section {
         case .statusDetails:
+            // Named for the route it serves: the probe alone cannot tell the
+            // RepoGPS route daemon from any other proxy on the same port.
+            let ownership = vm.menuBarProxyOwnership
             HStack(spacing: 6) {
                 Circle()
                     .fill(vm.isRunning ? Color.green : Color.secondary)
                     .frame(width: 8, height: 8)
-                Text(vm.isRunning ? "Proxy Running" : "Proxy Stopped")
+                Text(ownership.statusTitle)
                 if let badge = AppBuildBadge.current {
                     Text(badge.text)
                         .font(.caption2.weight(.semibold))
@@ -184,7 +223,7 @@ struct MenuBarView: View {
                         .foregroundStyle(badge.tint)
                 }
             }
-            .accessibilityLabel(vm.isRunning ? "Proxy running" : "Proxy stopped")
+            .accessibilityLabel(ownership.statusTitle)
         case .modelPicker:
             // Named for its route. An unqualified "Model" read as though it
             // governed everything the proxy serves, when it only ever set the
@@ -211,28 +250,13 @@ struct MenuBarView: View {
                     .foregroundStyle(.secondary)
             }
         case .quickActions:
-            if vm.canStopProxy {
-                Button("Stop Proxy") {
-                    Task { await vm.stopProxy() }
-                }
-                .accessibilityLabel("Stop proxy")
-                .accessibilityHint("Stops the local proxy server")
-
-                Button("Apply & Restart") {
-                    guard RouteInterruptionConfirmation.confirm(route: "the Xcode proxy") else { return }
-                    Task { await vm.restartProxy() }
-                }
-                .accessibilityLabel("Restart proxy")
-                .accessibilityHint("Restarts the local proxy server")
-            } else if vm.canStartProxy {
-                Button("Start Proxy") {
-                    Task { await vm.startProxy() }
-                }
-                .accessibilityLabel("Start proxy")
-                .accessibilityHint("Starts the local proxy server")
-            } else {
+            let actions = vm.menuBarProxyOwnership.actions(isStoppingCLIProxy: vm.isStoppingCLIProxy)
+            if actions.isEmpty {
                 Text(vm.statusText)
                     .foregroundStyle(.secondary)
+            }
+            ForEach(actions, id: \.self) { action in
+                quickActionButton(action)
             }
         case .updates:
             Button("Check for Updates...") {

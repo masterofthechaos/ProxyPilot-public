@@ -88,6 +88,7 @@ final class AppViewModel: ObservableObject {
     private static let autoRestartEnabledDefaultsKey = "proxypilot.autoRestartEnabled"
     private static let requireLocalAuthDefaultsKey = "proxypilot.requireLocalAuth"
     private static let runInBackgroundDefaultsKey = "proxypilot.runInBackground"
+    private static let keepMacAwakeDefaultsKey = "proxypilot.keepMacAwake"
     private static let preflightSnapshotDefaultsKey = "proxypilot.lastPreflightSnapshot"
     private static let suppressKeychainPrimerDefaultsKey = "proxypilot.suppressKeychainPrimer"
     private static let analyticsPromptShownVersionKey = "proxypilot.analyticsPromptShownVersion"
@@ -238,6 +239,9 @@ final class AppViewModel: ObservableObject {
     private static let buildNumber: String = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
     private static let publicRepositoryURLString = "https://github.com/masterofthechaos/ProxyPilot-public"
     private static let readmeURLString = "https://github.com/masterofthechaos/ProxyPilot-public/blob/main/README.md"
+    /// Download page for the standalone Enhanced Diagnostic Collector. Links the
+    /// page, not a versioned DMG, so it survives new collector releases.
+    private static let diagnosticCollectorURLString = "https://micah.chat/proxypilot/edc-util"
     static let defaultProxyURLString = "http://127.0.0.1:4000"
     static let refreshProxyStatusHelpText = "Refresh proxy status now. ProxyPilot also checks this automatically every 10 seconds while this window is open."
     private static let activeCustomProviderIDDefaultsKey = "proxypilot.activeCustomProviderID"
@@ -593,6 +597,18 @@ final class AppViewModel: ObservableObject {
     var canStopProxy: Bool { Self.canStopProxy(for: proxyRuntimeStatus, isStoppingCLIProxy: isStoppingCLIProxy) }
     var canRestartProxy: Bool { Self.canStopProxy(for: proxyRuntimeStatus, isStoppingCLIProxy: isStoppingCLIProxy) }
 
+    /// What the menu bar's status line and quick actions act on. See
+    /// `MenuBarProxyOwnership`; the port is the one the reachability probe and
+    /// the external stop path both use.
+    var menuBarProxyOwnership: MenuBarProxyOwnership {
+        MenuBarProxyOwnership.classify(
+            runtime: proxyRuntimeStatus,
+            route: routeControl.status,
+            guiPort: (try? validatedProxyURL(requireLocalhost: false))?.port,
+            repoGPSRoutingEnabled: repoGPSRoutingFeatureEnabled
+        )
+    }
+
     static func canStopProxy(for status: ProxyRuntimeStatus, isStoppingCLIProxy: Bool = false) -> Bool {
         guard !isStoppingCLIProxy else { return false }
         return status == .runningInApp || status == .runningExternal
@@ -640,7 +656,8 @@ final class AppViewModel: ObservableObject {
         for runtimeStatus: ProxyRuntimeStatus,
         repoGPSActive: Bool,
         repoGPSLeasePresent: Bool = false,
-        epiphyteActive: Bool = false
+        epiphyteActive: Bool = false,
+        ownership: MenuBarProxyOwnership? = nil
     ) -> ToolbarProxyStatus {
         if epiphyteActive {
             return .init(kind: repoGPSActive ? .independentClients : .epiphyte,
@@ -653,6 +670,23 @@ final class AppViewModel: ObservableObject {
                 compactText: "RepoGPS",
                 fullText: String(localized: "RepoGPS in flight")
             )
+        }
+
+        // Named for the route actually serving, with the menu's wording. The
+        // probe alone reports only that some ProxyPilot answers on the port.
+        if let ownership {
+            switch ownership {
+            case .inApp:
+                return ToolbarProxyStatus(kind: .gui, compactText: "Xcode", fullText: ownership.statusTitle)
+            case .repoGPSRoute:
+                return ToolbarProxyStatus(kind: .cli, compactText: "RepoGPS", fullText: ownership.statusTitle)
+            case .external:
+                return ToolbarProxyStatus(kind: .cli, compactText: "Running", fullText: ownership.statusTitle)
+            case .stopped:
+                return ToolbarProxyStatus(kind: .stopped, compactText: "Stopped", fullText: ownership.statusTitle)
+            case .portOccupied:
+                break // keep the specific conflict text below
+            }
         }
 
         switch runtimeStatus {
@@ -689,7 +723,28 @@ final class AppViewModel: ObservableObject {
             for: proxyRuntimeStatus,
             repoGPSActive: repoGPS.session.active,
             repoGPSLeasePresent: repoGPS.session.lease != nil,
-            epiphyteActive: !epiphyteControl.activeRequests.isEmpty
+            epiphyteActive: !epiphyteControl.activeRequests.isEmpty,
+            ownership: menuBarProxyOwnership
+        )
+    }
+
+    /// Whether a surface should offer "Start RepoGPS Proxy": the route is
+    /// selected but not serving, and route control is available. Same rule as
+    /// the menu bar's RepoGPS section.
+    static func offersRepoGPSRouteStart(
+        routingEnabled: Bool,
+        availability: RouteControlService.Availability,
+        route: RouteControlService.Status
+    ) -> Bool {
+        guard routingEnabled, case .ready = availability else { return false }
+        return route.needsStart
+    }
+
+    var offersRepoGPSRouteStart: Bool {
+        Self.offersRepoGPSRouteStart(
+            routingEnabled: repoGPSRoutingFeatureEnabled,
+            availability: routeControl.availability,
+            route: routeControl.status
         )
     }
 
@@ -924,6 +979,15 @@ final class AppViewModel: ObservableObject {
     }
 
     @Published var lastError: String?
+    /// Whether the selected Xcode model is in memory at the local provider.
+    /// Nil when the provider cannot say or was not reachable.
+    @Published private(set) var xcodeModelLoadState: LocalModelLoadState?
+    /// Fetches a local provider's load-state document. Replaceable in tests.
+    var localModelStateFetcher: @Sendable (URL) async throws -> Data = { url in
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+        return try await URLSession.shared.data(for: request).0
+    }
     @Published var activeIssue: AppIssue?
     @Published var recentIssueCodes: [String] = []
 
@@ -1040,6 +1104,7 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.autoRestartEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.requireLocalAuthDefaultsKey)
         defaults.removeObject(forKey: Self.runInBackgroundDefaultsKey)
+        defaults.removeObject(forKey: Self.keepMacAwakeDefaultsKey)
         defaults.removeObject(forKey: Self.preflightSnapshotDefaultsKey)
         defaults.removeObject(forKey: ProviderManager.showModelMetadataDefaultsKey)
         defaults.removeObject(forKey: ProviderManager.exactoFilterDefaultsKey)
@@ -1106,6 +1171,7 @@ final class AppViewModel: ObservableObject {
         proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
         showMenuBarExtra = true
         runInBackground = false
+        keepMacAwake = false
         menuBarSectionOrder = MenuBarSection.defaultOrder
         visibleMenuBarSections = Set(MenuBarSection.defaultOrder)
         visibleHomeDashboardSections = Set(HomeDashboardSection.allCases)
@@ -1675,6 +1741,13 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    @Published var keepMacAwake = false {
+        didSet {
+            defaults.set(keepMacAwake, forKey: Self.keepMacAwakeDefaultsKey)
+            localProxyState.idleSleepProtection.enabled = keepMacAwake
+        }
+    }
+
     @Published var menuBarSectionOrder: [MenuBarSection] = MenuBarSection.defaultOrder {
         didSet {
             let normalized = Self.normalizedMenuBarSectionOrder(menuBarSectionOrder)
@@ -1887,6 +1960,18 @@ final class AppViewModel: ObservableObject {
         let selected = effectiveXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !active.isEmpty, !selected.isEmpty else { return false }
         return active.caseInsensitiveCompare(selected) != .orderedSame
+    }
+
+    /// Whether the running Xcode proxy serves a different provider or model
+    /// than the current selection, so applying would change something.
+    /// Two custom endpoints share one identifier and are not told apart here.
+    var hasPendingXcodeRouteChange: Bool {
+        if hasPendingXcodeAgentModelChange { return true }
+        guard isRunning || localProxyServer.state.isRunning else { return false }
+        let active = localProxyState.activeProviderIdentifier
+        guard !active.isEmpty else { return false }
+        let selected = hasActiveCustomProvider ? "custom" : upstreamProvider.rawValue
+        return active != selected
     }
 
     // MARK: - Serving route identity
@@ -2869,6 +2954,69 @@ final class AppViewModel: ObservableObject {
         objectWillChange.send()
     }
 
+    /// Model IDs offered by the Xcode model menu.
+    ///
+    /// A chosen subset still limits the menu. Otherwise the provider's fetched
+    /// catalog is offered too, so a model that appeared after launch (a local
+    /// server started later, a newly loaded model) can be picked in place.
+    var xcodeModelMenuCandidates: [String] {
+        let candidates = xcodeAgentModelCandidates
+        guard selectedUpstreamModels.isEmpty else { return candidates }
+        return candidates + browserModels(selectedUpstreamSelection).map(\.id)
+    }
+
+    /// Loads the selected provider's models for the Xcode model menu.
+    ///
+    /// Local providers are always asked again: their list changes whenever the
+    /// user loads a model, and the request never leaves the machine.
+    func refreshXcodeModelMenu(force: Bool = false) async {
+        let selection = selectedUpstreamSelection
+        guard selection != .none else { return }
+        prepareBrowser(selection)
+        var isLocal = false
+        if case .builtIn(let provider) = selection { isLocal = provider.isLocal }
+        await refreshBrowser(selection, force: force || isLocal)
+        await refreshXcodeModelLoadState()
+    }
+
+    /// Asks LM Studio whether the selected Xcode model is loaded and with
+    /// what context. Other providers have no such answer yet.
+    func refreshXcodeModelLoadState() async {
+        let selection = selectedUpstreamSelection
+        let model = effectiveXcodeAgentModel
+        guard selection == .builtIn(.lmStudio), !model.isEmpty,
+              let url = LMStudioModelState.modelsURL(apiBase: browserIdentity(selection).endpoint) else {
+            xcodeModelLoadState = nil
+            return
+        }
+        xcodeModelLoadStateRequest += 1
+        let request = xcodeModelLoadStateRequest
+        let state = (try? await localModelStateFetcher(url)).map(LMStudioModelState.parse)?[model]
+        // Keep the current answer when this request was cancelled, when a
+        // newer request has started, or when the selection changed in flight.
+        guard !Task.isCancelled, request == xcodeModelLoadStateRequest,
+              selection == selectedUpstreamSelection, model == effectiveXcodeAgentModel else { return }
+        xcodeModelLoadState = state
+    }
+    private var xcodeModelLoadStateRequest = 0
+
+    /// Explains an empty Xcode model menu and what to do about it.
+    func xcodeModelMenuEmptyMessage(error: String?) -> String {
+        let selection = selectedUpstreamSelection
+        let endpoint = browserIdentity(selection).endpoint
+        if browserRequiresKey(selection) && !browserHasKey(selection) {
+            return String(localized: "Add an API key for this provider in Providers & Models to load its models.")
+        }
+        if case .builtIn(let provider) = selection, provider.isLocal {
+            if error != nil {
+                return String(localized: "Could not reach \(provider.title) at \(endpoint). Start its local server, then refresh.")
+            }
+            return String(localized: "\(provider.title) reported no models at \(endpoint). Load a model there, then refresh.")
+        }
+        if let error { return String(localized: "Could not load models: \(error)") }
+        return String(localized: "No models loaded yet.")
+    }
+
     func browserModels(_ selection: UpstreamSelection) -> [UpstreamModel] {
         if let snapshot = providerCatalog.snapshots[browserIdentity(selection)] { return snapshot.models }
         return []
@@ -3068,6 +3216,7 @@ final class AppViewModel: ObservableObject {
         ) ?? ProxyPilotAccentColor.defaultHex
         showMenuBarExtra = defaults.object(forKey: Self.showMenuBarExtraDefaultsKey) as? Bool ?? true
         runInBackground = defaults.bool(forKey: Self.runInBackgroundDefaultsKey)
+        keepMacAwake = defaults.bool(forKey: Self.keepMacAwakeDefaultsKey)
         // Both decode from the *stored* values before either is assigned.
         // Assigning `menuBarSectionOrder` persists its normalized form, which
         // backfills every known section — so decoding the visible set
@@ -3225,6 +3374,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func applicationWillTerminate() async {
+        localProxyState.idleSleepProtection.running = false
         telemetryService.endSession()
         stopLogUpdates()
         await Self.pruneInputOutputLogsForQuit()
@@ -3293,6 +3443,7 @@ final class AppViewModel: ObservableObject {
         applyProxyRuntimeStatus(locallyRunning ? .runningInApp : .stopped)
         refreshLogText()
         Task { await refreshReachableProxyStatus(sequence: sequence, locallyRunning: locallyRunning) }
+        Task { await refreshXcodeModelLoadState() }
         Task { await refreshRouteControlIfStale() }
     }
 
@@ -3486,10 +3637,11 @@ final class AppViewModel: ObservableObject {
             importedExternalSessionIDs.insert(event.sessionID)
         }
 
+        let previousCount = localProxyServer.reportCard.totalRequests
         localProxyServer.reportCard.record(events: newSessionEvents)
         let lastModel = newSessionEvents.last(where: { !$0.record.model.isEmpty })?.record.model
-        localProxyServer.state.importCompletedRequests(
-            count: localProxyServer.reportCard.totalRequests,
+        localProxyServer.state.addImportedRequests(
+            count: localProxyServer.reportCard.totalRequests - previousCount,
             lastModel: lastModel
         )
     }
@@ -3755,6 +3907,17 @@ final class AppViewModel: ObservableObject {
             try? await Task.sleep(for: .milliseconds(500))
             await proxyLifecycle.restartProxy()
         }
+    }
+
+    /// The quit path. Never reaches `stopExternalCLIProxy`: see
+    /// `MenuBarProxyOwnership.quitCleanup`. The in-app stop runs in every
+    /// state because it is a no-op without a GUI listener and also cancels the
+    /// restart watchdog, so a stale runtime status cannot skip it.
+    @discardableResult
+    func stopOwnedProxyForQuit() async -> MenuBarProxyOwnership.QuitCleanup {
+        let cleanup = menuBarProxyOwnership.quitCleanup
+        await proxyLifecycle.stopProxy()
+        return cleanup
     }
 
     func stopProxy() async {
@@ -4332,6 +4495,14 @@ final class AppViewModel: ObservableObject {
 
     func openPublicRepository() {
         NSWorkspace.shared.open(publicRepositoryURL)
+    }
+
+    var diagnosticCollectorURL: URL {
+        URL(string: Self.diagnosticCollectorURLString)!
+    }
+
+    func openDiagnosticCollectorPage() {
+        NSWorkspace.shared.open(diagnosticCollectorURL)
     }
 
     func openWebsite() {

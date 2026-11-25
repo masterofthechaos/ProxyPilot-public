@@ -306,7 +306,8 @@ public struct AgentAdapterLaunchPlan: Equatable, Sendable {
             "provider": ["proxypilot": ["npm": "@ai-sdk/openai-compatible", "name": "ProxyPilot",
                 "options": ["baseURL": "http://127.0.0.1:\(settings.port)/v1", "apiKey": localProxyCredential],
                 "models": [ActiveModelAlias.id: model]]],
-            "permission": ["read": "allow", "edit": "ask", "bash": "ask", "external_directory": "ask"],
+            // The pinned ACP bridge cannot deliver approval prompts from model-started child sessions.
+            "permission": ["read": "allow", "edit": "ask", "bash": "ask", "external_directory": "ask", "task": "deny"],
         ]
         let content = String(decoding: try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys]), as: UTF8.self)
         var environment = [
@@ -346,12 +347,59 @@ public struct AgentAdapterLaunchPlan: Equatable, Sendable {
 
     public static let attributionPlugin = #"""
     import { createHash } from 'node:crypto';
+    import { appendFile, rename, stat } from 'node:fs/promises';
+    import { join } from 'node:path';
+    const profile = process.env.PROXYPILOT_AGENT_PROFILE;
+    const trace = profile && join(profile, 'data', 'opencode', 'log', 'proxypilot-lifecycle.log');
+    const sessionKey = (id) => {
+      const hex = createHash('sha256').update('proxypilot-xcode:' + id).digest('hex');
+      return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
+    };
+    const key = (id) => createHash('sha256').update(id).digest('hex').slice(0, 32);
+    const write = async (event, session, correlation) => {
+      if (!trace || typeof session !== 'string' || typeof correlation !== 'string') return;
+      try {
+        const size = await stat(trace).then(info => info.size, error => {
+          if (error.code === 'ENOENT') return 0;
+          throw error;
+        });
+        if (size >= 1_000_000) {
+          await rename(trace, trace + '.previous').catch(error => {
+            if (error.code !== 'ENOENT') throw error;
+          });
+        }
+        const row = { schemaVersion: 1, event, timestamp: new Date().toISOString(),
+                      sessionID: sessionKey(session), correlationID: key(correlation) };
+        await appendFile(trace, JSON.stringify(row) + '\n', { mode: 0o600 });
+      } catch {
+        // Diagnostic collection must never interrupt a turn.
+      }
+    };
     export default async () => ({
       'chat.headers': async (input, output) => {
-        const hex = createHash('sha256').update('proxypilot-xcode:' + input.sessionID).digest('hex');
-        const id = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
         output.headers['X-ProxyPilot-Client'] = 'xcode-agent';
-        output.headers['X-ProxyPilot-Session-ID'] = id;
+        output.headers['X-ProxyPilot-Session-ID'] = sessionKey(input.sessionID);
+      },
+      'command.execute.before': async ({ command }) => {
+        if (command === 'review') {
+          throw new Error('ProxyPilot Agent: /review requires child-session approvals that this Xcode route cannot deliver.');
+        }
+      },
+      'tool.execute.before': async ({ sessionID, callID }) => write('tool_started', sessionID, callID),
+      'tool.execute.after': async ({ sessionID, callID }) => write('tool_finished', sessionID, callID),
+      event: async ({ event }) => {
+        const properties = event.properties;
+        if (event.type === 'permission.asked') {
+          await write('approval_requested', properties.sessionID, properties.id);
+        } else if (event.type === 'permission.replied') {
+          await write('approval_resolved', properties.sessionID, properties.requestID);
+        } else if (event.type === 'message.part.updated') {
+          // A rejection or tool error may skip tool.execute.after.
+          const part = properties.part;
+          if (part?.type === 'tool' && part.state?.status === 'error') {
+            await write('tool_finished', properties.sessionID, part.callID);
+          }
+        }
       },
     });
     """#

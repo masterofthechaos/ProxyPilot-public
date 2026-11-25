@@ -24,7 +24,7 @@ enum UpstreamClient {
             config: config
         )
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await Self.session(for: config).data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw UpstreamError.invalidResponse
         }
@@ -63,7 +63,7 @@ enum UpstreamClient {
             let bridge = LineStreamingBridge(continuation: continuation)
             let sessionConfiguration = URLSessionConfiguration.default
             sessionConfiguration.timeoutIntervalForRequest = config.effectiveUpstreamRequestTimeout
-            sessionConfiguration.timeoutIntervalForResource = 300
+            if let total = config.waitPolicy.total { sessionConfiguration.timeoutIntervalForResource = total }
             let session = URLSession(configuration: sessionConfiguration, delegate: bridge, delegateQueue: nil)
             let task = session.dataTask(with: request)
             continuation.onTermination = { _ in
@@ -84,7 +84,7 @@ enum UpstreamClient {
                         config: config
                     )
 
-                    let (bytes, response) = try await session.bytes(for: request)
+                    let (bytes, response) = try await Self.session(for: config).bytes(for: request)
                     guard let httpResponse = response as? HTTPURLResponse else {
                         continuation.finish(throwing: UpstreamError.invalidResponse)
                         return
@@ -194,18 +194,26 @@ enum UpstreamClient {
 
     // MARK: - Private Helpers
 
-    /// URLSession with a reasonable connection timeout for upstream requests.
-    private static let session: URLSession = {
+    /// Shared sessions for upstream requests, one per wait policy. A request
+    /// may still carry its own no-data limit from `buildRequest`.
+    private static let cloudSession = makeSession(policy: .coreCloud)
+    private static let localSession = makeSession(policy: .local)
+
+    static func session(for config: ProxyConfiguration) -> URLSession {
+        config.isLocalUpstream ? localSession : cloudSession
+    }
+
+    private static func makeSession(policy: UpstreamWaitPolicy) -> URLSession {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 300
+        config.timeoutIntervalForRequest = policy.idle
+        if let total = policy.total { config.timeoutIntervalForResource = total }
         #if !canImport(FoundationNetworking)
         // Short connection timeout so tests against unreachable hosts fail fast.
         // Get-only (and a no-op) on swift-corelibs-foundation, so Darwin-only.
         config.waitsForConnectivity = false
         #endif
         return URLSession(configuration: config)
-    }()
+    }
 
     static func buildRequest(
         path: String,

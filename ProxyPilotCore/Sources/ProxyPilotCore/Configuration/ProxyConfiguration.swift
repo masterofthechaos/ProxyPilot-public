@@ -28,9 +28,32 @@ public struct ProxyConfiguration: Sendable {
     /// Per-request, owner-selected Tutor override; nil preserves ordinary policy.
     public var upstreamRequestTimeout: TimeInterval?
 
+    /// Whether the upstream runs on this machine's hardware.
+    public var isLocalUpstream: Bool {
+        UpstreamWaitPolicy.isLocal(provider: upstreamProvider, baseURL: upstreamAPIBaseURL)
+    }
+
+    /// The wait limits this engine applies to the configured provider.
+    public var waitPolicy: UpstreamWaitPolicy {
+        isLocalUpstream ? .local : .coreCloud
+    }
+
     public var effectiveUpstreamRequestTimeout: TimeInterval {
-        guard let timeout = upstreamRequestTimeout, timeout.isFinite, timeout > 0 else { return 30 }
+        guard let timeout = upstreamRequestTimeout, timeout.isFinite, timeout > 0 else {
+            return waitPolicy.idle
+        }
         return timeout
+    }
+
+    /// What this engine tells a client about a classified upstream failure.
+    public func clientMessage(for report: UpstreamFailureReport, rawBody: String? = nil) -> String {
+        report.clientMessage(
+            provider: upstreamProvider,
+            endpoint: upstreamAPIBaseURL,
+            isLocal: isLocalUpstream,
+            waitedSeconds: effectiveUpstreamRequestTimeout,
+            rawBody: rawBody
+        )
     }
 
     public func withUpstreamRequestTimeout(_ timeout: TimeInterval?) -> Self {

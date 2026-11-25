@@ -2,6 +2,11 @@ import XCTest
 @testable import ProxyPilot
 import ProxyPilotCore
 
+private actor RequestedURLs {
+    private(set) var urls: [URL] = []
+    func append(_ url: URL) { urls.append(url) }
+}
+
 final class ModelBrowserTests: XCTestCase {
     private func model(_ id: String, lab: String?, date: Double? = nil) -> UpstreamModel {
         UpstreamModel(id: id, contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil,
@@ -42,6 +47,111 @@ final class ModelBrowserTests: XCTestCase {
         XCTAssertEqual(store.snapshots[identity]?.models.map(\.id), ["model"])
         XCTAssertNotNil(store.errors[identity])
         XCTAssertFalse(store.loading.contains(identity))
+    }
+    @MainActor func testXcodeModelMenuOffersFetchedCatalogWithoutASubset() async {
+        let name = UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set("lmstudio", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertFalse(vm.xcodeModelMenuCandidates.contains("essentialai/rnj-1"))
+        await vm.providerCatalog.refresh(vm.browserIdentity(vm.selectedUpstreamSelection)) { [.idOnly("essentialai/rnj-1")] }
+        XCTAssertTrue(vm.xcodeModelMenuCandidates.contains("essentialai/rnj-1"))
+        XCTAssertTrue(vm.selectedXcodeAgentModel.isEmpty, "Offering a model must not select it")
+        vm.useBrowserModel(.idOnly("essentialai/rnj-1"), selection: vm.selectedUpstreamSelection)
+        XCTAssertEqual(vm.effectiveXcodeAgentModel, "essentialai/rnj-1")
+    }
+    @MainActor func testXcodeModelMenuKeepsAChosenSubset() async {
+        let name = UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set("lmstudio", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.selectedUpstreamModels = ["kept"]
+        await vm.providerCatalog.refresh(vm.browserIdentity(vm.selectedUpstreamSelection)) { [.idOnly("kept"), .idOnly("other")] }
+        XCTAssertFalse(vm.xcodeModelMenuCandidates.contains("other"))
+    }
+    @MainActor func testXcodeModelMenuRefreshReportsUnreachableLocalServerAndRetries() async {
+        let name = UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set("lmstudio", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        // Port 9 (discard) is closed on loopback, so the fetch fails at once.
+        defaults.set("http://127.0.0.1:9/v1", forKey: "proxypilot.upstreamAPIBaseURL.lmstudio")
+        let vm = AppViewModel(defaults: defaults)
+        let identity = vm.browserIdentity(vm.selectedUpstreamSelection)
+        await vm.refreshXcodeModelMenu()
+        XCTAssertNotNil(vm.providerCatalog.errors[identity])
+        let message = vm.xcodeModelMenuEmptyMessage(error: vm.providerCatalog.errors[identity])
+        XCTAssertTrue(message.contains("LM Studio"))
+        XCTAssertTrue(message.contains("http://127.0.0.1:9/v1"))
+        XCTAssertTrue(vm.xcodeModelMenuEmptyMessage(error: nil).contains("reported no models"))
+        // A local provider is asked again even inside the one-hour catalog window.
+        await vm.providerCatalog.refresh(identity, force: true) { [] }
+        XCTAssertNil(vm.providerCatalog.errors[identity])
+        await vm.refreshXcodeModelMenu()
+        XCTAssertNotNil(vm.providerCatalog.errors[identity])
+    }
+    @MainActor func testXcodeModelLoadStateComesFromLMStudioAndClearsForOtherProviders() async {
+        let name = UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set("lmstudio", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.useBrowserModel(.idOnly("prism-ml/bonsai-27b"), selection: vm.selectedUpstreamSelection)
+        let requested = RequestedURLs()
+        vm.localModelStateFetcher = { url in
+            await requested.append(url)
+            return Data(#"{"data":[{"id":"prism-ml/bonsai-27b","state":"not-loaded","max_context_length":262144}]}"#.utf8)
+        }
+        await vm.refreshXcodeModelLoadState()
+        let urls = await requested.urls
+        XCTAssertEqual(urls.map(\.absoluteString), ["http://localhost:1234/api/v0/models"])
+        XCTAssertEqual(vm.xcodeModelLoadState,
+                       LocalModelLoadState(modelID: "prism-ml/bonsai-27b", isLoaded: false, maxContextLength: 262144))
+
+        vm.localModelStateFetcher = { _ in
+            Data(#"{"data":[{"id":"prism-ml/bonsai-27b","state":"loaded","max_context_length":262144,"loaded_context_length":40192}]}"#.utf8)
+        }
+        await vm.refreshXcodeModelLoadState()
+        XCTAssertEqual(vm.xcodeModelLoadState?.loadedContextLength, 40192)
+
+        vm.localModelStateFetcher = { _ in throw URLError(.cannotConnectToHost) }
+        await vm.refreshXcodeModelLoadState()
+        XCTAssertNil(vm.xcodeModelLoadState, "an unreachable server is unknown, not unloaded")
+
+        // Start from a known state, so switching provider has something to clear.
+        vm.localModelStateFetcher = { _ in
+            Data(#"{"data":[{"id":"prism-ml/bonsai-27b","state":"loaded","max_context_length":262144,"loaded_context_length":40192}]}"#.utf8)
+        }
+        await vm.refreshXcodeModelLoadState()
+        XCTAssertNotNil(vm.xcodeModelLoadState)
+        vm.localModelStateFetcher = { _ in XCTFail("only LM Studio is asked"); return Data() }
+        vm.selectedUpstreamSelection = .builtIn(.ollama)
+        await vm.refreshXcodeModelLoadState()
+        XCTAssertNil(vm.xcodeModelLoadState)
+    }
+
+    /// A slow answer must not overwrite the answer to a later request.
+    @MainActor func testOlderLoadStateAnswerDoesNotOverwriteANewerOne() async {
+        let name = UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set("lmstudio", forKey: ProviderManager.upstreamProviderDefaultsKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.useBrowserModel(.idOnly("prism-ml/bonsai-27b"), selection: vm.selectedUpstreamSelection)
+        vm.localModelStateFetcher = { _ in
+            try await Task.sleep(for: .milliseconds(300))
+            return Data(#"{"data":[{"id":"prism-ml/bonsai-27b","state":"not-loaded","max_context_length":262144}]}"#.utf8)
+        }
+        let slow = Task { await vm.refreshXcodeModelLoadState() }
+        try? await Task.sleep(for: .milliseconds(50))
+        vm.localModelStateFetcher = { _ in
+            Data(#"{"data":[{"id":"prism-ml/bonsai-27b","state":"loaded","max_context_length":262144,"loaded_context_length":40192}]}"#.utf8)
+        }
+        await vm.refreshXcodeModelLoadState()
+        await slow.value
+        XCTAssertEqual(vm.xcodeModelLoadState?.isLoaded, true)
     }
     @MainActor func testBrowsingAndFavoritingDoNotChangeXcodeSelectionOrAdvertisedModels() {
         let name = UUID().uuidString

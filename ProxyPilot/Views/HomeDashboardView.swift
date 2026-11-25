@@ -231,7 +231,7 @@ struct HomeDashboardView: View {
 
                 ViewThatFits {
                     HStack(spacing: 12) {
-                        heroMetric("Completed Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right") {
+                        heroMetric("Completed Requests", "\(vm.sessionReportCard.completedRequests)", systemImage: "arrow.left.arrow.right") {
                             requestStatusDetail
                         }
                         heroMetric(
@@ -247,7 +247,7 @@ struct HomeDashboardView: View {
                     }
 
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 12)], spacing: 12) {
-                        heroMetric("Completed Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right") {
+                        heroMetric("Completed Requests", "\(vm.sessionReportCard.completedRequests)", systemImage: "arrow.left.arrow.right") {
                             requestStatusDetail
                         }
                         heroMetric(
@@ -278,6 +278,20 @@ struct HomeDashboardView: View {
                         agentModelStatusBadge
                         preflightStatusBadge
                     }
+                }
+
+                if let failure = vm.localProxyState.lastUpstreamFailure {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("The last request failed", systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Text(failure.message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                    .accessibilityElement(children: .combine)
                 }
 
                 if let issue = vm.activeIssue {
@@ -312,11 +326,14 @@ struct HomeDashboardView: View {
         }
     }
 
+    /// The menu's status line. "Xcode proxy running" was shown for any
+    /// listener, including the RepoGPS route daemon.
     private var currentSessionStatusBadge: some View {
-        statusBadge(
-            title: vm.isRunning ? "Xcode proxy running" : "Xcode proxy stopped",
-            systemImage: vm.isRunning ? "checkmark.circle.fill" : "circle.fill",
-            color: vm.isRunning ? .green : .secondary
+        let ownership = vm.menuBarProxyOwnership
+        return statusBadge(
+            title: ownership.statusTitle,
+            systemImage: ownership.isRunning ? "checkmark.circle.fill" : "circle.fill",
+            color: ownership.isRunning ? .green : .secondary
         )
     }
 
@@ -361,19 +378,34 @@ struct HomeDashboardView: View {
         }
     }
 
+    /// The menu's action set for the current owner, with its confirmations.
+    /// The old fixed Start/Stop/Restart strip offered a one-click Restart that
+    /// replaced a serving RepoGPS route with the Xcode proxy on the same port.
     private var proxyActionGroup: some View {
-        compactControlGroup {
+        let actions = vm.menuBarProxyOwnership.actions(isStoppingCLIProxy: vm.isStoppingCLIProxy)
+        return compactControlGroup {
             HStack(spacing: 2) {
-                controlStripButton("Start", systemImage: "play.fill", isDisabled: !vm.canStartProxy) {
-                    Task { await vm.startProxy() }
+                if actions.isEmpty {
+                    Text(vm.statusText)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
                 }
-                controlStripDivider
-                controlStripButton("Stop", systemImage: "stop.fill", isDisabled: !vm.canStopProxy, role: .destructive) {
-                    Task { await vm.stopProxy() }
+                ForEach(Array(actions.enumerated()), id: \.element) { index, action in
+                    if index > 0 { controlStripDivider }
+                    controlStripButton(action.compactTitle, systemImage: action.systemImage,
+                                       role: action.isDestructive ? .destructive : nil) {
+                        ProxyControlActionRunner.run(action, vm: vm)
+                    }
+                    .help(action.title)
                 }
-                controlStripDivider
-                controlStripButton("Restart", systemImage: "arrow.clockwise", isDisabled: !vm.canRestartProxy) {
-                    Task { await vm.restartProxy() }
+                if vm.offersRepoGPSRouteStart {
+                    controlStripDivider
+                    controlStripButton("Start RepoGPS", systemImage: "play.circle", isDisabled: vm.routeControl.isApplying) {
+                        ProxyControlActionRunner.startRepoGPSRoute(vm: vm)
+                    }
+                    .help("Start RepoGPS Proxy: starts the selected RepoGPS route without changing it")
                 }
             }
         }
@@ -936,15 +968,19 @@ struct HomeDashboardView: View {
     }
 
     private func sessionRequestTokenValue(_ value: Int, request: SessionReportCard.RequestRecord) -> String {
-        sessionRequestHasTokenTelemetry(request) ? "\(value)" : "Unavailable"
+        sessionRequestHasTokenTelemetry(request) || request.upstreamFailure != nil ? "\(value)" : "Unavailable"
     }
 
     private func sessionRequestTotalValue(_ request: SessionReportCard.RequestRecord) -> String {
-        sessionRequestHasTokenTelemetry(request) ? "\(request.totalTokens)" : "Unavailable"
+        sessionRequestHasTokenTelemetry(request) || request.upstreamFailure != nil ? "\(request.totalTokens)" : "Unavailable"
     }
 
     private func sessionRequestInlineTokenSummary(_ request: SessionReportCard.RequestRecord) -> String {
-        sessionRequestHasTokenTelemetry(request) ? "\(request.totalTokens) tok" : "token usage unavailable"
+        RequestRowSummary.text(
+            totalTokens: request.totalTokens,
+            hasTokenTelemetry: sessionRequestHasTokenTelemetry(request),
+            failure: request.upstreamFailure
+        )
     }
 
     private var requestStatusDetail: some View {

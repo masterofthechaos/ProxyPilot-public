@@ -196,21 +196,6 @@ enum LocalProxyServerHelpers {
         }
     }
 
-    // MARK: - Upstream Error Message Formatting
-
-    static func upstreamErrorMessage(
-        statusCode: Int,
-        body: String,
-        provider: UpstreamProvider
-    ) -> String {
-        if provider == .google,
-           statusCode == 400,
-           body.localizedCaseInsensitiveContains("thought_signature") {
-            return "Google direct rejected the tool-call continuation due to thought_signature validation. If this persists, use OpenRouter as the current workaround."
-        }
-        return "Upstream error: \(SensitiveTextSanitizer.sanitize(body, maxCharacters: 600))"
-    }
-
     // MARK: - Log Redaction
 
     /// Redact a string for log output: scrub bearer tokens and API key values,

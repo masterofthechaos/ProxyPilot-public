@@ -26,6 +26,10 @@ final class SessionReportCard: ObservableObject {
         var translationMode: String?
         var promptCacheStrategy: String?
         var promptCacheApplied: Bool?
+        /// `StreamOutcome` raw value; nil for buffered or not-assessed requests.
+        var streamOutcome: String?
+        /// Why the upstream request failed, when classified. Category and numbers only.
+        var upstreamFailure: UpstreamFailure?
 
         var totalTokens: Int { promptTokens + completionTokens }
 
@@ -37,7 +41,13 @@ final class SessionReportCard: ObservableObject {
                 || promptCacheWriteTokens != nil
         }
 
-        init(
+/// False when the provider failed the request or the stream did not
+        /// finish.
+        var isCompleted: Bool {
+            upstreamFailure == nil && (streamOutcome == nil || streamOutcome == StreamOutcome.completed.rawValue)
+        }
+
+                init(
             id: UUID = UUID(),
             timestamp: Date,
             model: String,
@@ -57,7 +67,9 @@ final class SessionReportCard: ObservableObject {
             contextCompactionEnabled: Bool? = nil,
             translationMode: String? = nil,
             promptCacheStrategy: String? = nil,
-            promptCacheApplied: Bool? = nil
+            promptCacheApplied: Bool? = nil,
+            streamOutcome: String? = nil,
+            upstreamFailure: UpstreamFailure? = nil
         ) {
             self.id = id
             self.timestamp = timestamp
@@ -79,6 +91,8 @@ final class SessionReportCard: ObservableObject {
             self.translationMode = translationMode
             self.promptCacheStrategy = promptCacheStrategy
             self.promptCacheApplied = promptCacheApplied
+            self.streamOutcome = streamOutcome
+            self.upstreamFailure = upstreamFailure
         }
     }
 
@@ -94,7 +108,9 @@ final class SessionReportCard: ObservableObject {
             requestedModel: entry.requestedModel, providerReportedCostUSD: entry.providerReportedCostUSD,
             serverToolCalls: entry.serverToolCalls, promptCachingMode: entry.promptCachingMode,
             contextCompactionEnabled: entry.contextCompactionEnabled, translationMode: entry.translationMode,
-            promptCacheStrategy: entry.promptCacheStrategy, promptCacheApplied: entry.promptCacheApplied
+            promptCacheStrategy: entry.promptCacheStrategy, promptCacheApplied: entry.promptCacheApplied,
+            streamOutcome: entry.streamOutcome,
+            upstreamFailure: entry.upstreamFailure
         )
     }
 
@@ -133,6 +149,11 @@ final class SessionReportCard: ObservableObject {
 
     var totalRequests: Int { totalRequestCount }
 
+    /// Requests that delivered a complete response. A request the provider
+    /// failed, or a stream that was cut off, is recorded but not counted here.
+    private var completedRequestCount: Int = 0
+    var completedRequests: Int { completedRequestCount }
+
     var totalPromptTokens: Int {
         requests.reduce(0) { $0 + $1.promptTokens }
     }
@@ -170,8 +191,12 @@ final class SessionReportCard: ObservableObject {
         requests.contains { $0.promptCacheHitTokens != nil || $0.promptCacheMissTokens != nil || $0.promptCacheWriteTokens != nil }
     }
 
+    /// Token totals are known when some request reported usage, or when every
+    /// request failed: a failed request used no tokens, which is not the
+    /// same as a provider that returned no usage.
     var tokenAccountingAvailable: Bool {
         requests.contains { $0.hasTokenTelemetry }
+            || (!requests.isEmpty && requests.allSatisfy { $0.upstreamFailure != nil })
     }
 
     var modelDistribution: [(model: String, count: Int)] {
@@ -241,6 +266,7 @@ final class SessionReportCard: ObservableObject {
         guard !fresh.isEmpty else { return }
         if firstRequestTimestamp == nil { firstRequestTimestamp = fresh.first?.timestamp }
         totalRequestCount += fresh.count
+        completedRequestCount += fresh.filter(\.isCompleted).count
         // Publish once per import batch, retaining the original UI performance
         // contract even when an archive contains hundreds of records.
         requests = Array((requests + fresh).suffix(Self.maxRetainedRequests))
@@ -271,6 +297,7 @@ final class SessionReportCard: ObservableObject {
         recordedRequestIDs.removeAll()
         firstRequestTimestamp = nil
         totalRequestCount = 0
+        completedRequestCount = 0
     }
 
     private static func buildLatencySummary(from durations: [TimeInterval]) -> LatencySummary? {
@@ -297,5 +324,17 @@ final class SessionReportCard: ObservableObject {
         if lower == upper { return sorted[lower] }
         let weight = position - Double(lower)
         return sorted[lower] + ((sorted[upper] - sorted[lower]) * weight)
+    }
+}
+
+/// The one-line token summary on a request row, shared by Home and Session
+/// History. A failed request says why it failed.
+enum RequestRowSummary {
+    static func text(totalTokens: Int, hasTokenTelemetry: Bool, failure: UpstreamFailure?) -> String {
+        if let failure {
+            let reason = "failed: \(failure.shortDescription)"
+            return hasTokenTelemetry ? "\(totalTokens) tok, \(reason)" : reason
+        }
+        return hasTokenTelemetry ? "\(totalTokens) tok" : "token usage unavailable"
     }
 }

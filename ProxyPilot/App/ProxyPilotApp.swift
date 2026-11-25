@@ -64,7 +64,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         Task { @MainActor in
-            await viewModel.stopProxy()
+            // Only the GUI's own proxy. A background CLI proxy — the RepoGPS
+            // route, or one Xcode's launcher started — keeps running.
+            await viewModel.stopOwnedProxyForQuit()
             await viewModel.applicationWillTerminate()
             sender.reply(toApplicationShouldTerminate: true)
         }

@@ -217,6 +217,10 @@ public struct InputOutputLogRecord: Sendable, Codable, Equatable, Identifiable {
     /// and was truncated. Surfaced in Session History so users do not silently
     /// see a partial Markdown/JSONL export.
     public let outputTruncated: Bool?
+    /// `StreamOutcome` raw value for streamed responses; nil when buffered,
+    /// not assessed, or written before outcomes were recorded. `statusCode`
+    /// stays the HTTP status actually sent (200 once streaming began).
+    public let streamOutcome: String?
 
     public init(
         id: UUID = UUID(),
@@ -233,7 +237,8 @@ public struct InputOutputLogRecord: Sendable, Codable, Equatable, Identifiable {
         deleteOnQuit: Bool = false,
         input: InputOutputLogContent?,
         output: InputOutputLogContent?,
-        outputTruncated: Bool? = nil
+        outputTruncated: Bool? = nil,
+        streamOutcome: String? = nil
     ) {
         self.id = id
         self.schemaVersion = schemaVersion
@@ -250,6 +255,7 @@ public struct InputOutputLogRecord: Sendable, Codable, Equatable, Identifiable {
         self.input = input
         self.output = output
         self.outputTruncated = outputTruncated
+        self.streamOutcome = streamOutcome
     }
 }
 
@@ -687,7 +693,8 @@ public struct InputOutputLoggingRecorder: Sendable {
         startedAt: Date,
         inputBody: Data?,
         outputBody: Data?,
-        outputTruncated: Bool = false
+        outputTruncated: Bool = false,
+        streamOutcome: StreamOutcome? = nil
     ) async throws {
         let preferences = try preferencesStore.load()
         guard preferences.isEffective(for: source) else { return }
@@ -715,7 +722,8 @@ public struct InputOutputLoggingRecorder: Sendable {
             deleteOnQuit: preferences.retention == .untilQuit,
             input: preferences.recordInputs ? .fromBody(inputBody) : nil,
             output: recordedOutput,
-            outputTruncated: (recordedOutput != nil && outputTruncated) ? true : nil
+            outputTruncated: (recordedOutput != nil && outputTruncated) ? true : nil,
+            streamOutcome: streamOutcome?.rawValue
         )
 
         guard record.input != nil || record.output != nil else { return }

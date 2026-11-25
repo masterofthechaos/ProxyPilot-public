@@ -4,6 +4,56 @@ import Network
 import ProxyPilotCore
 @testable import ProxyPilot
 
+final class ProxyIdleSleepProtectionTests: XCTestCase {
+    @MainActor
+    func testActiveWorkAndThreeHourGraceUseOnlyCompletedResponses() {
+        var clock = ContinuousClock.now
+        var assertions: [Bool] = []
+        let protection = ProxyIdleSleepProtection(now: { clock }, setAssertion: { assertions.append($0) })
+        let first = UUID()
+        let second = UUID()
+        protection.running = true
+        protection.begin(first)
+        XCTAssertTrue(assertions.isEmpty)
+
+        protection.enabled = true
+        XCTAssertEqual(assertions, [true])
+        protection.begin(second)
+        protection.end(first, completed: true)
+        clock = clock.advanced(by: .seconds(10_801))
+        protection.refresh()
+        XCTAssertEqual(assertions, [true])
+
+        protection.end(second)
+        XCTAssertEqual(assertions, [true, false])
+        protection.begin(first)
+        protection.end(first, completed: true)
+        clock = clock.advanced(by: .seconds(10_799))
+        protection.refresh()
+        XCTAssertEqual(assertions, [true, false, true])
+
+        clock = clock.advanced(by: .seconds(1))
+        protection.refresh()
+        XCTAssertEqual(assertions, [true, false, true, false])
+    }
+
+    @MainActor
+    func testToggleAndStopReleaseImmediately() {
+        var assertions: [Bool] = []
+        let protection = ProxyIdleSleepProtection(setAssertion: { assertions.append($0) })
+        protection.enabled = true
+        protection.running = true
+        let request = UUID()
+        protection.begin(request)
+        protection.enabled = false
+        protection.enabled = true
+        protection.running = false
+        protection.end(request, completed: true)
+        protection.running = true
+        XCTAssertEqual(assertions, [true, false, true, false])
+    }
+}
+
 private final class LocalHTTPStubServer: @unchecked Sendable {
     struct RequestRecord {
         let path: String
@@ -961,46 +1011,6 @@ final class LocalProxyServerTests: XCTestCase {
     func testReasonPhraseUnknownCode() {
         XCTAssertEqual(H.reasonPhrase(418), "Unknown")
         XCTAssertEqual(H.reasonPhrase(999), "Unknown")
-    }
-
-    // MARK: - Upstream Error Messages
-
-    func testUpstreamErrorGoogleThoughtSignature() {
-        let msg = H.upstreamErrorMessage(
-            statusCode: 400,
-            body: "Invalid thought_signature in tool call",
-            provider: .google
-        )
-        XCTAssertTrue(msg.contains("Google direct rejected"))
-        XCTAssertTrue(msg.contains("OpenRouter"))
-    }
-
-    func testUpstreamErrorGoogleNonThoughtSignatureIsGeneric() {
-        let msg = H.upstreamErrorMessage(
-            statusCode: 400,
-            body: "Some other error",
-            provider: .google
-        )
-        XCTAssertEqual(msg, "Upstream error: Some other error")
-    }
-
-    func testUpstreamErrorNonGoogleProviderIsGeneric() {
-        let msg = H.upstreamErrorMessage(
-            statusCode: 400,
-            body: "thought_signature issue",
-            provider: .openRouter
-        )
-        // Non-Google providers never get the special message
-        XCTAssertEqual(msg, "Upstream error: thought_signature issue")
-    }
-
-    func testUpstreamErrorGoogleNon400IsGeneric() {
-        let msg = H.upstreamErrorMessage(
-            statusCode: 500,
-            body: "thought_signature error",
-            provider: .google
-        )
-        XCTAssertEqual(msg, "Upstream error: thought_signature error")
     }
 
     // MARK: - Log Redaction

@@ -12,4 +12,16 @@ enum RouteInterruptionConfirmation {
         alert.addButton(withTitle: "Apply & Restart")
         return alert.runModal() == .alertSecondButtonReturn
     }
+
+    /// Stopping interrupts the same requests a restart does, but nothing is
+    /// started again, so the wording must not promise an apply.
+    static func confirmStop(route: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Stop \(route)?"
+        alert.informativeText = "Requests using this proxy will be interrupted, including other clients. Continue only when you are ready to interrupt them."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Stop")
+        return alert.runModal() == .alertSecondButtonReturn
+    }
 }

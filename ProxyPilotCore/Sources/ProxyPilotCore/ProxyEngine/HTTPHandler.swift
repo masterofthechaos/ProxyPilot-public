@@ -475,6 +475,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         responseData: validated.data,
                         config: config
                     )
+                } else {
+                    await recordUpstreamFailure(
+                        UpstreamFailureClassifier.classify(
+                            httpStatus: validated.statusCode,
+                            body: String(decoding: validated.data, as: UTF8.self)
+                        ),
+                        model: requestModel, path: "/v1/messages", wasStreaming: false,
+                        startedAt: requestStart, config: config
+                    )
                 }
                 await recordInputOutputLog(
                     model: modelFromResponse(validated.data) ?? requestModel,
@@ -494,20 +503,11 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             } catch {
                 guard !Task.isCancelled else { return }
-                let message: String
-                if case let UpstreamClient.UpstreamError.httpError(statusCode, bodyData) = error {
-                    message = self.upstreamErrorMessage(
-                        statusCode: statusCode,
-                        responseData: bodyData,
-                        provider: config.upstreamProvider
-                    )
-                } else {
-                    message = "Upstream passthrough error: \(error.localizedDescription)"
-                }
-                eventLoop.execute {
-                    self.sendErrorResponse(context: ctxBox.value, status: .badGateway, message: message)
-                    ctxBox.value.flush()
-                }
+                await failBeforeResponse(
+                    error: error, anthropic: true, forwardsProviderBody: true, model: requestModel, path: "/v1/messages",
+                    wasStreaming: false, startedAt: requestStart,
+                    ctxBox: ctxBox, eventLoop: eventLoop, config: config
+                )
             }
         }
     }
@@ -626,21 +626,28 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             } catch {
                 guard !Task.isCancelled else { return }
-                let message: String
-                if case let UpstreamClient.UpstreamError.httpError(_, bodyData) = error {
-                    message = self.upstreamErrorMessage(
-                        statusCode: 502,
-                        responseData: bodyData,
-                        provider: config.upstreamProvider
-                    )
-                } else {
-                    message = "Upstream passthrough streaming error: \(error.localizedDescription)"
-                }
                 let didStart = streamStarted
+                guard didStart else {
+                    await failBeforeResponse(
+                        error: error, anthropic: true, forwardsProviderBody: true, model: lastSeenModel, path: "/v1/messages",
+                        wasStreaming: true, startedAt: requestStart,
+                        ctxBox: ctxBox, eventLoop: eventLoop, config: config
+                    )
+                    return
+                }
+                // Headers are out: report the failure inside the stream.
+                writeBodyAndFlush(
+                    StreamErrorEvent.anthropic(message: StreamErrorEvent.upstreamFailureMessage(error)),
+                    ctxBox: ctxBox,
+                    eventLoop: eventLoop
+                )
+                await recordUpstreamFailure(
+                    UpstreamFailureClassifier.classify(error: error), model: lastSeenModel,
+                    path: "/v1/messages", wasStreaming: true, startedAt: requestStart,
+                    streamOutcome: .upstreamError, config: config
+                )
                 eventLoop.execute {
-                    if !didStart {
-                        self.sendErrorResponse(context: ctxBox.value, status: .badGateway, message: message)
-                    }
+                    ctxBox.value.write(self.wrapOutboundOut(.end(nil)), promise: nil)
                     ctxBox.value.flush()
                 }
             }
@@ -672,15 +679,12 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 try Task.checkCancellation()
 
                 guard (200..<300).contains(statusCode) else {
-                    let message = self.upstreamErrorMessage(
-                        statusCode: statusCode,
-                        responseData: responseData,
-                        provider: config.upstreamProvider
+                    await failBeforeResponse(
+                        error: UpstreamClient.UpstreamError.httpError(statusCode: statusCode, body: responseData),
+                        anthropic: true, model: originalModel, path: "/v1/messages",
+                        wasStreaming: false, startedAt: requestStart,
+                        ctxBox: ctxBox, eventLoop: eventLoop, config: config
                     )
-                    eventLoop.execute {
-                        self.sendErrorResponse(context: ctxBox.value, status: .badGateway, message: message)
-                        ctxBox.value.flush()
-                    }
                     return
                 }
 
@@ -732,20 +736,11 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             } catch {
                 guard !Task.isCancelled else { return }
-                let message: String
-                if case let UpstreamClient.UpstreamError.httpError(statusCode, bodyData) = error {
-                    message = self.upstreamErrorMessage(
-                        statusCode: statusCode,
-                        responseData: bodyData,
-                        provider: config.upstreamProvider
-                    )
-                } else {
-                    message = "Upstream error: \(error.localizedDescription)"
-                }
-                eventLoop.execute {
-                    self.sendErrorResponse(context: ctxBox.value, status: .badGateway, message: message)
-                    ctxBox.value.flush()
-                }
+                await failBeforeResponse(
+                    error: error, anthropic: true, model: originalModel, path: "/v1/messages",
+                    wasStreaming: false, startedAt: requestStart,
+                    ctxBox: ctxBox, eventLoop: eventLoop, config: config
+                )
             }
         }
     }
@@ -784,6 +779,28 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     // Each chunk is one line (with trailing \n) from the SSE stream
                     guard let line = String(data: chunk, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
                         continue
+                    }
+
+                    // A provider can answer 200 and then fail inside the
+                    // stream. Report it in the client's stream; do not let it
+                    // pass as an empty reply.
+                    if let report = UpstreamFailureClassifier.classify(streamLine: line) {
+                        if !streamStarted {
+                            streamStarted = true
+                            writeEventStreamHead(ctxBox: ctxBox, eventLoop: eventLoop)
+                        }
+                        let event = StreamErrorEvent.anthropic(message: config.clientMessage(for: report))
+                        outputCapture.append(event)
+                        writeBodyAndFlush(event, ctxBox: ctxBox, eventLoop: eventLoop)
+                        await recordUpstreamFailure(
+                            report, model: originalModel, path: "/v1/messages", wasStreaming: true,
+                            startedAt: requestStart, streamOutcome: .upstreamError, config: config
+                        )
+                        eventLoop.execute {
+                            ctxBox.value.write(self.wrapOutboundOut(.end(nil)), promise: nil)
+                            ctxBox.value.flush()
+                        }
+                        return
                     }
 
                     // Skip empty lines and non-data lines
@@ -904,24 +921,28 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             } catch {
                 guard !Task.isCancelled else { return }
                 let didStart = streamStarted
-                let message: String
-                if case let UpstreamClient.UpstreamError.httpError(statusCode, bodyData) = error {
-                    message = self.upstreamErrorMessage(
-                        statusCode: statusCode,
-                        responseData: bodyData,
-                        provider: config.upstreamProvider
+                guard didStart else {
+                    await failBeforeResponse(
+                        error: error, anthropic: true, model: originalModel, path: "/v1/messages",
+                        wasStreaming: true, startedAt: requestStart,
+                        ctxBox: ctxBox, eventLoop: eventLoop, config: config
                     )
-                } else {
-                    message = "Upstream error: \(error.localizedDescription)"
+                    return
                 }
+                // Headers are out: report the failure inside the stream.
+                writeBodyAndFlush(
+                    StreamErrorEvent.anthropic(message: StreamErrorEvent.upstreamFailureMessage(error)),
+                    ctxBox: ctxBox,
+                    eventLoop: eventLoop
+                )
+                await recordUpstreamFailure(
+                    UpstreamFailureClassifier.classify(error: error), model: originalModel,
+                    path: "/v1/messages", wasStreaming: true, startedAt: requestStart,
+                    streamOutcome: .upstreamError, config: config
+                )
                 eventLoop.execute {
-                    if didStart {
-                        ctxBox.value.write(self.wrapOutboundOut(.end(nil)), promise: nil)
-                        ctxBox.value.flush()
-                    } else {
-                        self.sendErrorResponse(context: ctxBox.value, status: .badGateway, message: message)
-                        ctxBox.value.flush()
-                    }
+                    ctxBox.value.write(self.wrapOutboundOut(.end(nil)), promise: nil)
+                    ctxBox.value.flush()
                 }
             }
         }
@@ -1069,6 +1090,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         serverToolCalls: tracksTutor ? TutorResponseAccounting.receipts(from: normalized.data) : nil,
                         config: config
                     )
+                } else {
+                    await recordUpstreamFailure(
+                        UpstreamFailureClassifier.classify(
+                            httpStatus: normalized.statusCode,
+                            body: String(decoding: normalized.data, as: UTF8.self)
+                        ),
+                        model: requestModel, requestedModel: requestModel, path: path,
+                        wasStreaming: false, startedAt: requestStart, config: config
+                    )
                 }
                 await recordInputOutputLog(
                     model: modelFromResponse(normalized.data) ?? requestModel,
@@ -1092,15 +1122,11 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             } catch {
                 guard !Task.isCancelled else { return }
-                let message = "Upstream error: \(error.localizedDescription)"
-                eventLoop.execute {
-                    self.sendErrorResponse(
-                        context: ctxBox.value,
-                        status: .badGateway,
-                        message: message
-                    )
-                    ctxBox.value.flush()
-                }
+                await failBeforeResponse(
+                    error: error, anthropic: false, model: requestModel, requestedModel: requestModel,
+                    path: path, wasStreaming: false, startedAt: requestStart,
+                    ctxBox: ctxBox, eventLoop: eventLoop, config: config
+                )
             }
         }
     }
@@ -1130,6 +1156,44 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
             var streamingNormalizationContext = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
             var tutorAccounting = TutorResponseAccounting()
+            var completion = OpenAIChatStreamCompletion()
+            let trace = AgentStreamTrace(engine: .cli, attribution: RequestAttributionContext.current, port: Int(config.port))
+            var lastTraceActivity = Date.distantPast
+            await trace?.record("stream_started")
+
+            // Journals what the stream delivered, labelled with how it ended.
+            func recordStreamedChat(outcome: StreamOutcome, failure: UpstreamFailureReport? = nil) async {
+                let failure = outcome == .completed ? nil : (failure ?? completion.upstreamFailure)
+                await recordSessionRequest(
+                    model: lastSeenModel,
+                    requestedModel: requestModel,
+                    path: path,
+                    wasStreaming: true,
+                    startedAt: requestStart,
+                    promptTokens: lastSeenPromptTokens,
+                    completionTokens: lastSeenCompletionTokens,
+                    promptCacheHitTokens: lastSeenPromptCacheHitTokens,
+                    promptCacheMissTokens: lastSeenPromptCacheMissTokens,
+                    promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
+                    providerReportedCostUSD: lastSeenProviderCostUSD,
+                    serverToolCalls: tracksTutor ? tutorAccounting.receipts : nil,
+                    streamOutcome: outcome,
+                    upstreamFailure: failure?.failure,
+                    config: config
+                )
+                await recordInputOutputLog(
+                    model: lastSeenModel,
+                    path: path,
+                    wasStreaming: true,
+                    statusCode: 200,
+                    startedAt: requestStart,
+                    inputBody: originalBody,
+                    outputBody: outputCapture.capturedOutput,
+                    outputTruncated: outputCapture.isTruncated,
+                    streamOutcome: outcome,
+                    config: config
+                )
+            }
 
             do {
                 let stream = UpstreamClient.forwardStreaming(
@@ -1141,7 +1205,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 )
 
                 for try await chunk in stream {
+                    let now = Date()
+                    if now.timeIntervalSince(lastTraceActivity) >= 15 {
+                        await trace?.record(streamStarted ? "stream_activity" : "stream_first_activity")
+                        lastTraceActivity = now
+                    }
                     let rawLine = String(decoding: chunk, as: UTF8.self).trimmingCharacters(in: .newlines)
+                    let wasComplete = completion.isComplete
+                    completion.observe(line: rawLine)
+                    if !wasComplete && completion.isComplete { await trace?.record("stream_terminal") }
                     if tracksTutor { tutorAccounting.observe(streamingLine: rawLine) }
                     updateStreamingUsage(
                         from: rawLine,
@@ -1190,69 +1262,186 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 try Task.checkCancellation()
                 let didStart = streamStarted
-                if didStart {
-                    await recordSessionRequest(
-                        model: lastSeenModel,
-                        requestedModel: requestModel,
-                        path: path,
-                        wasStreaming: true,
-                        startedAt: requestStart,
-                        promptTokens: lastSeenPromptTokens,
-                        completionTokens: lastSeenCompletionTokens,
-                        promptCacheHitTokens: lastSeenPromptCacheHitTokens,
-                        promptCacheMissTokens: lastSeenPromptCacheMissTokens,
-                        promptCacheWriteTokens: lastSeenPromptCacheWriteTokens,
-                        providerReportedCostUSD: lastSeenProviderCostUSD,
-                        serverToolCalls: tracksTutor ? tutorAccounting.receipts : nil,
-                        config: config
-                    )
-                    await recordInputOutputLog(
-                        model: lastSeenModel,
-                        path: path,
-                        wasStreaming: true,
-                        statusCode: 200,
-                        startedAt: requestStart,
-                        inputBody: originalBody,
-                        outputBody: outputCapture.capturedOutput,
-                        outputTruncated: outputCapture.isTruncated,
-                        config: config
-                    )
-                }
-                eventLoop.execute {
-                    if !didStart {
+                guard didStart else {
+                    await trace?.record("stream_empty")
+                    eventLoop.execute {
                         self.sendErrorResponse(
                             context: ctxBox.value,
                             status: .badGateway,
                             message: "Upstream returned empty stream"
                         )
                         ctxBox.value.flush()
-                    } else {
-                        ctxBox.value.write(self.wrapOutboundOut(.end(nil)), promise: nil)
-                        ctxBox.value.flush()
                     }
+                    return
+                }
+                // Either terminal signal completes the stream. A clean end
+                // without one is a cut-off, not a success: say so in-band.
+                let outcome = completion.outcomeAtEndOfStream
+                await trace?.record("stream_\(outcome.rawValue)")
+                if completion.needsInterruptionEvent {
+                    let event = StreamErrorEvent.openAIChat(
+                        message: StreamErrorEvent.interruptedMessage,
+                        code: StreamErrorEvent.interruptedCode
+                    )
+                    outputCapture.append(event)
+                    writeBodyAndFlush(event, ctxBox: ctxBox, eventLoop: eventLoop)
+                }
+                await recordStreamedChat(outcome: outcome)
+                eventLoop.execute {
+                    ctxBox.value.write(self.wrapOutboundOut(.end(nil)), promise: nil)
+                    ctxBox.value.flush()
                 }
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled else {
+                    await trace?.record("stream_cancelled")
+                    return
+                }
+                await trace?.record(completion.isComplete ? "stream_completed" : AgentStreamTrace.failureEvent(for: error))
                 let didStart = streamStarted
-                let message = "Upstream error: \(error.localizedDescription)"
+                guard didStart else {
+                    await failBeforeResponse(
+                        error: error, anthropic: false, model: lastSeenModel, requestedModel: requestModel,
+                        path: path, wasStreaming: true, startedAt: requestStart,
+                        ctxBox: ctxBox, eventLoop: eventLoop, config: config
+                    )
+                    return
+                }
+                // Headers are out. The model may already have finished: a
+                // terminal signal followed by an abnormal close (for example a
+                // missing final chunk after [DONE]) is still a complete response.
+                let outcome: StreamOutcome = completion.isComplete ? .completed : .upstreamError
+                if outcome == .upstreamError, !completion.sawUpstreamError {
+                    // Report the failure inside the stream, unless upstream's
+                    // own error event was already forwarded.
+                    let event = StreamErrorEvent.openAIChat(
+                        message: StreamErrorEvent.upstreamFailureMessage(error),
+                        code: StreamErrorEvent.upstreamFailureCode
+                    )
+                    outputCapture.append(event)
+                    writeBodyAndFlush(event, ctxBox: ctxBox, eventLoop: eventLoop)
+                }
+                await recordStreamedChat(
+                    outcome: outcome,
+                    failure: completion.upstreamFailure ?? UpstreamFailureClassifier.classify(error: error)
+                )
                 eventLoop.execute {
-                    if didStart {
-                        ctxBox.value.write(self.wrapOutboundOut(.end(nil)), promise: nil)
-                        ctxBox.value.flush()
-                    } else {
-                        self.sendErrorResponse(
-                            context: ctxBox.value,
-                            status: .badGateway,
-                            message: message
-                        )
-                        ctxBox.value.flush()
-                    }
+                    ctxBox.value.write(self.wrapOutboundOut(.end(nil)), promise: nil)
+                    ctxBox.value.flush()
                 }
             }
         }
     }
 
+    // MARK: - Upstream Failures
+
+    /// Journals a request the provider failed, with the classified reason.
+    /// The record carries no tokens: nothing was delivered.
+    private func recordUpstreamFailure(
+        _ report: UpstreamFailureReport,
+        model: String?,
+        requestedModel: String? = nil,
+        path: String,
+        wasStreaming: Bool,
+        startedAt: Date,
+        streamOutcome: StreamOutcome? = nil,
+        config: ProxyConfiguration
+    ) async {
+        await recordSessionRequest(
+            model: model,
+            requestedModel: requestedModel,
+            path: path,
+            wasStreaming: wasStreaming,
+            startedAt: startedAt,
+            promptTokens: 0,
+            completionTokens: 0,
+            streamOutcome: streamOutcome,
+            upstreamFailure: report.failure,
+            config: config
+        )
+    }
+
+    /// Answers a request the provider failed before any response was sent.
+    /// When the provider speaks the client's format (chat, or Anthropic
+    /// passthrough) its own error response is forwarded; otherwise the body
+    /// explains the failure in the client's format.
+    private func sendUpstreamFailure(
+        _ report: UpstreamFailureReport,
+        rawBody: Data? = nil,
+        anthropic: Bool,
+        forwardsProviderBody: Bool,
+        ctxBox: UnsafeSendableBox<ChannelHandlerContext>,
+        eventLoop: EventLoop,
+        config: ProxyConfiguration
+    ) {
+        let status = HTTPResponseStatus(statusCode: report.clientStatus)
+        let rawText = rawBody.map { String(decoding: $0, as: UTF8.self) }
+        let json: String
+        if forwardsProviderBody, report.failure.httpStatus != nil, let rawText, !rawText.isEmpty {
+            json = rawText
+        } else {
+            let message = config.clientMessage(for: report, rawBody: rawText)
+            json = anthropic
+                ? AnthropicTranslator.errorJSON(message: message)
+                : ProxyErrorResponse.openAI(message: message, type: "server_error")
+        }
+        eventLoop.execute {
+            self.sendJSONResponse(context: ctxBox.value, status: status, json: json)
+            ctxBox.value.flush()
+        }
+    }
+
+    /// Classifies a thrown upstream error, answers the client and journals it.
+    private func failBeforeResponse(
+        error: Error,
+        anthropic: Bool,
+        forwardsProviderBody: Bool? = nil,
+        model: String?,
+        requestedModel: String? = nil,
+        path: String,
+        wasStreaming: Bool,
+        startedAt: Date,
+        ctxBox: UnsafeSendableBox<ChannelHandlerContext>,
+        eventLoop: EventLoop,
+        config: ProxyConfiguration
+    ) async {
+        let report = UpstreamFailureClassifier.classify(error: error)
+        var rawBody: Data?
+        if case let UpstreamClient.UpstreamError.httpError(_, body) = error { rawBody = body }
+        sendUpstreamFailure(report, rawBody: rawBody, anthropic: anthropic,
+                            forwardsProviderBody: forwardsProviderBody ?? !anthropic,
+                            ctxBox: ctxBox, eventLoop: eventLoop, config: config)
+        await recordUpstreamFailure(report, model: model, requestedModel: requestedModel, path: path,
+                                    wasStreaming: wasStreaming, startedAt: startedAt, config: config)
+    }
+
+    /// Queues the response head of an event stream.
+    private func writeEventStreamHead(ctxBox: UnsafeSendableBox<ChannelHandlerContext>, eventLoop: EventLoop) {
+        eventLoop.execute {
+            var headers = HTTPHeaders()
+            headers.add(name: "Content-Type", value: "text/event-stream")
+            headers.add(name: "Cache-Control", value: "no-cache")
+            headers.add(name: "Connection", value: "keep-alive")
+            let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+            ctxBox.value.write(self.wrapOutboundOut(.head(head)), promise: nil)
+            ctxBox.value.flush()
+        }
+    }
+
     // MARK: - Response Helpers
+
+    /// Queues one body chunk on the event loop, in order with earlier writes.
+    private func writeBodyAndFlush(
+        _ data: Data,
+        ctxBox: UnsafeSendableBox<ChannelHandlerContext>,
+        eventLoop: EventLoop
+    ) {
+        eventLoop.execute {
+            var buffer = ctxBox.value.channel.allocator.buffer(capacity: data.count)
+            buffer.writeBytes(data)
+            ctxBox.value.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+            ctxBox.value.flush()
+        }
+    }
 
     private func sendUpstreamResponse(
         context: ChannelHandlerContext,
@@ -1382,6 +1571,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         promptCacheWriteTokens: Int? = nil,
         providerReportedCostUSD: Double? = nil,
         serverToolCalls: [TutorServerToolReceipt]? = nil,
+        streamOutcome: StreamOutcome? = nil,
+        upstreamFailure: UpstreamFailure? = nil,
         config: ProxyConfiguration
     ) async {
         guard let sessionStats = config.sessionStats else { return }
@@ -1415,7 +1606,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 : config.anthropicTranslatorMode.rawValue,
             serverToolCalls: serverToolCalls,
             promptCacheStrategy: PromptCacheRequestContext.current?.outcome?.strategy,
-            promptCacheApplied: PromptCacheRequestContext.current?.outcome?.applied
+            promptCacheApplied: PromptCacheRequestContext.current?.outcome?.applied,
+            streamOutcome: streamOutcome?.rawValue,
+            upstreamFailure: upstreamFailure
         ))
     }
 
@@ -1428,6 +1621,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         inputBody: Data?,
         outputBody: Data?,
         outputTruncated: Bool = false,
+        streamOutcome: StreamOutcome? = nil,
         config: ProxyConfiguration
     ) async {
         guard let logger = config.inputOutputLogger else { return }
@@ -1441,7 +1635,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             startedAt: startedAt,
             inputBody: inputBody,
             outputBody: outputBody,
-            outputTruncated: outputTruncated
+            outputTruncated: outputTruncated,
+            streamOutcome: streamOutcome
         )
     }
 
@@ -1504,60 +1699,5 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         promptCacheHitTokens = usage.promptCacheHitTokens ?? promptCacheHitTokens
         promptCacheMissTokens = usage.promptCacheMissTokens ?? promptCacheMissTokens
         promptCacheWriteTokens = usage.promptCacheWriteTokens ?? promptCacheWriteTokens
-    }
-
-    private func upstreamErrorMessage(
-        statusCode: Int,
-        responseData: Data,
-        provider: UpstreamProvider
-    ) -> String {
-        let body = String(decoding: responseData, as: UTF8.self)
-        if provider == .google,
-           statusCode == 400,
-           body.localizedCaseInsensitiveContains("thought_signature") {
-            return "Google direct rejected the tool-call continuation due to thought_signature validation. If this persists, use OpenRouter as the current workaround."
-        }
-        let detail = upstreamErrorDetail(from: body)
-        guard !detail.isEmpty else {
-            return "Upstream returned status \(statusCode)"
-        }
-        return "Upstream returned status \(statusCode): \(detail)"
-    }
-
-    private func upstreamErrorDetail(from body: String) -> String {
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "" }
-
-        if let data = trimmed.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let message = nestedErrorMessage(in: json) {
-                return truncatedUpstreamErrorDetail(message)
-            }
-        }
-
-        return truncatedUpstreamErrorDetail(trimmed)
-    }
-
-    private func nestedErrorMessage(in json: [String: Any]) -> String? {
-        if let error = json["error"] as? [String: Any] {
-            for key in ["message", "detail", "code", "type"] {
-                if let value = error[key] as? String,
-                   !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return value
-                }
-            }
-        }
-
-        for key in ["message", "detail", "error"] {
-            if let value = json[key] as? String,
-               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return value
-            }
-        }
-        return nil
-    }
-
-    private func truncatedUpstreamErrorDetail(_ detail: String) -> String {
-        SensitiveTextSanitizer.sanitize(detail, maxCharacters: 600)
     }
 }
